@@ -302,6 +302,24 @@ def npc_card(view: dict, cfg: dict) -> list[Image.Image]:
     return r.render_rows(rows, title=f"NPC · {npc.get('name', '')}")
 
 
+def act_card(view: dict, cfg: dict) -> list[Image.Image]:
+    r = _mk(cfg)
+    rows = []
+    rows.append(PillRow(r, view.get("action_pill", "行动")))
+    rows.append(_para(r, view.get("narration", ""), color=r.t.text,
+                      margin=(6, 8, 0, 6)))
+    changes = view.get("changes") or []
+    if changes:
+        rows.append(EmptyRow(r, 4))
+        rows.append(TagRow(r, changes))
+    wname = view.get("world_name", "")
+    if wname:
+        rows.append(EmptyRow(r, 2))
+        rows.append(_para(r, f"行动发生地 · 《{wname}》", size=int(r.font_size * 0.72),
+                          color=r.t.text_muted))
+    return r.render_rows(rows, title=view.get("action_name", "行动"))
+
+
 # ══════════════════════════ 统一渲染入口 ══════════════════════════
 def render_views(views: list[dict], cfg: dict) -> list[Image.Image]:
     """把 game 层产出的 view dict 批量渲染为图片。"""
@@ -320,6 +338,8 @@ def render_views(views: list[dict], cfg: dict) -> list[Image.Image]:
             out += interact_card(v, cfg)
         elif t == "npc":
             out += npc_card(v, cfg)
+        elif t == "act":
+            out += act_card(v, cfg)
     return out
 
 
@@ -343,9 +363,18 @@ def help_card(cfg: dict, sub_prefix: str = "分身") -> list[Image.Image]:
             f"{sub_prefix} 与 @群友 [互动方式/自由行动…] — 和别人的分身交朋友(或结仇)",
             f"{sub_prefix} npc <名字> <想做什么> — 找当前世界的NPC搭话",
         ]),
+        sec("⚡ 主动行动(能动起来)", [
+            f"{sub_prefix} 练习 <练什么…> — 修习/训练,精进一门技艺或属性",
+            f"{sub_prefix} 健身 / 打工 — 锻炼体魄 · 打零工赚金币",
+            f"{sub_prefix} 打怪 <目标…> — 去危险地带猎杀怪物(高风险高回报)",
+            f"{sub_prefix} 冒险 <自由描述…> — 想做什么都不设限,由世界与性格决定走向",
+            "行动会消耗体力(每天限次),属性/金币/心情随之起落,还小概率触发机缘彩蛋",
+        ]),
         sec("🌀 世界的边界", [
             "世界有小概率发生变动——全员被卷进另一个世界!",
             f"{sub_prefix} 定义世界 <名称> <描述…> — 把你设定的世界写进世界书(等待降临)",
+            f"{sub_prefix} 添加NPC <名>|职业|性格|钩子 — 给(当前)世界安插一位NPC",
+            f"{sub_prefix} NPC列表 / 删除NPC <名字> — 管理这些住民",
             f"{sub_prefix} 穿越世界 <编号/名称> — 只能去「穿越过」的世界",
             f"{sub_prefix} 世界 / 世界列表 — 查看当前世界与世界书",
         ]),

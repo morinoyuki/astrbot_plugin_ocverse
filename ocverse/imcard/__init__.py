@@ -7,6 +7,7 @@
 
 from .engine import ChatRenderer, Row, TooManyPages, render_narrative
 from .cards import (
+    act_card,
     event_card,
     fortune_card,
     help_card,
@@ -38,6 +39,7 @@ __all__ = [
     "morning_card",
     "interact_card",
     "npc_card",
+    "act_card",
     "help_card",
     "roster_card",
 ]

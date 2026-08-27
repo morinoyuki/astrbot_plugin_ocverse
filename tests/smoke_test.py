@@ -23,7 +23,7 @@ from PIL import Image, ImageDraw  # noqa: E402
 
 from ocverse.db import Database  # noqa: E402
 from ocverse.embedder import HashEmbedder  # noqa: E402
-from ocverse.game import Game, day_key_of  # noqa: E402
+from ocverse.game import Game, GameError, day_key_of  # noqa: E402
 from ocverse.imcard import (  # noqa: E402
     fortune_card,
     help_card,
@@ -97,6 +97,13 @@ MORNING_JSON = {
     "watch": "拾荒猫十三最近在舰队区出没,当心踩到猫尾巴",
 }
 
+ACT_JSON = {
+    "narration": "你咬着牙把这一套练完,酸痛里透着踏实。临下工,在旧排气管里摸出一枚发锈的齿轮币,权当彩头。",
+    "effects": {"mood": 4, "exp": 12, "gold": 20, "attrs": {"force": 2}},
+    "memory": "在齿轮区认真训练了一天,还顺手捞到一枚旧齿轮。",
+}
+
+
 
 def fake_llm(system: str, user: str) -> str:
     if "生成一个新世界" in user:
@@ -115,6 +122,8 @@ def fake_llm(system: str, user: str) -> str:
         return json.dumps(MORNING_JSON, ensure_ascii=False)
     if "核心记忆" in user:
         return json.dumps({"cores": ["总在雾天收集奇怪的车票", "和老铁是换过故事的朋友"]}, ensure_ascii=False)
+    if "执行行动" in user:
+        return json.dumps(ACT_JSON, ensure_ascii=False)
     raise AssertionError("fake_llm 未覆盖的调用: " + user[:60])
 
 
@@ -221,6 +230,47 @@ async def main():
     assert db.get_rel("g1", "u1", "u2") == v["rel"]
     ok += 1; print("✓ 群友互动(羁绊)")
 
+    # 5.5 主动行动(练习/健身/打工/打怪/冒险)+ 概率机缘 + 每日上限
+    game.cfg = lambda k, d=None: {**CFG, "action_max_per_day": 2}.get(k, d)
+    _st = db.get_char("g1", "u1").stamina
+    va = await game.act("g1", "u1", "健身", "加练100个俯卧撑")
+    assert va["type"] == "act" and va["ok_llm"] and va["changes"]
+    assert db.get_char("g1", "u1").stamina < _st  # 扣了体力
+    imgs = render_views([va], CFG)
+    assert imgs, "行动卡片渲染失败"
+    ok += 1; print("✓ 主动行动(健身)消耗体力并渲染")
+
+    vc = await game.act("g1", "u1", "冒险", "摸进灯塔抄旧笔记")
+    assert vc["type"] == "act"
+    try:
+        await game.act("g1", "u1", "打怪")  # 第3次:超每日上限
+        raise AssertionError("每日行动上限未生效")
+    except GameError:
+        pass
+    db.update_char("g1", "u1", stamina=5)
+    try:
+        await game.act("g1", "u1", "打工")  # 体力不足
+        raise AssertionError("体力不足未被拦截")
+    except GameError:
+        pass
+    ok += 1; print("✓ 主动行动:每日上限 + 体力门槛")
+
+    # 5.6 世界NPC自定义(添加/重名/列表/删除)
+    wname, npc = await game.add_npc("g1", "u1", "豆包", "茶馆小二", "话痨,爱打听", "她知道码头每一桩八卦")
+    assert npc["name"] == "豆包"
+    cur = db.cur_world("g1")
+    assert any(n["name"] == "豆包" for n in cur.npcs)
+    try:
+        await game.add_npc("g1", "u1", "豆包", "复读机", "重复", "重复")
+        raise AssertionError("重名NPC未被拦截")
+    except GameError:
+        pass
+    w, npcs = game.list_npcs("g1")
+    assert any(n["name"] == "豆包" for n in npcs)
+    _w, rm = game.del_npc("g1", "u1", "豆包")
+    assert rm == "豆包" and not any(n["name"] == "豆包" for n in db.cur_world("g1").npcs)
+    ok += 1; print("✓ 世界NPC:添加/重名拦截/列表/删除")
+
     # 6. NPC 互动
     v = await game.npc_interact("g1", "u2", "老铁", "想打听雾码头的规矩")
     assert "老铁" in v["npc"]["name"] and v["reply"]
@@ -286,6 +336,7 @@ async def main():
                                           db.cur_world("g1").id, CFG)
     cards["log"] = log_card(db.recent_logs("g1", "u1", 10), 1, 1, "阿凛 的人生日志", CFG, {"u1": "阿凛"})
     cards["fortune"] = fortune_card(game.fortune("u1", "阿凛"), CFG)
+    cards["act"] = render_views([va], CFG)
     cards["morning"] = render_views([{"type": "morning", "gid": "g1", "world_name": "锈海城",
                                       "brief": MORNING_JSON["brief"], "watch": MORNING_JSON["watch"]}], CFG)
     cards["arrive"] = render_views([await game.world_shift("g1")], CFG)

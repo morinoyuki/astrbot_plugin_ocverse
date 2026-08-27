@@ -863,6 +863,138 @@ class OcversePlugin(Star):
         if chain:
             yield event.chain_result(chain)
 
+    # ═══════════════════════════ 指令:主动行动 ═══════════════════════════
+    async def _run_act(self, event, act_key: str, *aliases) -> list:
+        """执行一次主动行动,返回卡片链。"""
+        gid = self._need_gid(event)
+        self._char_of(event)
+        detail = self._rest(event, *aliases).strip()
+        async with self._glock(gid):
+            v = await self.game.act(gid, self._uid(event), act_key, detail)
+        return self._chain(render_views([v], self._card_cfg()))
+
+    @oc.command("练习", alias={"训练", "train", "practice"})
+    @_guard
+    async def cmd_practice(self, event: AstrMessageEvent):
+        """分身 练习 <想练什么…> - 主动修习/训练,精进一门手艺(耗体力)"""
+        chain = await self._run_act(event, "练习", "练习", "训练", "train", "practice")
+        if chain:
+            yield event.chain_result(chain)
+
+    @oc.command("健身", alias={"fitness", "锻炼"})
+    @_guard
+    async def cmd_fitness(self, event: AstrMessageEvent):
+        """分身 健身 [附加描述…] - 锻炼体魄,强健力量/敏捷(耗体力)"""
+        chain = await self._run_act(event, "健身", "健身", "锻炼", "fitness")
+        if chain:
+            yield event.chain_result(chain)
+
+    @oc.command("打工", alias={"work", "赚钱"})
+    @_guard
+    async def cmd_work(self, event: AstrMessageEvent):
+        """分身 打工 <做什么…> - 打份零工赚金币(耗体力)"""
+        chain = await self._run_act(event, "打工", "打工", "赚钱", "work")
+        if chain:
+            yield event.chain_result(chain)
+
+    @oc.command("打怪", alias={"fight", "狩猎"})
+    @_guard
+    async def cmd_fight(self, event: AstrMessageEvent):
+        """分身 打怪 <目标…> - 去危险地带猎杀怪物,搏战利品与名声(风险行动)"""
+        chain = await self._run_act(event, "打怪", "打怪", "狩猎", "fight")
+        if chain:
+            yield event.chain_result(chain)
+
+    @oc.command("冒险", alias={"行动"})
+    @_guard
+    async def cmd_adventure(self, event: AstrMessageEvent):
+        """分身 冒险 <自由行动描述…> - 完全自定义的主动行动(风险,回报与危险并存)"""
+        gid = self._need_gid(event)
+        self._char_of(event)
+        detail = self._rest(event, "冒险", "行动").strip()
+        if not detail:
+            lines = [
+                "你可以主动行动,让角色推进故事。现成的行动:",
+                "· 分身 练习 <练什么> — 修习技艺,精进属性(耗体力)",
+                "· 分身 健身 — 锻炼体魄(力量/敏捷)",
+                "· 分身 打工 — 打零工赚金币",
+                "· 分身 打怪 - 去危险地带挑战怪物(高风险高回报)",
+                "",
+                "· 分身 冒险 <自由描述> — 比如:去雾夜集市帮绫婆婆看摊 / 溜进灯塔偷看旧笔记",
+                "每次行动消耗体力,一天限次。属性/金币/心情都会随之起落!",
+            ]
+            yield event.plain_result("\n".join(lines))
+            return
+        async with self._glock(gid):
+            v = await self.game.act(gid, self._uid(event), "冒险", detail)
+        imgs = render_views([v], self._card_cfg())
+        chain = self._chain(imgs)
+        if chain:
+            yield event.chain_result(chain)
+
+    # ═══════════════════════════ 指令:世界NPC自定义 ═══════════════════════════
+    def _parse_npc_fields(self, rest: str) -> tuple[str, str, str, str, str]:
+        """解析 名字|职业|性格|钩子 与可选 [世界] 标签。"""
+        world_ref = ""
+        if rest.rstrip().endswith("]"):
+            m = re.match(r"^(.*)\s*\[([^\[\]]+)\]\s*$", rest, re.S)
+            if m:
+                rest = m.group(1).strip()
+                world_ref = m.group(2).strip()
+        parts = [p.strip() for p in rest.split("|")]
+        name = parts[0] if parts else ""
+        role = parts[1] if len(parts) > 1 else ""
+        persona = parts[2] if len(parts) > 2 else ""
+        hook = parts[3] if len(parts) > 3 else ""
+        if world_ref and not name:
+            name = parts[0] if parts else ""
+        return name, role, persona, hook, world_ref
+
+    @oc.command("添加NPC", alias={"添加npc", "add_npc", "new_npc", "新npc"})
+    @_guard
+    async def cmd_add_npc(self, event: AstrMessageEvent):
+        """分身 添加NPC <名字>|职业|性格|钩子 [世界名] - 给世界添加一位NPC"""
+        gid = self._need_gid(event)
+        rest = self._rest(event, "添加NPC", "添加npc", "add_npc", "new_npc", "新npc")
+        name, role, persona, hook, world_ref = self._parse_npc_fields(rest)
+        async with self._glock(gid):
+            wname, npc = await self.game.add_npc(gid, self._uid(event), name, role, persona, hook, world_ref)
+        yield event.plain_result(
+            f"🗣 已在《{wname}》添加NPC「{npc['name']}」\n"
+            f"职业:{npc['role']} | 性格:{npc['persona']} | 钩子:{npc['hook']}"
+            f"\n可用「分身 npc {npc['name']} <想做什么>」与TA互动"
+        )
+
+    @oc.command("删除NPC", alias={"删除npc", "del_npc"})
+    @_guard
+    async def cmd_del_npc(self, event: AstrMessageEvent):
+        """分身 删除NPC <名字> [世界名] - 从(当前/指定)世界移除一位NPC"""
+        gid = self._need_gid(event)
+        name, _role, _p, _h, world_ref = self._parse_npc_fields(self._rest(event, "删除NPC", "删除npc", "del_npc"))
+        async with self._glock(gid):
+            wname, rm = self.game.del_npc(gid, self._uid(event), name, world_ref)
+        yield event.plain_result(f"🕳《{wname}》的NPC「{rm}」已默默离开了。")
+
+    @oc.command("NPC列表", alias={"npcs", "npc列表"})
+    @_guard
+    async def cmd_npc_list(self, event: AstrMessageEvent):
+        """分身 NPC列表 [世界名] - 看目前有哪些NPC"""
+        gid = self._need_gid(event)
+        _n, _r, _p, _h, world_ref = self._parse_npc_fields(self._rest(event, "NPC列表", "npcs", "npc列表"))
+        w, npcs = self.game.list_npcs(gid, world_ref)
+        if not npcs:
+            yield event.plain_result(f"《{w.name}》还没有NPC。用「分身 添加NPC 名字|职业|性格|钩子」添加一位吧。")
+            return
+        lines = [f"《{w.name}》的住民:({len(npcs)}位)", ""]
+        for i, n in enumerate(npcs, 1):
+            lines.append(f"{i}. {n.get('name','?')} — {n.get('role','居民')}")
+            lines.append(f"   人格:{n.get('persona','')}")
+            if n.get('hook'):
+                lines.append(f"   钩子:{n.get('hook','')}")
+        lines.append("")
+        lines.append("用「分身 npc <名字> <想做什么>」勾搭任意一位。")
+        yield event.plain_result("\n".join(lines))
+
     # ═══════════════════════════ 指令:记忆/杂项 ═══════════════════════════
     @oc.command("日志", alias={"log", "人生日志"})
     @_guard

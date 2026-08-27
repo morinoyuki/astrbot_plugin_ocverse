@@ -100,7 +100,10 @@
     "description": "记忆语义向量后端",
     "type": "string",
     "default": "astrbot",
-    "options": ["astrbot", "hash"],
+    "options": [
+      "astrbot",
+      "hash"
+    ],
     "hint": "astrbot = 使用 AstrBot 内置的 Embedding 提供商(在 WebUI 的「服务商」中配置一个 Embedding 类型提供商即可,自动选用第一个可用的);hash = 零依赖哈希词向量(纯 Python,不吃 NAS 性能)。后端失败自动回退哈希"
   },
   "morning_brief": {
@@ -130,5 +133,17 @@
     "type": "int",
     "default": 30,
     "hint": "防止无限膨胀,超出后新人建角会被婉拒"
+  },
+  "action_max_per_day": {
+    "description": "每人每日主动行动次数上限",
+    "type": "int",
+    "default": 4,
+    "hint": "练习/健身/打工/打怪/冒险等主动行动会消耗体力且每天限次,防止刷属性"
+  },
+  "max_npcs_per_world": {
+    "description": "每个世界NPC数量上限",
+    "type": "int",
+    "default": 20,
+    "hint": "玩家可为世界手动添加的NPC数上限,防止无限堆人"
   }
 }

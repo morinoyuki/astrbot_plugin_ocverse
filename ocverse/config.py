@@ -70,13 +70,52 @@ DEFAULT_INTERACTIONS = [
     ("合影", "拉对方拍一张合照留念"),
 ]
 
-# 时间线 kind -> 中文标记
+# ── 主动行动预设 (玩家可以主动执行) ────────────────
+# 每种行动: 体力消耗 / safe|risk / 给 LLM 的行动描述模板
+# safe  = 日常型,奖励丰俭有别、不致命
+# risk  = 风险型,可能大丰收也可能付出代价
+ACTIONS = {
+    "练习": {
+        "name": "练习",
+        "stamina_cost": 18,
+        "kind": "safe",
+        "prompt": "专注于练习/修习一项手艺、剑术、法术或技能,努力精进。",
+    },
+    "健身": {
+        "name": "健身",
+        "stamina_cost": 28,
+        "kind": "safe",
+        "prompt": "去训练场/健身房认真地锻炼体魄,挥汗如雨。",
+    },
+    "打工": {
+        "name": "打工",
+        "stamina_cost": 30,
+        "kind": "safe",
+        "prompt": "在当前世界找一份零工或差事干一整天,换取金币报酬。",
+    },
+    "打怪": {
+        "name": "打怪",
+        "stamina_cost": 35,
+        "kind": "risk",
+        "prompt": "去野外/副本/危险地带狩猎或挑战怪物魔物,搏取战利品与名声。",
+    },
+    "冒险": {
+        "name": "冒险",
+        "stamina_cost": 20,
+        "kind": "risk",
+        "prompt": "去做一件高风险高回报的冒险/探索之事(内容由玩家补充)。",
+    },
+}
+
+
+# 默认互动方式 (mode -> 描述模板 hint, 会拼进 LLM 判定)
 LOG_KINDS = {
     "create": "✦ 入世",
     "levelup": "⇧ 升级",
     "event": "◈ 遭遇",
     "interaction": "❖ 互动",
     "npc": "☂ NPC",
+    "act": "⚙ 行动",
     "shift": "🌀 世界变动",
     "travel": "✈ 穿越抵达",
     "arrive": "☁ 抵达",

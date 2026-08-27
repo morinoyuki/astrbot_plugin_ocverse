@@ -156,7 +156,7 @@ class Game:
                   backstory=(backstory or "").strip()[:400])
         # 初始六维:由背景气质做个轻量倾斜,其余随机 18~40
         text = f"{name} {' '.join(ch.tags)} {ch.backstory}"
-        h = zlib.crc32(text.encode()) 
+        h = zlib.crc32(text.encode())
         random.seed(h)
         w0 = self.db.cur_world(gid)
         wname = w0.name if w0 else "未知之地"
@@ -566,6 +566,130 @@ class Game:
             "changes": changes,
             "ok_llm": r.ok,
         }
+
+    # ══════════════ 主动行动(练习/健身/打工/打怪/冒险)══════════════
+    async def act(self, gid: str, uid: str, act_key: str, detail: str = "") -> dict:
+        """玩家主动行动一次。act_key: 预设施名或'冒险'(自定义)。消耗体力+每日次数,概率触发机缘奖励。"""
+        ch = self.db.get_char(gid, uid)
+        if not ch:
+            raise GameError("你还没有创建分身,先「分身 创建 名字」")
+        world = self.db.cur_world(gid)
+        if not world:
+            raise GameError("世界尚未初始化,管理员:「分身 初始化世界」")
+        preset = C.ACTIONS.get(act_key) or C.ACTIONS["冒险"]
+        name = preset["name"]
+        cost = int(preset["stamina_cost"])
+        if ch.stamina < cost:
+            raise GameError(f"体力不足({ch.stamina}/{cost}),先去歇歇,或等明天体力恢复")
+        day = self._day_key()
+        flags = dict(ch.flags or {})
+        fkey = f"_acts:{day}"
+        n = int(flags.get(fkey, 0))
+        limit = self._cfgi("action_max_per_day", 4)
+        if n >= limit:
+            raise GameError(f"今天的行动力用完了(每天最多 {limit} 次主动行动),明天再战!")
+        flags[fkey] = n + 1
+        detail = (detail or "").strip()
+        action_hint = preset["prompt"]
+        if detail:
+            action_hint = f"{action_hint} 玩家补充:{detail[:80]}"
+        mems = await self.mem.related(gid, f"{ch.name} {name} {detail}", uid=uid)
+        r = await self.brain.resolve_action(
+            world=world, char=ch, action_name=name, detail=action_hint,
+            kind=preset["kind"], memories=mems,
+        )
+        effects = dict(r.data.get("effects") or {})
+        # 概率机缘:一小部分概率额外捡到金币彩蛋
+        luck = random.random()
+        bonus_note = ""
+        if luck < 0.13:
+            plus = random.randint(15, 50)
+            ch.gold += plus
+            bonus_note = f"机缘·金币+{plus}"
+        ch.stamina = max(0, ch.stamina - cost)
+        ch.flags = flags
+        effects.pop("stamina", None)   # 体力由系统预设扣除,不叠加 LLM 的体力副作用
+        changes = self._apply_effects(ch, effects)
+        changes.insert(0, f"体力-{cost}")
+        if bonus_note:
+            changes.append(bonus_note)
+        mem_text = r.data.get("memory") or f"{ch.name}在《{world.name}》「{name}」:{detail[:30]}"
+        await self.mem.remember(gid, uid, "char", mem_text, ref=f"act:{_now():.0f}")
+        await self.mem.remember(gid, "", "world",
+                                f"《{world.name}》{ch.name}「{name}」:{(r.data.get('narration') or '')[:60]}")
+        self.db.append_log(gid, uid, "act",
+                           f"{ch.name}「{name}」:{(r.data.get('narration') or '')[:90]} ", world.name)
+        return {
+            "type": "act",
+            "gid": gid,
+            "char_name": ch.name,
+            "action_name": name,
+            "action_pill": f"{ch.name} · {name}",
+            "world_name": world.name,
+            "narration": r.data.get("narration", ""),
+            "changes": changes,
+            "ok_llm": r.ok,
+        }
+
+    # ══════════════ 世界 NPC 自定义(添加/删除/列表)══════════════
+    def _find_world(self, gid: str, ref: str = "") -> World:
+        """按名字找世界;留空则取当前世界。"""
+        target = self.db.cur_world(gid)
+        if ref:
+            found = None
+            for w in self.db.list_worlds(gid):
+                if w.name == ref or ref in w.name:
+                    found = w
+                    break
+            if not found:
+                names = "、".join(w.name for w in self.db.list_worlds(gid)) or "无"
+                raise GameError(f"找不到叫「{ref}」的世界。现有:{names}")
+            target = found
+        elif not target:
+            raise GameError("世界尚未初始化,管理员:「分身 初始化世界」")
+        return target
+
+    async def add_npc(self, gid: str, uid: str, name: str, role: str, persona: str,
+                      hook: str, world_ref: str = "") -> tuple[str, dict]:
+        """给(当前/指定)世界添加一位 NPC。返回 (world_name, npc)。"""
+        ch = self.db.get_char(gid, uid)
+        if not ch:
+            raise GameError("创建分身后才能为世界添加NPC(你是这个世界的住民了)")
+        w = self._find_world(gid, world_ref)
+        if not name:
+            raise GameError("格式:分身 添加NPC <名字> | 职业 | 性格 | 钩子")
+        npcs = list(w.npcs or [])
+        if any((n.get("name") or "") == name for n in npcs if isinstance(n, dict)):
+            raise GameError(f"《{w.name}》已有叫「{name}」的NPC")
+        if len(npcs) >= self._cfgi("max_npcs_per_world", 20):
+            raise GameError("这个世界NPC太多了,给新面孔留点位置吧")
+        npc = {
+            "name": name[:12],
+            "role": (role or "居民")[:20],
+            "persona": (persona or "性格未详")[:40],
+            "hook": (hook or "身上藏着一段待发掘的故事")[:40],
+        }
+        npcs.append(npc)
+        self.db.update_world(w.id, npcs=npcs)
+        self.db.append_log(gid, uid, "misc", f"{ch.name} 在《{w.name}》安插了一位NPC「{name}」", w.name)
+        await self.mem.remember(gid, "", "world", f"《{w.name}》新来了一位NPC「{name}」({npc['role']})")
+        return w.name, npc
+
+    def del_npc(self, gid: str, uid: str, name: str, world_ref: str = "") -> tuple[str, str]:
+        """删除 (指定/当前)世界的 NPC。返回 (world_name, 删除的NPC名)。"""
+        if not self.db.get_char(gid, uid):
+            raise GameError("你还没有创建分身")
+        w = self._find_world(gid, world_ref)
+        npcs = [n for n in (w.npcs or []) if isinstance(n, dict)]
+        if not any(n.get("name") == name for n in npcs):
+            names = "、".join(w.npc_names()) or "无"
+            raise GameError(f"《{w.name}》里没有叫「{name}」的NPC。现有:{names}")
+        self.db.update_world(w.id, npcs=[n for n in npcs if n.get("name") != name])
+        return w.name, name
+
+    def list_npcs(self, gid: str, world_ref: str = "") -> tuple[World, list[dict]]:
+        w = self._find_world(gid, world_ref)
+        return w, [n for n in (w.npcs or []) if isinstance(n, dict)]
 
     # ══════════════ 世界变动 / 穿越 ══════════════
     async def world_shift(self, gid: str, manual: bool = False) -> dict:

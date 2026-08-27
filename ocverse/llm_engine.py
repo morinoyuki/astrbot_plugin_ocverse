@@ -318,6 +318,41 @@ class Brain:
             )
         return BrainResult(False, dict(FB_INTERACT))
 
+    # ════════════════ 主动行动(练习/健身/打工/打怪/冒险)════════════════
+    async def resolve_action(self, *, world, char, action_name: str, detail: str,
+                             kind: str = "safe", memories: list[str] | None = None) -> BrainResult:
+        """结算一次玩家主动行动。kind: safe | risk(风险型可失败/受伤)。"""
+        attrs_names = "、".join(f"{k}={v}" for k, v in ATTR_NAMES.items())
+        risk_line = (
+            "【风险型】结果起伏大:可能大丰收,也可能受伤/掉属性/破财。数值范围可以放得更宽。"
+            if kind == "risk"
+            else "【日常型】大体都往好的方向走,只是奖励丰俭有别;不要给毁灭性打击。"
+        )
+        mem = "\n".join(memories[:4]) if memories else ""
+        sys = self.style
+        user = (
+            f"世界:《{world.name}》[{world.genre}] {world.desc}\n"
+            f"角色:{char.persona_line()},背景:{char.backstory[:100] or '未详'},"
+            f"当前体力{char.stamina}/心情{char.mood}/金币{char.gold}\n"
+            f"今日于《{world.name}》执行行动:「{action_name}」{detail[:80]}\n{risk_line}\n{mem}\n"
+            "请写出这次行动的经过与结果(60-120字,结合世界设定与角色性格,有画面感与余味)。\n"
+            "属性键:" + attrs_names + "。日常型行动要消耗的体力由系统扣除,效果表里不要写体力。\n"
+            '严格输出 JSON:{"narration":"行动叙述",'
+            '"effects":{"mood":±,"gold":±,"exp":0-25,"stamina":±(仅风险型可写),"attrs":{"force":0}},"memory":"一句话存档"}\n'
+            "数值克制:日常型大部分±5~15、exp 5~18、金币±0~40;风险型可到 exp 5~30、金币 0~80,失败时给负反馈但不要毁灭性打击。"
+        )
+        d = await self._ask_json(sys, user)
+        if d and d.get("narration"):
+            return BrainResult(
+                True,
+                {
+                    "narration": str(d["narration"])[:280],
+                    "effects": _clamp_effects(d.get("effects") or {}),
+                    "memory": str(d.get("memory", ""))[:120],
+                },
+            )
+        return BrainResult(False, dict(FB_ACT))
+
     # ════════════════ NPC 对话 ════════════════
     async def npc_chat(self, *, world, npc: dict, char, action: str,
                        memories: list[str] | None = None) -> BrainResult:
@@ -421,10 +456,16 @@ FB_INTERACT = {
 }
 
 FB_NPC = {
-    "reply": "……哦?稀客。这镇子上的事,知道得越少,睡得越香。",
+    "reply": "……嗯?稀客。这镇子上的事,知道得越少,睡得越香。",
     "narration": "对方摆了摆手,没再多说。",
     "effects": {"exp": 3},
     "memory": "与一位本地人打过照面。",
+}
+
+FB_ACT = {
+    "narration": "你把这件事认真做下来,出了不少汗,也攒下了一点东西。唯有自己清楚这份收获。",
+    "effects": {"exp": 8, "mood": 2},
+    "memory": "认真行动了一天,略有进境。",
 }
 
 FB_ARRIVE = {
