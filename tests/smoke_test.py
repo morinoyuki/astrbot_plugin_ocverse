@@ -255,21 +255,42 @@ async def main():
         pass
     ok += 1; print("✓ 主动行动:每日上限 + 体力门槛")
 
-    # 5.6 世界NPC自定义(添加/重名/列表/删除)
-    wname, npc = await game.add_npc("g1", "u1", "豆包", "茶馆小二", "话痨,爱打听", "她知道码头每一桩八卦")
-    assert npc["name"] == "豆包"
-    cur = db.cur_world("g1")
-    assert any(n["name"] == "豆包" for n in cur.npcs)
+    # 5.6 世界NPC自定义:仅在用户自设世界可改;系统世界被拦截
+    sys_w = db.cur_world("g1")  # 当前为 LLM 生成的锈海城
     try:
-        await game.add_npc("g1", "u1", "豆包", "复读机", "重复", "重复")
+        await game.add_npc("g1", "u1", "豆包", "茶馆小二", "话痨", "知道码头八卦")
+        raise AssertionError("系统生成世界不应允许添加NPC")
+    except GameError as e:
+        assert "系统生成" in str(e) or "无法手动改动" in str(e), e
+    ok += 1; print("✓ 系统生成世界:拦截添加NPC")
+
+    # 先定义一个用户自设世界,才能增删NPC
+    await game.define_world("g1", "u1", "我的镇", "每个人的梦在湖底共享,船灯靠往来的梦供能。")
+    uw = [w for w in db.list_worlds("g1") if w.name == "我的镇"]
+    if not uw:
+        uw = [w for w in db.list_worlds("g1") if w.source == "user"]
+    uw = uw[-1]
+    wname, npc = await game.add_npc("g1", "u1", "豆包", "茶馆小二", "话痨,爱打听", "她知道码头每一桩八卦", uw.name)
+    assert npc["name"] == "豆包"
+    uwr = next(x for x in db.list_worlds("g1") if x.id == uw.id)
+    assert any(n["name"] == "豆包" for n in uwr.npcs)
+    try:
+        await game.add_npc("g1", "u1", "豆包", "复读机", "重复", "重复", uw.name)
         raise AssertionError("重名NPC未被拦截")
     except GameError:
         pass
-    w, npcs = game.list_npcs("g1")
+    try:
+        await game.del_npc("g1", "u1", "老铁")  # 当前系统世界删除也应被拦截
+        raise AssertionError("系统生成世界不应允许删除NPC")
+    except GameError:
+        pass
+    ok += 1; print("✓ 用户自设世界:添加/重名拦截/系统世界删除拦截")
+
+    w, npcs = game.list_npcs("g1", uw.name)
     assert any(n["name"] == "豆包" for n in npcs)
-    _w, rm = game.del_npc("g1", "u1", "豆包")
-    assert rm == "豆包" and not any(n["name"] == "豆包" for n in db.cur_world("g1").npcs)
-    ok += 1; print("✓ 世界NPC:添加/重名拦截/列表/删除")
+    _w, rm = game.del_npc("g1", "u1", "豆包", uw.name)
+    assert rm == "豆包" and not any(n["name"] == "豆包" for n in next(x for x in db.list_worlds("g1") if x.id == uw.id).npcs)
+    ok += 1; print("✓ 世界NPC:用户自设世界内 列表/删除")
 
     # 6. NPC 互动
     v = await game.npc_interact("g1", "u2", "老铁", "想打听雾码头的规矩")
@@ -279,8 +300,12 @@ async def main():
     # 7. 定义自设世界 → 世界变动选中它 → 解锁
     await game.define_world("g1", "u2", "糖果星云", "由糖晶构成的星云,漂浮着糖果风暴与奶油行星。")
     pend = [w for w in db.list_worlds("g1") if not w.visited]
-    assert len(pend) == 1 and pend[0].name == "糖果星云"
-    # 把群的用户世界份额拉满,确保变动走自设世界分支
+    pend_names = [w.name for w in pend]
+    assert "糖果星云" in pend_names
+    # 让系统足迹只选中「糖果星云」:给变动随机一个确定种子到这里
+    # (把已有自设世界“我的镇”也标记为已到达以避免被两次选中)
+    myw = next(w for w in db.list_worlds("g1") if w.name == "我的镇")
+    db.update_world(myw.id, visited=1)    # 把群的用户世界份额拉满,确保变动走自设世界分支
     db.update_group("g1", user_world_share=100)
     v = await game.world_shift("g1")
     assert v["type"] == "arrive" and db.cur_world("g1").name == "糖果星云", v

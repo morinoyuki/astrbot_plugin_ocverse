@@ -632,6 +632,15 @@ class Game:
         }
 
     # ══════════════ 世界 NPC 自定义(添加/删除/列表)══════════════
+    def _require_user_world(self, w: World) -> str:
+        """只有用户自设世界(source=='user')才允许改动其 NPC。返回世界名。"""
+        if w.source != "user":
+            raise GameError(
+                f"《{w.name}》是由系统生成的世界,住民由造世者注定,无法手动改动。"
+                "只有用「分身 定义世界」亲手创造的世界,才能添加/修改NPC。"
+            )
+        return w.name
+
     def _find_world(self, gid: str, ref: str = "") -> World:
         """按名字找世界;留空则取当前世界。"""
         target = self.db.cur_world(gid)
@@ -656,6 +665,7 @@ class Game:
         if not ch:
             raise GameError("创建分身后才能为世界添加NPC(你是这个世界的住民了)")
         w = self._find_world(gid, world_ref)
+        self._require_user_world(w)
         if not name:
             raise GameError("格式:分身 添加NPC <名字> | 职业 | 性格 | 钩子")
         npcs = list(w.npcs or [])
@@ -680,6 +690,7 @@ class Game:
         if not self.db.get_char(gid, uid):
             raise GameError("你还没有创建分身")
         w = self._find_world(gid, world_ref)
+        self._require_user_world(w)
         npcs = [n for n in (w.npcs or []) if isinstance(n, dict)]
         if not any(n.get("name") == name for n in npcs):
             names = "、".join(w.npc_names()) or "无"

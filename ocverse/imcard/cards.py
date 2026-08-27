@@ -373,7 +373,7 @@ def help_card(cfg: dict, sub_prefix: str = "分身") -> list[Image.Image]:
         sec("🌀 世界的边界", [
             "世界有小概率发生变动——全员被卷进另一个世界!",
             f"{sub_prefix} 定义世界 <名称> <描述…> — 把你设定的世界写进世界书(等待降临)",
-            f"{sub_prefix} 添加NPC <名>|职业|性格|钩子 — 给(当前)世界安插一位NPC",
+            f"{sub_prefix} 添加NPC <名>|职业|性格|钩子 — 只能在你自设的世界安插NPC",
             f"{sub_prefix} NPC列表 / 删除NPC <名字> — 管理这些住民",
             f"{sub_prefix} 穿越世界 <编号/名称> — 只能去「穿越过」的世界",
             f"{sub_prefix} 世界 / 世界列表 — 查看当前世界与世界书",
