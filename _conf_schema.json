@@ -1,0 +1,134 @@
+{
+  "provider_id": {
+    "description": "LLM 提供商 (留空用会话默认)",
+    "type": "string",
+    "_special": "select_provider",
+    "hint": "本插件所有生成(世界观/事件/判定/互动/NPC)走该模型。留空则使用当前会话默认模型;后台定时事件将使用最近一次会话的默认模型",
+    "default": ""
+  },
+  "style_prompt": {
+    "description": "文风附加提示词 (可选)",
+    "type": "string",
+    "hint": "拼进所有系统提示词尾部,定制叙事口味。例如:「轻小说吐槽风」「克苏鲁低语感」。默认内置:简洁生动、有画面感、不水字数",
+    "default": ""
+  },
+  "default_world_hint": {
+    "description": "默认世界观灵感 (未初始化时自动建的世界)",
+    "type": "string",
+    "hint": "管理员从未执行「分身 初始化世界」时,首次有人建角色会自动落一个内置低魔世界(不耗 LLM)。此项可换掉自动世界的名字/风味描述",
+    "default": ""
+  },
+  "event_min": {
+    "description": "每人/每群每日随机事件下限",
+    "type": "int",
+    "default": 2,
+    "hint": "每天在活跃时段内随机时刻触发的事件数下限(群级)"
+  },
+  "event_max": {
+    "description": "每人/每群每日随机事件上限",
+    "type": "int",
+    "default": 4,
+    "hint": "事件数上限;实际数量在 min~max 间随机。事件会挑群里的角色触发"
+  },
+  "day_rollover_hour": {
+    "description": "每日日切时刻 (小时)",
+    "type": "int",
+    "default": 4,
+    "hint": "每天凌晨该时刻生成并持久化当天的全部计划(晨报/主动+被动事件/世界变动骰),同时进行每日重置(体力恢复)。4 点前的时段仍算前一天"
+  },
+  "passive_event_share_percent": {
+    "description": "被动事件比例 (%)",
+    "type": "int",
+    "default": 40,
+    "hint": "每日事件中被动事件的比例:主动事件到计划时刻自动推送;被动事件只埋下伏笔,等群里有动静时引爆(事件会冲着说话的人来);活跃时段结束仍无人引爆则转为主动兜底推送"
+  },
+  "active_start_hour": {
+    "description": "活跃时段开始 (小时)",
+    "type": "int",
+    "default": 9,
+    "hint": "事件与晨报只会安排在该小时之后"
+  },
+  "active_end_hour": {
+    "description": "活跃时段结束 (小时)",
+    "type": "int",
+    "default": 23,
+    "hint": "事件最晚安排时刻(不含)。世界变动同样只落在此窗口内"
+  },
+  "shift_daily_percent": {
+    "description": "世界变动概率 (%/日)",
+    "type": "int",
+    "default": 8,
+    "hint": "每天生成日程时按此概率安排一次「世界变动」。触发时全员穿越:按比例选用户自设世界或 LLM 自动生成新世界"
+  },
+  "user_world_share_percent": {
+    "description": "变动时选中用户自设世界的比例 (%)",
+    "type": "int",
+    "default": 40,
+    "hint": "发生世界变动时,以该概率从「已定义但尚未到达」的用户自设世界中随机挑一个落地;否则 LLM 现场生成全新世界。自设世界一旦到达即解锁自由穿越"
+  },
+  "travel_cooldown_hours": {
+    "description": "自由穿越冷却 (小时)",
+    "type": "int",
+    "default": 6,
+    "hint": "群级冷却:穿越过的世界才能自由穿越,两次自由穿越之间需间隔该时长"
+  },
+  "manual_shift_cooldown_hours": {
+    "description": "手动触发变动冷却 (小时)",
+    "type": "int",
+    "default": 24,
+    "hint": "管理员「分身 触发变动」的最小间隔"
+  },
+  "event_expire_minutes": {
+    "description": "事件抉择超时 (分钟)",
+    "type": "int",
+    "default": 45,
+    "hint": "超时无人「选择」的事件自动平淡收场,不影响属性"
+  },
+  "memory_top_k": {
+    "description": "注入 LLM 的相关回忆条数",
+    "type": "int",
+    "default": 6,
+    "hint": "生成事件/判定/互动前,用轻量语义向量检索记忆库,取最相关的 N 条注入上下文"
+  },
+  "core_memory_threshold": {
+    "description": "核心记忆压缩阈值 (条)",
+    "type": "int",
+    "default": 40,
+    "hint": "单个角色的长期记忆超过该数量时,自动把最旧的一批压缩成几条「核心记忆」(需 LLM)"
+  },
+  "embedding_backend": {
+    "description": "记忆语义向量后端",
+    "type": "string",
+    "default": "astrbot",
+    "options": ["astrbot", "hash"],
+    "hint": "astrbot = 使用 AstrBot 内置的 Embedding 提供商(在 WebUI 的「服务商」中配置一个 Embedding 类型提供商即可,自动选用第一个可用的);hash = 零依赖哈希词向量(纯 Python,不吃 NAS 性能)。后端失败自动回退哈希"
+  },
+  "morning_brief": {
+    "description": "每日晨报",
+    "type": "bool",
+    "default": true,
+    "hint": "活跃时段开始时发布一张「晨报」卡片(世界近况/今日氛围/谁该当心),由 LLM 生成"
+  },
+  "card_theme": {
+    "description": "聊天卡片主题",
+    "type": "string",
+    "default": "dark",
+    "hint": "dark / light / ocean / sakura,IM 聊天截图风格(纯 Pillow 渲染,无浏览器)"
+  },
+  "card_width": {
+    "description": "卡片画布宽度 (px)",
+    "type": "int",
+    "default": 1024
+  },
+  "card_font_size": {
+    "description": "卡片正文字号 (px)",
+    "type": "int",
+    "default": 34
+  },
+  "max_chars_per_group": {
+    "description": "每群角色数上限",
+    "type": "int",
+    "default": 30,
+    "hint": "防止无限膨胀,超出后新人建角会被婉拒"
+  }
+}
