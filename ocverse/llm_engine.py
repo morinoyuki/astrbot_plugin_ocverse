@@ -291,7 +291,7 @@ class Brain:
             "name": str(d.get("name", "无名世界"))[:16],
             "genre": str(d.get("genre", "未知"))[:20],
             "atmosphere": str(d.get("atmosphere", ""))[:60],
-            "desc": str(d.get("desc", desc_hint or "一个尚未展开的世界。"))[:300],
+            "desc": str(d.get("desc", desc_hint or "一个尚未展开的世界。"))[:1200],
             "rules": [str(x)[:40] for x in (d.get("rules") or [])][:4],
             "features": [str(x)[:50] for x in (d.get("features") or [])][:5],
             "npcs": npcs,
@@ -308,7 +308,7 @@ class Brain:
         if name:
             w["name"] = name
         if desc:
-            w["desc"] = desc[:300]
+            w["desc"] = desc[:1200]
         w["source"] = source if source != "llm" else "default"
         # 离线/失败降级世界也要有一套默认基建/主线/地块,保证功能可用不是空壳
         w.setdefault("infra", [
@@ -826,7 +826,7 @@ class Brain:
         attr_line = "、".join(f"{k}({_nm})" for k, _nm in ATTRS)
         user = (
             "群友在创建 OC 分身,给了一段口语化的设定描述。请整理成结构化人设,不要编造描述里没有的信息:\n"
-            f"【设定描述】{text[:600]}\n"
+            f"【设定描述】{text[:1200]}\n"
             "1. gender:性别,没提就填「保密」;\n"
             "2. tags:性格标签数组,2~6个,每个2~6字(如:腹黑/重情义/独来独往/生人勿近),从性格与行事风格中提炼;\n"
             "3. backstory:第三人称背景设定一段话(60~150字),把外观、穿着、身份、能力、经历等信息全部合并进去,语句通顺;\n"
@@ -847,7 +847,7 @@ class Brain:
             return BrainResult(True, {
                 "gender": gender,
                 "tags": tags,
-                "backstory": str(d.get("backstory") or "").strip()[:600],
+                "backstory": str(d.get("backstory") or "").strip()[:1200],
                 "attrs": attrs,
             })
         return BrainResult(False, {})
@@ -876,7 +876,7 @@ class Brain:
         if tags:
             out["tags"] = tags
         if str(d.get("backstory") or "").strip():
-            out["backstory"] = str(d["backstory"]).strip()[:600]
+            out["backstory"] = str(d["backstory"]).strip()[:1200]
         return BrainResult(bool(out), out)
 
     async def parse_npc(self, name: str, text: str, world=None,
