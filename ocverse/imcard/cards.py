@@ -59,15 +59,20 @@ def _para(r, text, color=None, size=None, margin=(0, 4, 0, 4), bold=False):
 
 def _dialogue_rows(r, dialogues, self_name: str = "") -> list:
     """IM 聊天体多轮对话气泡(轻小说式你来我往)。
-    self_name 为 POV 角色名:匹配到的发言者气泡靠右(自己),其余靠左(对方)。"""
-    rows = []
+    self_name 为 POV 角色名:匹配到的发言者气泡靠右(自己),其余靠左(对方)。
+    防独角戏:只有一个说话人的对话不渲染(宁缺毋滥,由叙述承担表达)。"""
+    dlg = []
     for d in (dialogues or [])[:8]:
         sp = str(d.get("speaker") or "").strip()
         tx = str(d.get("text") or "").strip()
-        if not sp or not tx:
-            continue
+        if sp and tx:
+            dlg.append((sp[:12], tx[:100]))
+    if len({sp for sp, _ in dlg}) < 2:
+        return []
+    rows = []
+    for sp, tx in dlg:
         rows.append(DialogueRow(
-            r, speaker=sp[:12], spans=[md.Span(tx[:100])],
+            r, speaker=sp, spans=[md.Span(tx)],
             is_self=bool(self_name and sp == self_name),
         ))
     return rows

@@ -281,12 +281,17 @@ class Brain:
             f"TA选择了「{pick['label']}」({pick.get('hint','')})。\n"
             "请结算:叙述结果(轻小说式,120~220字:画面感+心理细节+余味或小转折),并给出数值变化。"
             "属性键:" + attrs_names + "。\n"
-            '"dialogues":事件中人物的多轮对话(2~5轮,IM聊天体,每条"speaker"≤8字、"text"≤60字,可含(动作)小注)。\n'
+            '"dialogues":事件中人物的多轮对话(2~5轮,IM聊天体,每条"speaker"≤8字、"text"≤60字,可含(动作)小注)。'
+            "禁止独角戏:至少 2 个不同说话人,事件人物必须开口回应,不能只有主角一人自说自话。\n"
             '严格输出 JSON:{"narration":"结果叙述","dialogues":[{"speaker":"","text":""}],"effects":{"stamina":±,"mood":±,"gold":±,"exp":0-25,'
             '"attrs":{"force":0}}, "memory":"第三人称一句话记忆存档"}\n'
             "数值克制:大部分±5~15,exp 5~20;负反馈不要毁灭性。memory 一句话,30字内。"
         )
-        d = await self._ask_json(sys, user)
+        d = await self._ask_fixed_dialogues(
+            sys, user,
+            counterpart=str(event.get("npc") or ""),  # 事件涉及NPC时(payload里的名字),必须开口
+            limit=5,
+        )
         if d and d.get("narration"):
             return BrainResult(
                 True,
@@ -318,13 +323,18 @@ class Brain:
             f"互动:「{mode}」" + (f"({detail[:60]})" if detail else "") + "\n"
             "写出这段互动的走向与结果(轻小说式,120~220字:画面感+心理细节+余味)。\n"
             '"dialogues":A与B你来我往的多轮对话(3~6轮,IM聊天体,每条"speaker"用角色名,'
-            '"text"≤60字,口语化,可含(动作/神态)小注),要能看出性格碰撞。\n'
+            '"text"≤60字,口语化,可含(动作/神态)小注),要能看出性格碰撞。'
+            "禁止独角戏:A 与 B 都必须开口,不能只有一人说个不停。\n"
             "若是消费类互动(请客/送礼),务必扣 A 的金币并给 B 心情。\n"
             '严格输出 JSON:{"narration":"互动叙述","a_effects":{"mood":±,"gold":±,"exp":0-10,'
             '"stamina":±,"attrs":{}}, "b_effects":{"mood":±,"gold":±},'
             ' "rel_delta":-20~20整数, "memory":"一句话存档"}'
         )
-        d = await self._ask_json(sys, user)
+        d = await self._ask_fixed_dialogues(
+            sys, user,
+            counterpart=(b.name if b else (str(npc.get("name", "")) if npc else "")),
+            limit=6,
+        )
         if d and d.get("narration"):
             return BrainResult(
                 True,
@@ -358,13 +368,14 @@ class Brain:
             f"今日于《{world.name}》执行行动:「{action_name}」{detail[:80]}\n{risk_line}\n{mem}\n"
             "请写出这次行动的经过与结果(轻小说式,100~200字:画面感+心理细节+余味),"
             "结合世界设定与角色性格。\n"
-            '"dialogues":行动中与场景人物的简短对话(2~4轮,IM聊天体,每条"speaker"≤8字、"text"≤60字)。\n'
+            '"dialogues":行动中与场景人物的简短对话(2~4轮,IM聊天体,每条"speaker"≤8字、"text"≤60字)。'
+            "禁止独角戏:至少 2 个不同说话人,场景人物必须回应,不能只有角色自说自话。\n"
             "属性键:" + attrs_names + "。日常型行动要消耗的体力由系统扣除,效果表里不要写体力。\n"
             '严格输出 JSON:{"narration":"行动叙述",'
             '"effects":{"mood":±,"gold":±,"exp":0-25,"stamina":±(仅风险型可写),"attrs":{"force":0}},"memory":"一句话存档"}\n'
             "数值克制:日常型大部分±5~15、exp 5~18、金币±0~40;风险型可到 exp 5~30、金币 0~80,失败时给负反馈但不要毁灭性打击。"
         )
-        d = await self._ask_json(sys, user)
+        d = await self._ask_fixed_dialogues(sys, user, limit=4)
         if d and d.get("narration"):
             return BrainResult(
                 True,
@@ -388,11 +399,14 @@ class Brain:
             f"{chr(10).join(memories[:4]) if memories else ''}\n"
             "与角色进行多轮对话(3~6轮,IM聊天体:dialogues 数组,每条 speaker ≤8字、text ≤60字,"
             "口语化,保留人设与神秘感,NPC与角色交替说话),再用旁白收尾(60~120字),可给微小奖励。\n"
+            "禁止独角戏:NPC 与角色都必须开口,不能只有角色一人说个不停。\n"
             '严格输出 JSON:{"reply":"NPC最核心的一句台词","dialogues":[{"speaker":"","text":""}],'
             '"narration":"旁白收尾",'
             '"effects":{"mood":±,"gold":±,"exp":0-8}, "memory":"一句话存档"}'
         )
-        d = await self._ask_json(sys, user)
+        d = await self._ask_fixed_dialogues(
+            sys, user, counterpart=str(npc.get("name", "")), limit=6,
+        )
         if d and d.get("reply"):
             return BrainResult(
                 True,
@@ -584,10 +598,11 @@ class Brain:
             f"角色完成了今日小任务:「{quest[:30]}」\n"
             f"{mem}\n"
             "写一段简短的完成叙述(轻小说式,60~120字,轻松日常,有画面感,有余味),并给一点小奖励。\n"
-            '"dialogues":完成过程中的一小段对话(1~3轮,IM聊天体,每条"speaker"≤8字、"text"≤40字)。\n'
+            '"dialogues":完成过程中的一小段对话(1~3轮,IM聊天体,每条"speaker"≤8字、"text"≤40字)。'
+            "禁止独角戏:至少 2 个不同说话人,不能只有角色一人说话。\n"
             '严格输出 JSON:{"narration":"完成叙述","effects":{"exp":5~12,"gold":0~20,"mood":0~3}}'
         )
-        d = await self._ask_json(self.style, user)
+        d = await self._ask_fixed_dialogues(self.style, user, limit=3)
         if d and d.get("narration"):
             eff_in = d.get("effects") if isinstance(d.get("effects"), dict) else {}
             eff = {}
@@ -615,6 +630,46 @@ class Brain:
             if sp and tx:
                 out.append({"speaker": sp, "text": tx})
         return out
+
+    @staticmethod
+    def _dialogue_ok(dialogues: list, counterpart: str = "") -> bool:
+        """对话有效性(防独角戏):
+        - 空 = 没有对话,不算独角戏(卡片回退纯叙述);
+        - 说话人 < 2 = 独角戏;
+        - counterpart 给定时,其名字必须出现过(双向包含容错,如"老铁(铁匠)")。"""
+        if not dialogues:
+            return True
+        speakers = {str(d.get("speaker") or "").strip() for d in dialogues}
+        speakers.discard("")
+        if len(speakers) < 2:
+            return False
+        if counterpart and not any(counterpart in s or s in counterpart for s in speakers):
+            return False
+        return True
+
+    async def _ask_fixed_dialogues(self, system: str, user: str, counterpart: str = "",
+                                   limit: int = 6) -> dict | None:
+        """带独角戏守卫的 JSON 请求:
+        若返回的 dialogues 是独角戏(只有一个说话人/对方没开口),带着纠正提示重试一次;
+        重试后仍是独角戏则丢弃对话(宁缺毋滥,由叙述承担表达)。返回解析后的 dict 或 None。"""
+        d = await self._ask_json(system, user)
+        dlg = self._norm_dialogues(d.get("dialogues"), limit) if isinstance(d, dict) else []
+        if dlg and not self._dialogue_ok(dlg, counterpart=counterpart):
+            user2 = (
+                user
+                + "\n\n【重要纠正】你刚才的对话是独角戏(只有一个说话人),这不合要求。"
+                  "重写 dialogues:必须你来我往、至少 2 个不同的说话人"
+                + (f",且「{counterpart}」必须开口回应" if counterpart else "")
+                + ";每条 speaker≤8字、text≤60字。"
+            )
+            d2 = await self._ask_json(system, user2)
+            if isinstance(d2, dict) and d2.get("narration"):
+                dlg2 = self._norm_dialogues(d2.get("dialogues"), limit)
+                if dlg2 and self._dialogue_ok(dlg2, counterpart=counterpart):
+                    return d2  # 纠正成功
+                d2["dialogues"] = []  # 仍独角戏 → 丢弃对话,不渲染独角戏
+                return d2
+        return d
 
 
 # ════════════════ fallback 模板(离线可玩)════════════════

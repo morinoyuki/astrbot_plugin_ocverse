@@ -243,6 +243,46 @@ async def main():
     assert c4.attrs["intellect"] > 30, c4.attrs  # 关键词兑底:「智慧/博学」→ 智力加权
     ok += 1; print("✓ 初始属性按设定分配(AI attrs / 关键词兑底)")
 
+    # 2.7 对话防独角戏:检测 → 带纠正提示重试 → 对方开口
+    calls = {"n": 0}
+
+    def mono_llm(system, user):
+        calls["n"] += 1
+        payload = {
+            "narration": "对方没有搭话。",
+            "dialogues": [{"speaker": "阿凛", "text": "喂?"}, {"speaker": "阿凛", "text": "有人吗?"}],
+            "effects": {},
+        }
+        if calls["n"] >= 2:  # 第二次(带纠正提示)才给出对方回应
+            payload = {
+                "narration": "对方终于搭话了。",
+                "dialogues": [{"speaker": "阿凛", "text": "喂?"},
+                              {"speaker": "老徐", "text": "叫啥?"}],
+                "effects": {},
+            }
+        return json.dumps(payload, ensure_ascii=False)
+
+    b_mono = Brain(raw_call=mono_llm)
+    r = await b_mono.resolve_action(world=db.cur_world("g1"), char=db.get_char("g1", "u1"),
+                                    action_name="冒险", detail="找人搭话")
+    assert calls["n"] == 2, calls  # 独角戏被检测并重试
+    assert any(d["speaker"] == "老徐" for d in r.data["dialogues"]), r.data["dialogues"]
+
+    # 重试仍独角戏 → 丢弃对话,不渲染独角戏
+    calls2 = {"n": 0}
+
+    def mono_llm2(system, user):
+        calls2["n"] += 1
+        return json.dumps({"narration": "独角戏叙述。",
+                           "dialogues": [{"speaker": "阿凛", "text": "自言自语"}], "effects": {}},
+                          ensure_ascii=False)
+
+    b_mono2 = Brain(raw_call=mono_llm2)
+    r2 = await b_mono2.resolve_action(world=db.cur_world("g1"), char=db.get_char("g1", "u1"),
+                                      action_name="冒险", detail="")
+    assert calls2["n"] == 2 and r2.data["dialogues"] == [], r2.data["dialogues"]
+    ok += 1; print("✓ 对话防独角戏:检测→纠正重试→仍独角戏则丢弃不渲染")
+
     # 3. 凌晨4点日切 + 运势
     from datetime import datetime as _dt
     assert day_key_of(_dt(2024, 1, 1, 3, 59), 4) == "2023-12-31"
