@@ -136,7 +136,8 @@ class OcversePlugin(Star):
             get_func = getattr(llm_tools, "get_func", None) if llm_tools else None
             if get_func is None:
                 return []
-            from astrbot.core.agent.tool import ToolSet  # noqa: 延迟导入,版本不含时走 except
+            # 延迟导入,版本不含时走 except 分支
+            from astrbot.core.agent.tool import ToolSet
             ts = ToolSet()
             for name in ("web_search_tavily", "web_search", "search_web",
                          "tavily_extract_web_page", "webpage_extract"):
@@ -484,6 +485,7 @@ class OcversePlugin(Star):
         if not armed:
             return
         item = armed[0]
+        yield event.plain_result("⏳ 似乎有什么正朝这里靠近…")
         try:
             async with self._glock(gid):
                 # 二次确认(等待锁期间可能已被别的消息引爆)
@@ -496,9 +498,12 @@ class OcversePlugin(Star):
                 chain = self._chain(imgs)
                 if chain:
                     yield event.chain_result(chain)
+            else:
+                yield event.plain_result("(雾气散去,似乎什么也没有发生…)")
         except GameError as e:
             self.game.mark_done(gid, item)  # 无法触发(如无人建角色)也收掉伏笔
             logger.warning(f"ocverse: 被动事件引爆失败: {e}")
+            yield event.plain_result(f"❌ {e}")
 
     # ═══════════════════════════ 工具方法 ═══════════════════════════
     def _err(self, e: Exception) -> str:
@@ -537,6 +542,7 @@ class OcversePlugin(Star):
         """分身 初始化世界 [世界观描述…] - 管理员铺设/重建群世界"""
         gid = self._need_gid(event)
         desc = self._rest(event, "初始化世界", "init_world", "设定世界")
+        yield event.plain_result("⏳ 正在铺设世界(可能联网搜索),请稍候…")
         async with self._glock(gid):
             v = await self.game.init_world(gid, desc or None, self._uid(event))
         imgs = render_views([v], self._card_cfg())
@@ -557,6 +563,7 @@ class OcversePlugin(Star):
             yield event.plain_result("⚠ 将为全群重新生成一个世界(角色与记忆保留)。确认请再发一次「分身 重开世界」")
             return
         self._confirm.pop(key, None)
+        yield event.plain_result("⏳ 正在重铸世界,请稍候…")
         async with self._glock(gid):
             v = await self.game.init_world(gid, None, self._uid(event))
         imgs = render_views([v], self._card_cfg())
@@ -585,6 +592,7 @@ class OcversePlugin(Star):
     async def cmd_trigger_shift(self, event: AstrMessageEvent):
         """分身 触发变动 - 管理员立即触发一次世界变动(有冷却)"""
         gid = self._need_gid(event)
+        yield event.plain_result("⏳ 正在触发世界变动,请稍候…")
         async with self._glock(gid):
             v = await self.game.world_shift(gid, manual=True)
         imgs = render_views([v], self._card_cfg())
@@ -660,6 +668,7 @@ class OcversePlugin(Star):
             desc = (toks[1] if len(toks) > 1 else "").strip()
             gender, tags, backstory, llm_attrs = "保密", [], "", None
             if desc:
+                yield event.plain_result("⏳ 正在整理人设,请稍候…")
                 r = await self.brain.parse_persona(desc)
                 if r.ok:
                     gender, tags, backstory = r.data["gender"], r.data["tags"], r.data["backstory"]
@@ -776,6 +785,7 @@ class OcversePlugin(Star):
             yield event.plain_result(f"✅ 已更新「{ch.name}」的{f}")
             return
         # 自由描述:让 AI 判断要改哪些字段(合并保留未提及的旧设定)
+        yield event.plain_result("⏳ 正在整理修改内容,请稍候…")
         r = await self.brain.parse_persona_update(
             cur_name=ch.name, cur_gender=ch.gender, cur_tags=list(ch.tags or []),
             cur_backstory=ch.backstory or "", text=content)
@@ -892,6 +902,7 @@ class OcversePlugin(Star):
         if not target:
             yield event.plain_result("格式:分身 穿越世界 <编号/名称>(编号见「分身 世界列表」)")
             return
+        yield event.plain_result("⏳ 正在开启穿越之门,请稍候…")
         async with self._glock(gid):
             v = await self.game.travel(gid, self._uid(event), target.strip())
         imgs = render_views([v], self._card_cfg())
@@ -909,6 +920,7 @@ class OcversePlugin(Star):
         if not n:
             yield event.plain_result("格式:分身 选择 <编号>(事件卡片里的 1/2/3)")
             return
+        yield event.plain_result("⏳ 正在结算抉择,请稍候…")
         async with self._glock(gid):
             v = await self.game.choose(gid, self._uid(event), int(n) - 1)
         imgs = render_views([v], self._card_cfg())
@@ -939,6 +951,7 @@ class OcversePlugin(Star):
                 mode, detail = "自由互动", raw
         else:
             mode, detail = "打招呼", self._default_mode_hint["打招呼"]
+        yield event.plain_result("⏳ 正在演绎这段互动,请稍候…")
         async with self._glock(gid):
             v = await self.game.interact(gid, self._uid(event), target, mode, detail)
         imgs = render_views([v], self._card_cfg())
@@ -994,6 +1007,7 @@ class OcversePlugin(Star):
             names = "、".join(w.npc_names()) if w else "无"
             yield event.plain_result(f"格式:分身 npc <名字> <想做什么>\n当前世界NPC:{names}")
             return
+        yield event.plain_result("⏳ 正在与NPC对话,请稍候…")
         async with self._glock(gid):
             v = await self.game.npc_interact(gid, self._uid(event), parts[0][:12], parts[1][:80])
         imgs = render_views([v], self._card_cfg())
@@ -1002,46 +1016,43 @@ class OcversePlugin(Star):
             yield event.chain_result(chain)
 
     # ═══════════════════════════ 指令:主动行动 ═══════════════════════════
-    async def _run_act(self, event, act_key: str, *aliases) -> list:
-        """执行一次主动行动,返回卡片链。"""
+    async def _run_act(self, event, act_key: str, *aliases):
+        """执行一次主动行动:先回执提示(推演耗时),再渲染结果卡片链。"""
         gid = self._need_gid(event)
         self._char_of(event)
+        yield event.plain_result("⏳ 正在推演这次行动,请稍候…")
         detail = self._rest(event, *aliases).strip()
         async with self._glock(gid):
             v = await self.game.act(gid, self._uid(event), act_key, detail)
-        return self._chain(render_views([v], self._card_cfg()))
+        yield event.chain_result(self._chain(render_views([v], self._card_cfg())))
 
     @oc.command("练习", alias={"训练", "train", "practice"})
     @_guard
     async def cmd_practice(self, event: AstrMessageEvent):
         """分身 练习 <想练什么…> - 主动修习/训练,精进一门手艺(耗体力)"""
-        chain = await self._run_act(event, "练习", "练习", "训练", "train", "practice")
-        if chain:
-            yield event.chain_result(chain)
+        async for r in self._run_act(event, "练习", "练习", "训练", "train", "practice"):
+            yield r
 
     @oc.command("健身", alias={"fitness", "锻炼"})
     @_guard
     async def cmd_fitness(self, event: AstrMessageEvent):
         """分身 健身 [附加描述…] - 锻炼体魄,强健力量/敏捷(耗体力)"""
-        chain = await self._run_act(event, "健身", "健身", "锻炼", "fitness")
-        if chain:
-            yield event.chain_result(chain)
+        async for r in self._run_act(event, "健身", "健身", "锻炼", "fitness"):
+            yield r
 
     @oc.command("打工", alias={"work", "赚钱"})
     @_guard
     async def cmd_work(self, event: AstrMessageEvent):
         """分身 打工 <做什么…> - 打份零工赚金币(耗体力)"""
-        chain = await self._run_act(event, "打工", "打工", "赚钱", "work")
-        if chain:
-            yield event.chain_result(chain)
+        async for r in self._run_act(event, "打工", "打工", "赚钱", "work"):
+            yield r
 
     @oc.command("打怪", alias={"fight", "狩猎"})
     @_guard
     async def cmd_fight(self, event: AstrMessageEvent):
         """分身 打怪 <目标…> - 去危险地带猎杀怪物,搏战利品与名声(风险行动)"""
-        chain = await self._run_act(event, "打怪", "打怪", "狩猎", "fight")
-        if chain:
-            yield event.chain_result(chain)
+        async for r in self._run_act(event, "打怪", "打怪", "狩猎", "fight"):
+            yield r
 
     @oc.command("冒险", alias={"行动"})
     @_guard
@@ -1063,6 +1074,7 @@ class OcversePlugin(Star):
             ]
             yield event.plain_result("\n".join(lines))
             return
+        yield event.plain_result("⏳ 正在推演这次冒险,请稍候…")
         async with self._glock(gid):
             v = await self.game.act(gid, self._uid(event), "冒险", detail)
         imgs = render_views([v], self._card_cfg())
@@ -1118,6 +1130,7 @@ class OcversePlugin(Star):
             self.game._require_user_world(w)           # 系统世界直接拦截,不浪费 AI 调用
             role, persona, hook = "", "", ""
             if desc:
+                yield event.plain_result("⏳ 正在整理NPC档案,请稍候…")
                 r = await self.brain.parse_npc(name, desc, world=w, npc_names=w.npc_names())
                 if r.ok:
                     role, persona, hook = r.data["role"], r.data["persona"], r.data["hook"]
@@ -1215,6 +1228,7 @@ class OcversePlugin(Star):
         """分身 任务 - 领取/查看今天的简单小任务(AI 按世界生成)"""
         gid = self._need_gid(event)
         ch = self._char_of(event)
+        yield event.plain_result("⏳ 正在生成今日任务,请稍候…")
         async with self._glock(gid):
             qs = await self.game.ensure_quests(gid, self._uid(event))
         open_qs = [q for q in qs if q["state"] == "open"]
@@ -1241,6 +1255,7 @@ class OcversePlugin(Star):
         if not n:
             yield event.plain_result("格式:分身 交任务 <编号>(编号见「分身 任务」)")
             return
+        yield event.plain_result("⏳ 正在结算任务,请稍候…")
         async with self._glock(gid):
             v = await self.game.complete_quest(gid, self._uid(event), int(n) - 1)
         imgs = render_views([v], self._card_cfg())
