@@ -671,12 +671,19 @@ class OcversePlugin(Star):
             return
         name = parts[0][:12]
         desc = (parts[1] if len(parts) > 1 else "").strip()
+        existing = self.db.get_char(gid, npc_uid(gid, name))
         async with self._glock(gid):
             ch = self.game.define_npc_char(gid, name, desc, self._uid(event))
-        yield event.plain_result(
-            f"🎭 一位生活角色「{ch.name}」融入了群世界!\n"
-            "用「/分身 找 <名字> <方式>」与TA互动(可能发展关系/告白求婚);"
-            "「/分身 设置头像 <名字>」+ 图片可给它换头像。")
+        if existing:
+            yield event.plain_result(
+                f"✏️ 已重设生活角色「{ch.name}」的设定(等级/财产/羁绊/关系保留)。\n"
+                "用「/分身 看 <名字>」查看新设定。")
+        else:
+            yield event.plain_result(
+                f"🎭 一位生活角色「{ch.name}」融入了群世界!\n"
+                "用「/分身 找 <名字> <方式>」与TA互动(可能发展关系/告白求婚);"
+                "「/分身 设置头像 <名字>」+ 图片可给它换头像。\n"
+                "设定写错了?再发一次「/分身 定义角色 <名字> <新描述>」即可重设,不会丢失等级/关系。")
 
     @filter.permission_type(PermissionType.ADMIN)
     @oc.command("触发变动", alias={"world_shift", "手动变动"})
@@ -938,7 +945,7 @@ class OcversePlugin(Star):
     def _render_profile(self, v: dict) -> list:
         """把 _profile_view 的 view 渲染成角色卡图片列表(统一渲染入口)。"""
         return profile_card(v["ch"], v["world"], v["rels"], v["mems"], self._card_cfg(),
-                            rel_stage_labels=v.get("rel_labels"),
+                            rel_names=v.get("rel_labels"),
                             extra_badges=v.get("badges") or [])
 
     async def _yield_profile(self, event, gid: str, uid: str, extra: str = ""):
@@ -956,6 +963,28 @@ class OcversePlugin(Star):
         gid = self._need_gid(event)
         self._char_of(event)
         async for r in self._yield_profile(event, gid, self._uid(event)):
+            yield r
+
+    @oc.command("看", alias={"look", "情报", "查看", "卡片"})
+    @_guard
+    async def cmd_look(self, event: AstrMessageEvent):
+        """分身 看 <名字> - 查看任意角色(玩家分身或持久生活角色)的完整角色卡"""
+        gid = self._need_gid(event)
+        rest = self._rest(event, "看", "look", "情报", "查看", "卡片").strip()
+        if not rest:
+            yield event.plain_result(
+                "格式:/分身 看 <名字>\n"
+                "可查看任意角色(包括持久生活角色)的属性/羁绊/记忆。常见生活角色见「/分身 名册」。")
+            return
+        # 先按真人玩家名字找,再按生活角色名字找
+        target = self.db.get_char(gid, rest)
+        if target is None:
+            target = self.db.get_char(gid, npc_uid(gid, rest))
+        if target is None:
+            names = "、".join(c.name for c in self.db.list_chars(gid)) or "无"
+            yield event.plain_result(f"找不到叫「{rest}」的角色。现有居民:{names}")
+            return
+        async for r in self._yield_profile(event, gid, target.uid):
             yield r
 
     @oc.command("名册", alias={"roster", "居民"})

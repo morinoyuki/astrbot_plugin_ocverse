@@ -443,7 +443,7 @@ def help_card(cfg: dict, sub_prefix: str = "/分身") -> list[Image.Image]:
             f"{sub_prefix} 世界 / 世界列表 — 查看当前世界与世界书",
         ]),
         sec("🧩 其他", [
-            f"{sub_prefix} 我的卡片 / 名册 / 日志 [页] / 回忆 <关键词> / 运势",
+            f"{sub_prefix} 我的卡片 / 看 <名字> / 名册 / 日志 [页] / 回忆 <关键词> / 运势",
             f"{sub_prefix} 编辑 性别|性格|背景 <内容> 或自由描述 · 删除角色 · 互动菜单",
             f"{sub_prefix} 事件频率 min max · 变动概率 p · 触发变动 / 重开世界 (管理员)",
         ]),

@@ -489,7 +489,13 @@ async def check_life_char():
     await game.world_shift("g")
     after = db.get_char("g", lc.uid)
     assert after is not None and after.flags.get("traveler") == 1, "生活角色应随世界变动被卷入并获得traveler"
-    print("✓ 持久生活角色:定义/互动建立羁绊/世界变动卷入")
+    # 生活角色可查看完整角色卡(与玩家同款渲染)
+    from ocverse.imcard import profile_card
+    _ch = db.get_char("g", lc.uid)
+    _imgs = profile_card(_ch, db.cur_world("g"), [], ["绫波最近的一段经历"],
+                         {"card_width": 1024, "card_font_size": 34, "card_theme": "dark"})
+    assert _imgs and len(_imgs) >= 1, "生活角色角色卡应能渲染"
+    print("✓ 持久生活角色:定义/互动建立羁绊/世界变动卷入/可查看角色卡")
     db.close()
 
 

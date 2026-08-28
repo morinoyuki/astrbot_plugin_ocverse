@@ -221,13 +221,22 @@ class Game:
 
     def define_npc_char(self, gid: str, name: str, desc: str, by: str = "") -> Char:
         """定义一个群级持久的『生活角色』(不属于任何真人,跨世界存在)。
-        返回新角色;名字已被占用(玩家或已有np)则抛 GameError。"""
+        再次定义同名生活角色 = 重设其背景设定/性格标签,但保留等级、财产、羁绊、记忆与关系状态。
+        名字与真人玩家分身重名则拒绝。"""
         if not name:
             raise GameError("名字不能为空")
         if self.db.get_char(gid, name):
             raise GameError("这个名字已被占用")
-        if self.db.get_char(gid, npc_uid(gid, name)):
-            raise GameError("已有一位同名的生活角色")
+        existing = self.db.get_char(gid, npc_uid(gid, name))
+        if existing is not None:
+            # 已有同名生活角色 → 覆盖设定,保留经历
+            desc = (desc or "").strip() or "一名生活在这个群世界里的角色。"
+            existing.backstory = desc[:300]
+            existing.tags = ["生活角色"]
+            existing.gender = "保密"
+            self.db.upsert_char(existing)
+            self.db.append_log(gid, "", "misc", f"生活角色「{existing.name}」的设定被重新描述了")
+            return existing
         ch = Char(
             gid=gid, uid=npc_uid(gid, name), name=name[:12],
             gender="保密",
