@@ -1230,26 +1230,6 @@ class OcversePlugin(Star):
         if chain:
             yield event.chain_result(chain)
 
-    # ═══════════════════════════ 指令:关系系统 ═══════════════════════════
-    @oc.command("表白", alias={"告白", "confess"})
-    @_guard
-    async def cmd_confess(self, event: AstrMessageEvent):
-        """分身 表白 @TA - 好感≥85 确立恋人 / 65~84 单相思 / 不足被拒"""
-        gid = self._need_gid(event)
-        target = self._at_target(event)
-        if not target:
-            yield event.plain_result("格式:分身 表白 @TA\n好感≥85 确立恋人;65~84 单相思;不足会被拒绝(羁绊-10)")
-            return
-        self._char_of(event)
-        yield event.plain_result("⏳ 正在酝酿告白,请稍候…")
-        async with self._glock(gid):
-            v = await self.game.confess(gid, self._uid(event), target)
-        views = [v] + (v.pop("extra_views", []) or [])
-        imgs = render_views(views, self._card_cfg())
-        chain = self._chain(imgs)
-        if chain:
-            yield event.chain_result(chain)
-
     # ═══════════════════════════ 指令:每日小任务 ═══════════════════════════
     @oc.command("任务", alias={"quests", "quest"})
     @_guard
