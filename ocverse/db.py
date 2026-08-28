@@ -109,6 +109,17 @@ CREATE TABLE IF NOT EXISTS quests (
   created_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_quests_gud ON quests (gid, uid, day);
+CREATE TABLE IF NOT EXISTS kb (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  gid TEXT NOT NULL,
+  source TEXT DEFAULT '',
+  theme TEXT DEFAULT '',
+  kind TEXT DEFAULT 'work',
+  content TEXT,
+  vec BLOB,
+  created_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_kb_gid ON kb (gid);
 """
 
 
@@ -632,3 +643,30 @@ class Database:
         self._ex("DELETE FROM rels WHERE gid=? AND (a=? OR b=?)", (gid, uid, uid))
         self._ex("DELETE FROM events WHERE gid=? AND uid=? AND state='pending'", (gid, uid))
         self._ex("DELETE FROM quests WHERE gid=? AND uid=?", (gid, uid))
+
+    # ── 知识库(素材库:联网采集的著作/轻小说等,供所有生成功能注入) ──
+    def kb_add(self, gid: str, source: str, theme: str, kind: str, content: str,
+               vec: list[float]) -> int:
+        cur = self._ex(
+            "INSERT INTO kb (gid,source,theme,kind,content,vec,created_at) VALUES (?,?,?,?,?,?,?)",
+            (gid, (source or "")[:60], (theme or "")[:30], (kind or "work")[:12],
+             (content or "").strip()[:1500], _pack(vec), time.time()),
+        )
+        return int(cur.lastrowid)
+
+    def kb_rows(self, gid: str) -> list[dict]:
+        rows = self._ex("SELECT * FROM kb WHERE gid=? ORDER BY id", (gid,), "all")
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["vec"] = _unpack(d["vec"])
+            out.append(d)
+        return out
+
+    def kb_count(self, gid: str) -> int:
+        r = self._ex("SELECT COUNT(*) c FROM kb WHERE gid=?", (gid,), "one")
+        return int(r["c"])
+
+    def kb_sources(self, gid: str) -> list[str]:
+        rows = self._ex("SELECT source FROM kb WHERE gid=?", (gid,), "all")
+        return [r["source"] or "" for r in rows]

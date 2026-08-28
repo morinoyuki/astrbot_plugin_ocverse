@@ -124,6 +124,24 @@
     ],
     "hint": "astrbot = 使用 AstrBot 内置的 Embedding 提供商(在 WebUI 的「服务商」中配置一个 Embedding 类型提供商即可,自动选用第一个可用的);hash = 零依赖哈希词向量(纯 Python,不吃 NAS 性能)。后端失败自动回退哈希"
   },
+  "knowledge_collect_enabled": {
+    "description": "定时采集知识库素材",
+    "type": "bool",
+    "default": true,
+    "hint": "每天在计划任务中联网/LLM 采集轻小说、动漫、漫画等著作素材,存入群级知识库,供世界/事件/任务/对话等所有生成功能注入;未装搜索插件时自动用 LLM 自识提炼,不影响运行"
+  },
+  "knowledge_collect_daily": {
+    "description": "每群每日知识库采集条数",
+    "type": "int",
+    "default": 1,
+    "hint": "取值范围 0~3。每天每组入库的素材条数"
+  },
+  "knowledge_base_max": {
+    "description": "每群知识库存量上限",
+    "type": "int",
+    "default": 40,
+    "hint": "防止素材库无限膨胀,超出后不再新增"
+  },
   "morning_brief": {
     "description": "每日晨报",
     "type": "bool",

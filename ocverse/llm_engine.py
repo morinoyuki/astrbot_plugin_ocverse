@@ -151,7 +151,8 @@ class Brain:
     )
 
     async def gen_world(self, desc: str | None = None, avoid_names: list[str] | None = None,
-                        theme_hint: str = "") -> BrainResult:
+                        theme_hint: str = "",
+                        material: str = "") -> BrainResult:
         sys = self.style
         if desc:
             ref = desc
@@ -168,6 +169,7 @@ class Brain:
             f"严格输出 JSON,结构:{self._WORLD_SCHEMA}"
         )
         # 世界生成是低频操作,允许走联网增强通道(搜索工具)扩充知识
+        user = self._with_material(user, material)
         d = await self._ask_json(sys, user, use_tools=True)
         if d and d.get("name"):
             return BrainResult(True, self._norm_world(d, source="llm", desc_hint=desc))
@@ -225,7 +227,8 @@ class Brain:
 
     # ════════════════ 事件生成 ════════════════
     async def make_event(self, *, world, char=None, kind="solo", npc=None,
-                         memories: list[str] | None = None, ideas: list[str] | None = None) -> BrainResult:
+                         memories: list[str] | None = None, ideas: list[str] | None = None,
+                        material: str = "") -> BrainResult:
         """生成一次遭遇。char=None 时为全员群事件。"""
         role = (
             "这是全员都会被卷入的群事件,主角是『群里的众人』。"
@@ -251,6 +254,7 @@ class Brain:
             '"options":[{"label":"选项≤8字","hint":"后果暗示≤14字"},{"label":"","hint":""},{"label":"","hint":""}]}'
             "\n恰好3个选项,风格各异(稳健/冒险/离谱皆可)。"
         )
+        user = self._with_material(user, material)
         d = await self._ask_json(sys, user)
         if d and d.get("scene"):
             opts = []
@@ -289,6 +293,11 @@ class Brain:
         inter = len(ba & bb)
         return inter / max(1, min(len(ba), len(bb))) >= 0.6
 
+    def _with_material(self, user: str, material: str) -> str:
+        m = (material or "").strip()
+        if not m:
+            return user
+        return user + "\n" + m + "\n"
     def _too_similar(self, text: str, previous: list[str] | None) -> bool:
         t = (text or "").strip()
         if not t or not previous:
@@ -315,7 +324,8 @@ class Brain:
         return d
 
     async def resolve_event(self, *, world, char=None, event: dict, choice_idx: int,
-                            previous: list[str] | None = None) -> BrainResult:
+                            previous: list[str] | None = None,
+                        material: str = "") -> BrainResult:
         """结算一次选择。char=None(群事件)时叙述群体结果。"""
         who = char.persona_line() if char else "群里的众人"
         opts = event.get("options") or []
@@ -334,6 +344,7 @@ class Brain:
             "数值克制:大部分±5~15,exp 5~20;负反馈不要毁灭性。memory 一句话,30字内。"
         )
         user += self._previous_block(previous)
+        user = self._with_material(user, material)
         d = await self._ask_fixed_dialogues(
             sys, user,
             counterpart=str(event.get("npc") or ""),  # 事件涉及NPC时(payload里的名字),必须开口
@@ -356,7 +367,8 @@ class Brain:
     # ════════════════ 角色互动 ════════════════
     async def resolve_interaction(self, *, world, a, b=None, npc=None, mode: str,
                                   detail: str, rel_score: int, rel_stage: str = "",
-                                  previous: list[str] | None = None) -> BrainResult:
+                                  previous: list[str] | None = None,
+                        material: str = "") -> BrainResult:
         from .config import rel_label
 
         b_ps = ""
@@ -383,6 +395,7 @@ class Brain:
         )
         user += self._previous_block(previous)
         counterpart = b.name if b else (str(npc.get("name", "")) if npc else "")
+        user = self._with_material(user, material)
         d = await self._ask_fixed_dialogues(
             sys, user, counterpart=counterpart, limit=6,
         )
@@ -404,7 +417,8 @@ class Brain:
 
     # ════════════════ 主动行动(练习/健身/打工/打怪/冒险)════════════════
     async def resolve_action(self, *, world, char, action_name: str, detail: str,
-                             kind: str = "safe", memories: list[str] | None = None) -> BrainResult:
+                             kind: str = "safe", memories: list[str] | None = None,
+                        material: str = "") -> BrainResult:
         """结算一次玩家主动行动。kind: safe | risk(风险型可失败/受伤)。"""
         attrs_names = "、".join(f"{k}={v}" for k, v in ATTR_NAMES.items())
         risk_line = (
@@ -428,6 +442,7 @@ class Brain:
             '"effects":{"mood":±,"gold":±,"exp":0-25,"stamina":±(仅风险型可写),"attrs":{"force":0}},"memory":"一句话存档"}\n'
             "数值克制:日常型大部分±5~15、exp 5~18、金币±0~40;风险型可到 exp 5~30、金币 0~80,失败时给负反馈但不要毁灭性打击。"
         )
+        user = self._with_material(user, material)
         d = await self._ask_fixed_dialogues(sys, user, limit=4)
         if d and d.get("narration"):
             return BrainResult(
@@ -444,7 +459,8 @@ class Brain:
     # ════════════════ NPC 对话 ════════════════
     async def npc_chat(self, *, world, npc: dict, char, action: str,
                        memories: list[str] | None = None,
-                       previous: list[str] | None = None) -> BrainResult:
+                       previous: list[str] | None = None,
+                        material: str = "") -> BrainResult:
         sys = self.style
         user = (
             f"世界:《{world.name}》。NPC「{npc['name']}」({npc.get('role','')},{npc.get('persona','')};"
@@ -460,6 +476,7 @@ class Brain:
         )
         user += self._previous_block(previous)
         counterpart = str(npc.get("name", ""))
+        user = self._with_material(user, material)
         d = await self._ask_fixed_dialogues(sys, user, counterpart=counterpart, limit=6)
         d = await self._ensure_fresh(sys, user, d, previous,
                                      counterpart=counterpart, limit=6)
@@ -477,7 +494,8 @@ class Brain:
         return BrainResult(False, dict(FB_NPC))
 
     # ════════════════ 抵达/晨报 ════════════════
-    async def compose_arrival(self, *, world, prev_name: str, via: str) -> BrainResult:
+    async def compose_arrival(self, *, world, prev_name: str, via: str,
+                        material: str = "") -> BrainResult:
         via_line = {
             "shift": "世界在众人眼前剧烈扭曲、重组",
             "travel": "众人主动开启了一条穿越之门",
@@ -489,6 +507,7 @@ class Brain:
             f"世界描述:{world.desc}\n{via_line}。写一段抵达播报(80-140字,渲染初印象,点出1-2个独特之处)。\n"
             '严格输出 JSON:{"narration":"抵达播报","tips":["给新来者的一句忠告","一句忠告"]}'
         )
+        user = self._with_material(user, material)
         d = await self._ask_json(sys, user)
         if d and d.get("narration"):
             return BrainResult(
@@ -500,7 +519,8 @@ class Brain:
             )
         return BrainResult(False, dict(FB_ARRIVE, name=world.name))
 
-    async def morning_brief(self, *, world, chars: list, day_note: str) -> BrainResult:
+    async def morning_brief(self, *, world, chars: list, day_note: str,
+                        material: str = "") -> BrainResult:
         who = "、".join(c.persona_line() for c in chars[:8]) or "暂无居民"
         sys = self.style
         user = (
@@ -508,6 +528,7 @@ class Brain:
             "写一段晨报(50-90字):天气/异象 + 今日氛围 + 点名一位居民该当心什么。\n"
             '严格输出 JSON:{"brief":"晨报正文","watch":"被点名者与原因(≤20字)"}'
         )
+        user = self._with_material(user, material)
         d = await self._ask_json(sys, user)
         if d and d.get("brief"):
             return BrainResult(
@@ -622,7 +643,8 @@ class Brain:
 
 
     # ════════════════ 每日小任务(简单、轻松、按世界生成)════════════════
-    async def gen_quests(self, *, world, char, memories: list[str] | None = None) -> BrainResult:
+    async def gen_quests(self, *, world, char, memories: list[str] | None = None,
+                        material: str = "") -> BrainResult:
         """按世界观/角色/记忆生成 3 个日常小任务,目标不要太难。"""
         mem = "\n".join(memories[:4]) if memories else ""
         user = (
@@ -635,6 +657,7 @@ class Brain:
             '严格输出 JSON:{"quests":[{"text":"任务描述≤16字","hint":"完成提示≤20字"}]}\n'
             "恰好 3 个。"
         )
+        user = self._with_material(user, material)
         d = await self._ask_json(self.style, user)
         if d and d.get("quests"):
             quests = [{"text": str(q.get("text", "")).strip()[:24],
@@ -645,7 +668,8 @@ class Brain:
         return BrainResult(False, dict(FB_QUESTS))
 
     async def finish_quest(self, *, world, char, quest: str,
-                           memories: list[str] | None = None) -> BrainResult:
+                           memories: list[str] | None = None,
+                        material: str = "") -> BrainResult:
         """结算一个小任务:轻松日常的完成叙述 + 很小的奖励(数值克制)。"""
         mem = "\n".join(memories[:3]) if memories else ""
         user = (
@@ -658,6 +682,7 @@ class Brain:
             "禁止独角戏:至少 2 个不同说话人,不能只有角色一人说话。\n"
             '严格输出 JSON:{"narration":"完成叙述","effects":{"exp":5~12,"gold":0~20,"mood":0~3}}'
         )
+        user = self._with_material(user, material)
         d = await self._ask_fixed_dialogues(self.style, user, limit=3)
         if d and d.get("narration"):
             eff_in = d.get("effects") if isinstance(d.get("effects"), dict) else {}
@@ -729,7 +754,8 @@ class Brain:
 
 
     # ════════════════ 关系系统:告白 / 求婚(轻小说式场景)════════════════
-    async def confess(self, *, world, a, b, score: int, outcome: str) -> BrainResult:
+    async def confess(self, *, world, a, b, score: int, outcome: str,
+                        material: str = "") -> BrainResult:
         """告白场景。outcome: success(答应) | crush(婉拒留悬念) | reject(明确拒绝)。"""
         outcome_line = {
             "success": "告白成功,两人正式确立恋人关系(双向奔赴或水到渠成,写出动情与确定的一刻)",
@@ -747,6 +773,7 @@ class Brain:
             "禁止独角戏:双方都必须开口。\n"
             '严格输出 JSON:{"narration":"告白场景叙述","dialogues":[{"speaker":"","text":""}]}'
         )
+        user = self._with_material(user, material)
         d = await self._ask_fixed_dialogues(self.style, user, counterpart=b.name, limit=6)
         if d and d.get("narration"):
             return BrainResult(True, {"narration": str(d["narration"])[:300],
@@ -755,7 +782,8 @@ class Brain:
                                    "dialogues": [{"speaker": a.name, "text": "那个……我喜欢你。"},
                                                  {"speaker": b.name, "text": "……让我想想。"}]})
 
-    async def propose(self, *, world, a, b, score: int) -> BrainResult:
+    async def propose(self, *, world, a, b, score: int,
+                        material: str = "") -> BrainResult:
         """求婚/缔结伴侣场景(条件已在游戏层校验,必定成功)。"""
         user = (
             f"世界:《{world.name}》[{world.genre}] {world.desc}\n"
@@ -767,6 +795,7 @@ class Brain:
             "禁止独角戏:双方都必须开口。\n"
             '严格输出 JSON:{"narration":"求婚场景叙述","dialogues":[{"speaker":"","text":""}]}'
         )
+        user = self._with_material(user, material)
         d = await self._ask_fixed_dialogues(self.style, user, counterpart=b.name, limit=6)
         if d and d.get("narration"):
             return BrainResult(True, {"narration": str(d["narration"])[:300],

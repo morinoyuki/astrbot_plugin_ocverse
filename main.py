@@ -45,7 +45,7 @@ from .ocverse.imcard import (
     world_list_card,
 )
 from .ocverse.llm_engine import Brain
-from .ocverse.memory import MemoryStore
+from .ocverse.memory import KnowledgeStore, MemoryStore
 
 
 def _guard(fn):
@@ -92,9 +92,10 @@ class OcversePlugin(Star):
         self.db = Database(os.path.join(data_dir, "ocverse.sqlite3"))
         emb, fb = make_embedder(_cfg, lambda: self.context.get_all_embedding_providers())
         self.mem = MemoryStore(self.db, emb, fb, top_k=self._cfgi("memory_top_k", 6))
+        self.kb = KnowledgeStore(self.db, emb, fb, top_k=3)
         self.brain = Brain(raw_call=self._llm_raw, style_extra=str(_cfg("style_prompt", "") or ""),
                            raw_call_tools=self._llm_raw_enriched)
-        self.game = Game(self.db, self.brain, self.mem, _cfg)
+        self.game = Game(self.db, self.brain, self.mem, _cfg, kb=self.kb)
         self.avatars = AvatarStore(data_dir)
 
         self._task: asyncio.Task | None = None
@@ -416,6 +417,13 @@ class OcversePlugin(Star):
                 raise
             except Exception as e:
                 logger.error(f"ocverse: 调度异常: {e}")
+            try:
+                if self._cfg("knowledge_collect_enabled", True):
+                    await self._kb_maintenance()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(f"ocverse: 知识库维护异常: {e}")
             await self._sleep_to_next_minute()
 
     @staticmethod
@@ -449,6 +457,57 @@ class OcversePlugin(Star):
                 logger.error(f"ocverse: 群{gid}调度异常: {e}")
         if views:
             await self._broadcast(views)
+
+    # ── 知识库定时采集:每天每组入库一条素材(联网/LLM),供所有生成功能注入 ──
+    async def _kb_maintenance(self):
+        day = self.game._day_key()
+        for g in self.db.list_groups():
+            gid = g["gid"]
+            if self.db.kv_get(gid, "kb_last") == day:
+                continue
+            self.db.kv_set(gid, "kb_last", day)  # 占位防重复
+            if not self._cfg("knowledge_collect_enabled", True) or self.kb.count(gid) >= self._cfgi("knowledge_base_max", 40):
+                continue
+            # 每群每天采集(默认1条,可配置)
+            n = max(0, min(3, self._cfgi("knowledge_collect_daily", 1)))
+            for _ in range(n):
+                try:
+                    await self._collect_kb(gid)
+                except Exception as e:
+                    logger.warning(f"ocverse: 知识库采集失败: {e}")
+
+    async def _collect_kb(self, gid: str):
+        """采集一条轻小说/动漫/漫画风格的著作素材,提炼成可复用条目存入知识库。"""
+        from .ocverse.llm_engine import _extract_json
+        themes = ["异世界转生", "校园异能", "末世求生", "机甲战争", "修仙问道", "都市怪谈",
+                  "奇幻冒险", "科幻末日", "怪盗群像", "婚约恋爱", "英灵群像", "蒸汽朋克"]
+        theme = themes[(self.game._world_day(gid) + self.kb.count(gid)) % len(themes)]
+        have = self.db.kb_sources(gid)[-6:]
+        avoid = ("已在库的作品:" + "、".join(x for x in have if x)) if have else ""
+        user = (
+            "你在为一个群聊文字游戏扩充素材库。请(优先联网搜索,或凭你广博的知识)选取一部动漫/轻小说/漫画"
+            "或其典型桥段,提炼成一条可复用的创作素材,要能服务于后续的世界生成、随机事件、每日小任务、"
+            "角色对话等。\n"
+            f"本轮题材偏向:{theme}。{avoid}\n"
+            "严格输出 JSON:{\"source\":作品名(≤20字),\"theme\":题材标签(≤12字),"
+            "\"kind\":\"work|idea|dialogue|rule\"之一,"
+            "\"content\":素材正文(120~300字,有设定感、可直接当世界观/钩子/台词风格使用,不要照搬原剧情主线)}\n"
+        )
+        system = self.brain.style
+        text = await self._llm_raw_enriched(system, user)  # 联网优先
+        if not text:
+            text = await self._llm_raw(system, user)        # 回退普通
+        if not text:
+            return
+        d = _extract_json(text) or {}
+        if not d.get("content"):
+            return
+        await self.kb.add(gid,
+                          str(d.get("source") or "")[:60],
+                          str(d.get("theme") or theme)[:30],
+                          str(d.get("kind") or "work")[:12],
+                          str(d.get("content"))[:1500])
+        await asyncio.sleep(0)  # 让出事件循环
 
     async def _fire_plan_item(self, gid: str, item: dict, forced: bool = False) -> dict | None:
         kind = item["kind"]

@@ -95,6 +95,9 @@ pip install -r requirements.txt   # pillow / numpy / aiohttp
 | `travel_cooldown_hours` | 6 | 自由穿越冷却 |
 | `morning_brief` | true | 每日晨报卡片 |
 | `card_theme` | dark | dark / light / ocean / sakura |
+| `knowledge_collect_enabled` | true | 定时联网/LLM 采集著作素材入知识库(供所有生成注入) |
+| `knowledge_collect_daily` | 1 | 每群每日采集条数(0~3) |
+| `knowledge_base_max` | 40 | 每群素材库容量上限 |
 | `embedding_backend` | astrbot | 记忆语义向量后端:astrbot = 用 AstrBot 内置 Embedding 提供商(WebUI 配置即可);hash = 零依赖哈希词向量 |
 | `core_memory_threshold` | 40 | 长期记忆压缩阈值 |
 | `action_max_per_day` | 4 | 每人每日主动行动次数上限(练习/健身/打工/打怪/冒险) |

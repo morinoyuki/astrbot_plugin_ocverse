@@ -36,7 +36,7 @@ from ocverse.imcard import (  # noqa: E402
     world_list_card,
 )
 from ocverse.llm_engine import Brain  # noqa: E402
-from ocverse.memory import MemoryStore  # noqa: E402
+from ocverse.memory import KnowledgeStore, MemoryStore  # noqa: E402
 
 CFG = {"card_width": 1024, "card_font_size": 34, "card_theme": "dark",
        "memory_top_k": 6, "event_expire_minutes": 45, "core_memory_threshold": 40}
@@ -249,6 +249,28 @@ async def main():
     assert not (await b_off.parse_persona("随便写写")).ok
     assert not (await b_off.parse_npc("阿婆", "神秘")).ok
     ok += 1; print("✓ 自由文本→AI结构化(创角/改角/NPC携世界数据/离线兑底)")
+
+    # 2.6 知识库素材:入库 → 语义检索 → 注入生成 prompt
+    kb = KnowledgeStore(db, HashEmbedder(), HashEmbedder(), top_k=3)
+    await kb.add("g1", "翘班侦探物语", "都市怪谈", "idea", "这个世界的侦探从不穿制服:他在旧书店打工,按客人讲的故事收费。")
+    await kb.add("g1", "雾之酒店", "异世界", "work", "雾夜里凭空出现的酒店,只接待迷路的人,退房时用它想带走的回忆结账。")
+    hits = await kb.related("g1", "雾 酒店 回忆")
+    assert hits and hits[0][1]["content"].find("雾") >= 0, hits
+    ctx = await kb.context("g1", "雾气 传闻 异世界")
+    assert "知识库素材" in ctx and "雾之酒店" in ctx, ctx
+    # 近重复去重
+    before = db.kb_count("g1")
+    await kb.add("g1", "雾之酒店", "异世界", "work", "雾夜里凭空出现的酒店,只接待迷路的人,退房时用它想带走的回忆结账。")
+    assert db.kb_count("g1") == before, "近重复未去重"
+    db_game = Game(db, brain, mem, lambda k, d=None: CFG.get(k, d), kb=kb)  # 带 kb 的游戏层
+    got = []
+    b_kb = Brain(raw_call=lambda sys, usr: (got.append(usr) or json.dumps({
+        "narration": "完成任务,素材影响。", "effects": {"exp": 6, "gold": 10, "mood": 2}}, ensure_ascii=False)))
+    got.clear()
+    await b_kb.finish_quest(world=db.cur_world("g1"), char=db.get_char("g1", "u1"),
+                            quest="喝热汤", material="【知识库素材】雾夜里凭空出现的酒店……")
+    assert "知识库素材" in got[0], "material 未注入 prompt"
+    ok += 1; print("✓ 知识库素材:采集入库/检索/注入生成 prompt")
 
     # 2.6 初始属性按设定分配(AI 分配优先 / 关键词本地兑底)
     c3 = game.create_char("g1", "u9", "森森", "男", ["天才", "生人勿近"],

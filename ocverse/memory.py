@@ -9,6 +9,7 @@ scope: char(角色) / world(世界大事) / core(核心记忆) / npc(NPC 相关)
 """
 
 from __future__ import annotations
+import re
 
 from .db import Database
 from .embedder import HashEmbedder, cosine
@@ -109,3 +110,78 @@ class MemoryStore:
         for c in cores[:6]:
             await self.remember(gid, uid, "core", c)
         return True
+
+
+class KnowledgeStore:
+    """群级素材知识库:联网/LLM 采集的著作·轻小说等,供所有生成功能注入素材。
+
+    与记忆(memories)区分:KB 长期保留、不压缩、不随角色删除,作为"创作素材库"。
+    语义检索复用 embedder + 哈希回退。
+    """
+
+    def __init__(self, db, embedder, fallback, top_k: int = 3):
+        self.db = db
+        self.embedder = embedder
+        self.fallback = fallback
+        self.top_k = max(1, top_k)
+
+    async def _vec(self, text: str) -> list[float]:
+        try:
+            return await self.embedder.embed(text)
+        except Exception:
+            return self.fallback.embed_sync(text)
+
+    async def add(self, gid: str, source: str, theme: str, kind: str, content: str):
+        text = (content or "").strip()
+        if not text:
+            return None
+        # 近重复去重
+        try:
+            v = await self._vec(text)
+            for r in self.db.kb_rows(gid):
+                if r.get("content") and _cosine_field(v, r["vec"]) > 0.92:
+                    return None
+        except Exception:
+            return None
+        return self.db.kb_add(gid, source, theme, kind, text, v)
+
+    async def related(self, gid: str, query: str, k: int | None = None) -> list[dict]:
+        try:
+            qv = await self._vec(query)
+        except Exception:
+            return []
+        rows = self.db.kb_rows(gid)
+        # 哈希向量稀疏:查询去空格后的单字+双字片段在正文出现即加权,补足召回
+        q = re.sub(r"\s+", "", query or "")
+        qs = (set(q) | {q[i:i + 2] for i in range(len(q) - 1)}) if len(q) > 1 else set(q)
+        scored = []
+        for r in rows:
+            s = _cosine_field(qv, r["vec"])
+            c = str(r.get("content") or "")
+            hit = sum(1 for t in qs if t and t in c)
+            if hit:
+                s += 0.25 + 0.15 * min(hit, 3)
+            if s > 0.02:
+                scored.append((s, r))
+        scored.sort(key=lambda x: -x[0])
+        return scored[: (k or self.top_k)]
+
+    async def context(self, gid: str, query: str, k: int = 3) -> str:
+        """取相关素材拼成可直接注入 prompt 的文本块(空库返回空串)。"""
+        items = await self.related(gid, query, k)
+        if not items:
+            return ""
+        lines = []
+        for _, r in items:
+            tag = f"{r['theme']}·《{r['source']}》" if r.get("source") else (r.get("theme") or "")
+            head = f"- {tag}: " if tag else "- "
+            lines.append(head + str(r.get("content"))[:260])
+        return ("\n\n【知识库素材】(可借鉴其氛围/手法/设定,但不要直接照搬人名或原剧情):\n"
+                + "\n".join(lines))
+
+
+def _cosine_field(a: list[float] | None, b: list[float] | None) -> float:
+    """维度不一致视为不相关(换后端后旧向量自然淡出)。"""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    return sum(x * y for x, y in zip(a, b)) or 0.0

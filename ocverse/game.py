@@ -51,11 +51,13 @@ def _fate_locked(*uids) -> bool:
 
 
 class Game:
-    def __init__(self, db: Database, brain: Brain, memory: MemoryStore, cfg_get):
+    def __init__(self, db: Database, brain: Brain, memory: MemoryStore, cfg_get,
+                 kb=None):
         self.db = db
         self.brain = brain
         self.mem = memory
         self.cfg = cfg_get  # cfg_get(key, default) -> value
+        self.kb = kb  # 知识库素材(可选),供生成功能注入
 
     # ══════════════ 配置便捷读取 ══════════════
     def _cfgi(self, key, default):
@@ -82,6 +84,15 @@ class Game:
         )
 
     # ══════════════ 世界初始化 ══════════════
+    async def _kb_ctx(self, gid: str, query: str, k: int = 3) -> str:
+        """从知识库取相关素材,返回可注入 prompt 的文本(空库/无KB返回空串)。"""
+        if self.kb is None:
+            return ""
+        try:
+            return await self.kb.context(gid, query, k)
+        except Exception:
+            return ""
+
     def _ensure_group(self, gid: str) -> dict:
         return self.db.ensure_group(
             gid,
@@ -477,7 +488,8 @@ class Game:
         prev = self.db.recent_similar_logs(
             gid, ev.uid or uid, [str(ev.payload.get("title", "")), pick_label], k=2)
         r = await self.brain.resolve_event(
-            world=world, char=target_char, event=ev.payload, choice_idx=idx, previous=prev)
+            world=world, char=target_char, event=ev.payload, choice_idx=idx, previous=prev,
+            material=await self._kb_ctx(gid, "事件结算 结果 剧情 氛围"))
         data = r.data
         changes: list[str] = []
         if target_char:
@@ -581,7 +593,7 @@ class Game:
         r = await self.brain.resolve_interaction(
             world=world, a=a, b=b, npc=None, mode=mode, detail=detail,
             rel_score=pre["score"], rel_stage=C.rel_stage_label(pre["score"], pre["state"]),
-            previous=prev,
+            previous=prev, material=await self._kb_ctx(gid, f"互动 对话 {mode}"),
         )
         data = r.data
         changes = self._apply_effects(a, data.get("a_effects") or {})
@@ -615,7 +627,8 @@ class Game:
                 confession_fired = True
                 proposer, receiver = (a, b) if random.choice([a, b]) is a else (b, a)
                 cr = await self.brain.confess(world=world, a=proposer, b=receiver,
-                                              score=rel, outcome=c_outcome)
+                                              score=rel, outcome=c_outcome,
+                                              material=await self._kb_ctx(gid, "告白 恋爱 心动"))
                 if c_outcome == "success":
                     self.db.set_rel_state(gid, uid_a, uid_b, "lovers")
                     self.db.bump_rel(gid, uid_a, uid_b, 10, "告白成功")
@@ -649,7 +662,8 @@ class Game:
         if not confession_fired and info["state"] in ("lovers", "couple") and rel >= 90 \
                 and random.random() < 0.35 and not _fate_locked(uid_a, uid_b):
             proposer, receiver = (a, b) if random.random() < 0.5 else (b, a)
-            pr = await self.brain.propose(world=world, a=proposer, b=receiver, score=rel)
+            pr = await self.brain.propose(world=world, a=proposer, b=receiver, score=rel,
+                                          material=await self._kb_ctx(gid, "求婚 结婚 伴侣"))
             self.db.set_rel_state(gid, uid_a, uid_b, "married")
             self.db.bump_rel(gid, uid_a, uid_b, 5, "结为伴侣")
             await self.mem.remember(gid, uid_a, "char", f"与{b.name}结为伴侣!", ref=f"marry:{uid_b}")
@@ -714,7 +728,8 @@ class Game:
         self._interaction_limit_hit(ch)
         prev = self.db.recent_similar_logs(gid, uid, [npc_name], k=3)
         r = await self.brain.npc_chat(world=world, npc=npc, char=ch, action=action,
-                                      memories=mems, previous=prev)
+                                      memories=mems, previous=prev,
+                                      material=await self._kb_ctx(gid, "NPC构图 对话 人物"))
         data = r.data
         self._count_interaction(ch)
         changes = self._apply_effects(ch, data.get("effects") or {})
@@ -766,6 +781,7 @@ class Game:
         r = await self.brain.resolve_action(
             world=world, char=ch, action_name=name, detail=action_hint,
             kind=preset["kind"], memories=mems,
+            material=await self._kb_ctx(gid, f"主动行动 {name} 进展"),
         )
         effects = dict(r.data.get("effects") or {})
         # 概率机缘:一小部分概率额外捡到金币彩蛋
@@ -904,7 +920,8 @@ class Game:
                 world = self.db.get_world(w.id)
         if world is None:
             avoid = [w.name for w in self.db.list_worlds(gid)]
-            r = await self.brain.gen_world(None, avoid_names=avoid)
+            r = await self.brain.gen_world(None, avoid_names=avoid,
+                                         material=await self._kb_ctx(gid, "新世界 世界观 设定"))
             wdata = r.data
             world = self._install_world(gid, wdata, source="llm" if r.ok else "default")
         self.db.update_group(gid, last_shift_at=_now())
@@ -921,7 +938,8 @@ class Game:
             ch.exp += 8
             self.db.upsert_char(ch)
             self._check_flags(ch)
-        arr = await self.brain.compose_arrival(world=world, prev_name=prev_name, via="shift")
+        arr = await self.brain.compose_arrival(world=world, prev_name=prev_name, via="shift",
+                                               material=await self._kb_ctx(gid, "抵达 世界氛围"))
         arr_data = arr.data if hasattr(arr, "data") else arr
         await self.mem.remember(gid, "", "world", f"世界变动:从《{prev_name}》穿越到《{world.name}》({world.genre})")
         self.db.append_log(gid, "", "shift", f"🌀 世界变动!全员从《{prev_name}》来到《{world.name}》", world.name)
@@ -959,7 +977,8 @@ class Game:
         self.db.update_group(gid, cur_world_id=target_w.id, last_travel_at=_now())
         # 任务与世界绑定:穿越后旧任务作废,到新世界可重新领取
         self.db.expire_open_quests(gid)
-        arr = await self.brain.compose_arrival(world=target_w, prev_name=cur.name if cur else "", via="travel")
+        arr = await self.brain.compose_arrival(world=target_w, prev_name=cur.name if cur else "", via="travel",
+                                               material=await self._kb_ctx(gid, "抵达 穿越 世界"))
         arr_data = arr.data if hasattr(arr, "data") else arr
         await self.mem.remember(gid, "", "world", f"自由穿越:从《{cur.name if cur else ''}》到《{target_w.name}》")
         self.db.append_log(gid, uid, "travel", f"{ch.name} 带大家穿越到《{target_w.name}》", target_w.name)
@@ -997,7 +1016,8 @@ class Game:
         if not world:
             raise GameError("世界尚未初始化")
         mems = await self.mem.related(gid, f"{ch.name} 日常 小目标", uid=uid, k=3)
-        r = await self.brain.gen_quests(world=world, char=ch, memories=mems)
+        r = await self.brain.gen_quests(world=world, char=ch, memories=mems,
+                                        material=await self._kb_ctx(gid, "日常 小任务 生活"))
         for t in (r.data.get("quests") or [])[:3]:
             if t.get("text"):
                 self.db.add_quest(gid, uid, day, t["text"], t.get("hint", ""))
@@ -1019,7 +1039,8 @@ class Game:
         if not self.db.resolve_quest_if_open(q["id"]):
             raise GameError("这个任务刚被完成了")
         mems = await self.mem.related(gid, f"{ch.name} {q['text']}", uid=uid, k=2)
-        r = await self.brain.finish_quest(world=world, char=ch, quest=q["text"], memories=mems)
+        r = await self.brain.finish_quest(world=world, char=ch, quest=q["text"], memories=mems,
+                                         material=await self._kb_ctx(gid, "任务完成 日常"))
         changes = self._apply_effects(ch, r.data.get("effects") or {})
         await self.mem.remember(gid, uid, "char", f"完成了小任务「{q['text']}」", ref=f"quest:{q['id']}")
         self.db.append_log(gid, uid, "quest",
@@ -1057,6 +1078,7 @@ class Game:
         r = await self.brain.morning_brief(
             world=world, chars=chars,
             day_note=f"{self._day_key()} 第{self._world_day(gid)}天",
+            material=await self._kb_ctx(gid, "晨报 今日 氛围 预告"),
         )
         d = r.data
         return {
