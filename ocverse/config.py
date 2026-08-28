@@ -78,7 +78,7 @@ def rel_stage_label(score: int, state: str = "") -> str:
     """关系名:特殊态优先(恋人/情侣/结为伴侣/单相思),否则按好感阶梯。"""
     special = {
         "married": "结为伴侣",
-        "couple": "情侣",
+        "couple": "热恋中的情侣",
         "lovers": "恋人",
         "crush": "单相思",
     }

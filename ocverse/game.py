@@ -576,13 +576,13 @@ class Game:
         changes = self._apply_effects(a, data.get("a_effects") or {})
         changes += [f"(对方){x}" for x in self._apply_effects(b, data.get("b_effects") or {})]
         rel = self.db.bump_rel(gid, uid_a, uid_b, int(data.get("rel_delta") or 0), mode)
-        # 关系阶段:恋人好感≥95 自动升温为情侣
+        # 关系阶段:恋人好感≥95 自动升温为热恋中的情侣
         info = self.db.get_rel_full(gid, uid_a, uid_b)
         if info["state"] == "lovers" and rel >= 95:
             self.db.set_rel_state(gid, uid_a, uid_b, "couple")
             self.db.append_log(gid, uid_a, "bond",
-                               f"{a.name} 和 {b.name} 情感升温,正式确立为情侣", world.name)
-            changes.append("💞 关系升温:正式成为情侣!")
+                               f"{a.name} 和 {b.name} 情感升温,正式成为热恋中的情侣", world.name)
+            changes.append("💞 关系升温:热恋中的情侣!")
         extra_views = []
         # 💍 事件触发求婚:恋人/情侣且好感≥90,日常互动中自然上演求婚场景(而非用户敲指令)
         if info["state"] in ("lovers", "couple") and rel >= 90 and random.random() < 0.35:
