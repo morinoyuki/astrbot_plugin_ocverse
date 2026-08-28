@@ -32,7 +32,7 @@ from .ocverse import config as C
 from .ocverse.avatar_store import AvatarStore
 from .ocverse.db import Database
 from .ocverse.embedder import make_embedder
-from .ocverse.game import Game, GameError
+from .ocverse.game import Game, GameError, npc_uid
 from .ocverse.imcard import (
     fortune_card,
     help_card,
@@ -655,6 +655,29 @@ class OcversePlugin(Star):
             r = await self.game.define_world(gid, self._uid(event), name, desc)
         yield event.plain_result(f"📖 《{r['name']}》已写进世界书。它会在某次世界变动时降临——降临后即可自由穿越。")
 
+    @oc.command("定义角色", alias={"招募", "招募角色", "添加生活角色", "define_npc"})
+    @_guard
+    async def cmd_define_npc(self, event: AstrMessageEvent):
+        """分身 定义角色 <名字> [描述…] - 创造一个不属于任何真人的持久『生活角色』,参与群世界生活"""
+        gid = self._need_gid(event)
+        rest = self._rest(event, "定义角色", "招募", "招募角色", "添加生活角色", "define_npc")
+        parts = rest.split(None, 1)
+        if not parts or not parts[0]:
+            yield event.plain_result(
+                "格式:/分身 定义角色 <名字> [描述…]\n"
+                "例如:/分身 定义角色 绫波 住在雾码头的老婆婆,神秘而热心\n"
+                "创造出的生活角色会像群友一样参与生活事件、与你互动/发展关系/结婚、并被卷入世界变动;"
+                "之后可用「/分身 找 <名字>」互动、「/分身 设置头像 <名字>」+图 给它换头像。")
+            return
+        name = parts[0][:12]
+        desc = (parts[1] if len(parts) > 1 else "").strip()
+        async with self._glock(gid):
+            ch = self.game.define_npc_char(gid, name, desc, self._uid(event))
+        yield event.plain_result(
+            f"🎭 一位生活角色「{ch.name}」融入了群世界!\n"
+            "用「/分身 找 <名字> <方式>」与TA互动(可能发展关系/告白求婚);"
+            "「/分身 设置头像 <名字>」+ 图片可给它换头像。")
+
     @filter.permission_type(PermissionType.ADMIN)
     @oc.command("触发变动", alias={"world_shift", "手动变动"})
     @_guard
@@ -805,7 +828,14 @@ class OcversePlugin(Star):
     async def cmd_set_avatar(self, event: AstrMessageEvent):
         """分身 设置头像 (随指令附图,或回复一张图) - 设置分身头像"""
         gid = self._need_gid(event)
+        rest = self._rest(event, "设置头像", "set_avatar", "头像").strip()
         ch = self._char_of(event)
+        is_life = False
+        if rest:
+            nb = self.db.get_char(gid, npc_uid(gid, rest))
+            if nb:
+                ch = nb
+                is_life = True
         imgs = await self._images_with_quoted(event)
         if not imgs:
             yield event.plain_result(
@@ -816,6 +846,9 @@ class OcversePlugin(Star):
         ok = await self._save_avatar_bytes(ch, imgs[0])
         if not ok:
             yield event.plain_result("❌ 头像保存失败,请换一张图片重试")
+            return
+        if is_life:
+            yield event.plain_result(f"🖼️ 已更新生活角色「{ch.name}」的头像")
             return
         v = await self._profile_view(gid, self._uid(event))
         try:
@@ -983,6 +1016,124 @@ class OcversePlugin(Star):
         if chain:
             yield event.chain_result(chain)
 
+    # ═══════════ 指令:生活/基建/主线/房产 ═══════════
+    @oc.command("设施", alias={"基建", "infra", "设施列表"})
+    @_guard
+    async def cmd_infra(self, event: AstrMessageEvent):
+        """分身 设施 - 查看当前世界的基础设施(商店/饭馆/工作等)"""
+        gid = self._need_gid(event)
+        w = self.db.cur_world(gid)
+        if not w:
+            yield event.plain_result("世界尚未初始化。管理员:「/分身 初始化世界」")
+            return
+        if not w.infra:
+            yield event.plain_result(f"《{w.name}》暂时没有特别的基础设施。")
+            return
+        lines = [f"🏙 《{w.name}》的基础设施", ""]
+        for i, it in enumerate(w.infra, 1):
+            wk = f"｜可打工:{it.get('work')}" if it.get("work") else ""
+            lines.append(f"{i}. {it.get('kind','')}·{it.get('name','')} — {it.get('desc','')}{wk}")
+        lines.append("")
+        lines.append("用「/分身 兼职」去合适的地方打工赚钱。")
+        yield event.plain_result("\n".join(lines))
+
+    @oc.command("主线", alias={"story", "主线列表"})
+    @_guard
+    async def cmd_mainline(self, event: AstrMessageEvent):
+        """分身 主线 [推进] - 查看当前世界主线,或推进一步"""
+        gid = self._need_gid(event)
+        rest = self._rest(event, "主线", "story", "主线列表").strip()
+        w = self.db.cur_world(gid)
+        if not w:
+            yield event.plain_result("世界尚未初始化。")
+            return
+        if "推进" in rest or "进度" in rest:
+            yield event.plain_result("⏳ 正在推进主线…")
+            async with self._glock(gid):
+                v = await self.game.mainline_progress(gid, self._uid(event))
+            imgs = render_views([v], self._card_cfg())
+            chain = self._chain(imgs)
+            if chain:
+                yield event.chain_result(chain)
+            return
+        ml = w.mainline or []
+        if not ml:
+            yield event.plain_result("这个世界暂时没有主线。")
+            return
+        lines = [f"📜 《{w.name}》世界主线", ""]
+        for i, m in enumerate(ml, 1):
+            mark = "✅" if m.get("done") else "⬜"
+            lines.append(f"{mark} {i}. {m.get('stage','')}{'⚠已完成' if m.get('done') else ''}")
+            lines.append(f"　 └ {m.get('desc','')}")
+        lines.append("")
+        lines.append("用「/分身 主线 推进」推进当前一步,推进完会解锁下一环。")
+        yield event.plain_result("\n".join(lines))
+
+    @oc.command("兼职", alias={"parttime", "打半天工"})
+    @_guard
+    async def cmd_workday(self, event: AstrMessageEvent):
+        """分身 兼职 - 在当前世界找个基础设施打半天工,赚金币(不耗行动次数)"""
+        gid = self._need_gid(event)
+        async with self._glock(gid):
+            v = self.game.work_today(gid, self._uid(event))
+        if v is None:
+            yield event.plain_result("(暂时没有适合你打工的地方)")
+            return
+        imgs = render_views([v], self._card_cfg())
+        chain = self._chain(imgs)
+        if chain:
+            yield event.chain_result(chain)
+        else:
+            yield event.plain_result(f"你在「{v['spot']}」干了半天,赚了 {v['earn']} 金币。")
+
+    @oc.command("房产", alias={"住房", "物业", "买楼"})
+    @_guard
+    async def cmd_plots(self, event: AstrMessageEvent):
+        """分身 房产 [买房 <编号>|回家] - 查看/购买/回宅"""
+        gid = self._need_gid(event)
+        rest = self._rest(event, "房产", "住房", "物业", "买楼").strip()
+        if "回" in rest or "回家" in rest:
+            yield event.plain_result("⏳ 正在回宅…")
+            async with self._glock(gid):
+                hv = await self.game.my_home(gid, self._uid(event))
+            imgs = render_views([hv], self._card_cfg())
+            chain = self._chain(imgs)
+            if chain:
+                yield event.chain_result(chain)
+            else:
+                yield event.plain_result("你回宅休整了一番。")
+            return
+        m = re.match(r"^(买|购买|buy)\s*(\d+)", rest)
+        if m:
+            idx = int(m.group(2)) - 1
+            yield event.plain_result("⏳ 正在办理购房…")
+            async with self._glock(gid):
+                w, p, chg = self.game.buy_plot(gid, self._uid(event), idx)
+            yield event.plain_result(
+                f"🏠 你购入《{w.name}》的「{p['name']}」({p['kind']})吧。\n"
+                + "\n".join(f"· {c}" for c in chg)
+                + "\n用「/分身 房产 回家」回宅休整。")
+            return
+        w = self.db.cur_world(gid)
+        if not w:
+            yield event.plain_result("世界尚未初始化。")
+            return
+        plots = self.db.plots(gid, w.id)
+        ch = self.db.get_char(gid, self._uid(event))
+        mine_pid = (ch.flags or {}).get("home_plot") if ch else None
+        if not plots:
+            yield event.plain_result(f"《{w.name}》暂时没有可购置的房产。")
+            return
+        lines = [f"🏘 《{w.name}》房产", ""]
+        for i, p in enumerate(plots, 1):
+            own = "〔你已购〕" if p["id"] == mine_pid else ("〔已售〕" if p.get("owner_uid") else "〔在售〕")
+            lines.append(f"{i}. {p.get('kind','')}·{p.get('name','')} {own} — {p.get('desc','')}")
+            if not p.get("owner_uid"):
+                lines.append(f"　 └ 价格 {p.get('price',0)} 金币")
+        lines.append("")
+        lines.append("用「/分身 房产 买 <编号>」购置,「/分身 房产 回家」回宅休整。")
+        yield event.plain_result("\n".join(lines))
+
     # ═══════════════════════════ 指令:事件/互动 ═══════════════════════════
     @oc.command("选择", alias={"choose"})
     @_guard
@@ -1028,6 +1179,40 @@ class OcversePlugin(Star):
         async with self._glock(gid):
             v = await self.game.interact(gid, self._uid(event), target, mode, detail)
         views = [v] + (v.pop("extra_views", []) or [])  # 事件触发的求婚等附加场景卡
+        imgs = render_views(views, self._card_cfg())
+        chain = self._chain(imgs)
+        if chain:
+            yield event.chain_result(chain)
+
+    @oc.command("找", alias={"互动", "交往", "结识"})
+    @_guard
+    async def cmd_char_interact(self, event: AstrMessageEvent):
+        """分身 找 <生活角色名> [方式/自由描述…] - 与持久生活角色互动(可发展关系/结婚)"""
+        gid = self._need_gid(event)
+        raw = self._rest(event, "找", "互动", "交往", "结识").strip()
+        if not raw:
+            names = "、".join(c.name for c in self.game._npc_chars(gid)) or "无"
+            yield event.plain_result(
+                "格式:/分身 找 <生活角色名> [方式]\n"
+                "可先「/分身 定义角色 <名字> <描述>」创造属于这个群世界的生活角色,再与TA互动/发展关系/结婚。"
+                f"当前生活角色:{names}")
+            return
+        parts = raw.split(None, 1)
+        name = parts[0]
+        mode, detail = "打招呼", self._default_mode_hint["打招呼"]
+        if len(parts) > 1:
+            m0 = parts[1].split()[0]
+            custom = {i["name"]: i["descr"] for i in self.db.list_interactions(gid)}
+            if m0 in self._default_mode_hint:
+                mode, detail = m0, self._default_mode_hint[m0]
+            elif m0 in custom:
+                mode, detail = m0, custom[m0]
+            else:
+                mode, detail = "自由互动", parts[1]
+        yield event.plain_result("⏳ 正在演绎这段互动,请稍候…")
+        async with self._glock(gid):
+            v = await self.game.interact_life_char(gid, self._uid(event), name, mode, detail)
+        views = [v] + (v.pop("extra_views", []) or [])
         imgs = render_views(views, self._card_cfg())
         chain = self._chain(imgs)
         if chain:
@@ -1114,13 +1299,6 @@ class OcversePlugin(Star):
         async for r in self._run_act(event, "健身", "健身", "锻炼", "fitness"):
             yield r
 
-    @oc.command("打工", alias={"work", "赚钱"})
-    @_guard
-    async def cmd_work(self, event: AstrMessageEvent):
-        """分身 打工 <做什么…> - 打份零工赚金币(耗体力)"""
-        async for r in self._run_act(event, "打工", "打工", "赚钱", "work"):
-            yield r
-
     @oc.command("打怪", alias={"fight", "狩猎"})
     @_guard
     async def cmd_fight(self, event: AstrMessageEvent):
@@ -1140,7 +1318,7 @@ class OcversePlugin(Star):
                 "你可以主动行动,让角色推进故事。现成的行动:",
                 "· /分身 练习 <练什么> — 修习技艺,精进属性(耗体力)",
                 "· /分身 健身 — 锻炼体魄(力量/敏捷)",
-                "· /分身 打工 — 打零工赚金币",
+                "· /分身 兼职 — 在世界上找份基建活干,赚金币",
                 "· /分身 打怪 - 去危险地带挑战怪物(高风险高回报)",
                 "",
                 "· /分身 冒险 <自由描述> — 比如:去雾夜集市帮绫婆婆看摊 / 溜进灯塔偷看旧笔记",

@@ -162,9 +162,56 @@ class Brain:
         '{"name":不超过8字,"genre":题材标签,"atmosphere":氛围一句话,'
         '"desc":世界描述80-160字,"rules":["规则1","规则2","规则3"],'
         '"features":["独特之处1","独特之处2","独特之处3"],'
-        '"npcs":[{"name":"","role":"身份","persona":"性格一句话","hook":"可交互的钩子一句话"}],'
-        '"event_ideas":["该世界独有事件灵感",4-6条]}'
+        '"npcs":[{"name":"","role":"身份","persona":"性格一句话","hook":"可交互的钩子一句话","daily":"这名NPC每天一般会去做什么/在哪里","quirk":"一个鲜活的小怪癖/口头禅"}],'
+        '"event_ideas":["该世界独有事件灵感",4-6条],'
+        '"infra":[...],"mainline":[...],"plots":[...]}'
     )
+
+    @staticmethod
+    def _norm_infra(d: dict) -> list:
+        """规范化基础设施列表。"""
+        out = []
+        for it in (d.get("infra") or [])[:8]:
+            if not isinstance(it, dict) or not (it.get("name") or ""):
+                continue
+            out.append({
+                "kind": str(it.get("kind") or "设施")[:10],
+                "name": str(it.get("name") or "")[:16],
+                "desc": str(it.get("desc") or "")[:90],
+                "work": str(it.get("work") or "")[:40],
+            })
+        return out
+
+    @staticmethod
+    def _norm_mainline(d: dict) -> list:
+        out = []
+        for i, m in enumerate((d.get("mainline") or [])[:8]):
+            if not isinstance(m, dict) or not (m.get("stage") or ""):
+                continue
+            out.append({
+                "stage": str(m.get("stage") or "")[:12],
+                "desc": str(m.get("desc") or "")[:90],
+                "done": bool(m.get("done")),
+            })
+        return out
+
+    @staticmethod
+    def _norm_plots(d: dict) -> list:
+        out = []
+        for p in (d.get("plots") or [])[:10]:
+            if not isinstance(p, dict) or not (p.get("name") or ""):
+                continue
+            try:
+                price = max(0, int(float(p.get("price") or 0)))
+            except (TypeError, ValueError):
+                price = 200
+            out.append({
+                "kind": str(p.get("kind") or "房")[:10],
+                "name": str(p.get("name") or "")[:16],
+                "desc": str(p.get("desc") or "")[:90],
+                "price": price,
+            })
+        return out
 
     async def gen_world(self, desc: str | None = None, avoid_names: list[str] | None = None,
                         theme_hint: str = "",
@@ -181,7 +228,12 @@ class Brain:
         if avoid_names:
             user += "\n不要与这些已有世界重名:" + "、".join(avoid_names[:20])
         user += (
-            "\nNPC 4~5个(名字不超过6字,融入世界,不要套模板名)。\n"
+            "\nNPC 5~8个(名字不超过6字,融入世界,不要套模板名)。每个NPC都要有自己的"
+            "日常行踪(daily:TA每天一般在哪/做什么)、鲜活小怪癖或口头禅(quirk),"
+            "让这个世界住着活生生的人。\n"
+            "同时请设计这个世界的基础设施(商店/饭馆/工坊/据点等)、一段世界主线(3~6节)、"
+            "以及可供居民购置的住处(房/宅/小屋/铺面等,含价格)——全部贴合该世界题材与时代,"
+            "不要套用同一套现代模板:\n"
             f"严格输出 JSON,结构:{self._WORLD_SCHEMA}"
         )
         # 世界生成是低频操作,允许走联网增强通道(搜索工具)扩充知识
@@ -196,7 +248,8 @@ class Brain:
         sys = self.style
         user = (
             f"玩家自设了一个世界。名称:{name}\n描述:{desc}\n"
-            "请补全它的题材标签、氛围、规则、独特之处、4~5个NPC、独有事件灵感。尊重玩家设定,不推翻。\n"
+            "请补全它的题材标签、氛围、规则、独特之处、4~5个NPC、独有事件灵感。"
+            "并设计基础设施、一段世界主线、可供购置的住处——贴合该世界设定,勿套模板。\n"
             f"严格输出 JSON,结构:{self._WORLD_SCHEMA}"
         )
         user = self._with_material(user, material)
@@ -209,7 +262,7 @@ class Brain:
 
     def _norm_world(self, d: dict, source: str, desc_hint: str = "") -> dict:
         npcs = []
-        for n in (d.get("npcs") or [])[:6]:
+        for n in (d.get("npcs") or [])[:8]:
             if isinstance(n, dict) and n.get("name"):
                 npcs.append(
                     {
@@ -217,6 +270,9 @@ class Brain:
                         "role": str(n.get("role", ""))[:30],
                         "persona": str(n.get("persona", ""))[:80],
                         "hook": str(n.get("hook", ""))[:80],
+                        "daily": str(n.get("daily", ""))[:60],
+                        "quirk": str(n.get("quirk", ""))[:40],
+                        "builtin": 1,   # 世界生成自带NPC,可随人口流动来去
                     }
                 )
         return {
@@ -228,6 +284,8 @@ class Brain:
             "features": [str(x)[:50] for x in (d.get("features") or [])][:5],
             "npcs": npcs,
             "event_ideas": [str(x)[:40] for x in (d.get("event_ideas") or [])][:6],
+            "infra": self._norm_infra(d),
+            "mainline": self._norm_mainline(d),
             "source": source,
         }
 
@@ -293,6 +351,49 @@ class Brain:
             if npc:
                 ev["npc"] = npc.get("name", "")
             return BrainResult(True, ev)
+        return BrainResult(False, dict(FB_EVENT))
+
+    async def make_life_event(self, *, world, chars, rels: str = "",
+                              memories: list[str] | None = None,
+                              material: str = "") -> BrainResult:
+        """生成一次『群像生活事件』:2~N 名玩家角色在同一世界偶遇/结伴/共同度过一段日常。
+        chars: 参与的 Char 列表(≥2);rels: 两两关系简述字符串(由 game 层拼接)。
+        返回与 make_event 相同的 {title, scene, options} 结构。"""
+        cast = []
+        for i, c in enumerate(chars, 1):
+            cast.append(
+                f"角色{i}:{c.persona_line()},背景:{c.backstory[:100] or '未详'},"
+                f"当前体力{c.stamina}/心情{c.mood}/金币{c.gold}"
+            )
+        cast_line = "\n".join(cast)
+        mem = ("\n".join(memories[:5]) if memories else "")
+        rel_line = ("\n" + rels) if rels else ""
+        sys = self.style
+        user = (
+            f"当前世界:《{world.name}》[{world.genre}] {world.desc}\n"
+            f"氛围:{world.atmosphere}\n世界规则:{';'.join(world.rules or [])}\n"
+            f"{cast_line}{rel_line}\n{mem}\n"
+            "这群人是生活在同一个世界的真实人物。请让其中几人产生交集,生成一幕自然的生活日常："
+            "偶遇寒暄、结伴逛街/吃饭、一起去某个地方、碰上同一个小麻烦、或某个人的心事被旁人撞见。"
+            "要有画面感与生活气息,不搞超展开;事件要具体、能做出选择。\n"
+            '严格输出 JSON:{"title":"标题≤12字","scene":"场景描述70-120字,至少点出2名上述角色",'
+            '"options":[{"label":"选项≤10字","hint":"后果暗示≤16字"},{"label":"","hint":""},{"label":"","hint":""}]}'
+            "\n恰好3个选项,各角色可能会有不同想法(稳健/随性/热心/各走各的皆可)。"
+        )
+        user = self._with_material(user, material)
+        d = await self._ask_json(sys, user)
+        if d and d.get("scene"):
+            opts = []
+            for o in (d.get("options") or [])[:3]:
+                if isinstance(o, dict) and o.get("label"):
+                    opts.append({"label": str(o["label"])[:10], "hint": str(o.get("hint", ""))[:18]})
+            if len(opts) < 3:
+                opts = (opts + [dict(x) for x in FB_EVENT["options"]])[:3]
+            return BrainResult(True, {
+                "title": str(d.get("title", "街角的招呼"))[:14],
+                "scene": str(d["scene"])[:220],
+                "options": opts,
+            })
         return BrainResult(False, dict(FB_EVENT))
 
     @staticmethod
@@ -397,6 +498,49 @@ class Brain:
             )
         return BrainResult(False, dict(FB_RESOLVE))
 
+    async def resolve_life_event(self, *, world, chars, event: dict, choice_idx: int,
+                                 rels: str = "", material: str = "") -> BrainResult:
+        """结算一次群像生活事件:叙述这次交集的结果 + 各角色效果 + 羁绊变化。"""
+        opts = event.get("options") or []
+        pick = opts[choice_idx] if 0 <= choice_idx < len(opts) else {"label": "顺其自然", "hint": ""}
+        cast = "\n".join(
+            f"角色{i}:{c.persona_line()},背景:{c.backstory[:90] or '未详'},体力{c.stamina}/心情{c.mood}/金币{c.gold}"
+            for i, c in enumerate(chars, 1)
+        )
+        rel_line = ("\n" + rels) if rels else ""
+        sys = self.style
+        user = (
+            f"世界:《{world.name}》[{world.genre}] {world.desc}\n{cast}{rel_line}\n"
+            f"他们正在这场交集里:「{event.get('title')}」——{event.get('scene')}\n"
+            f"大家共同选择了「{pick['label']}」({pick.get('hint','')})。\n"
+            "请结算这段共同经历的结果:轻小说式叙述(110~200字:画面感+心理细节+余味),"
+            "并分别给出各角色的效果与彼此羁绊的变化。\n"
+            '"dialogues":这场交集里 2~5 轮的简短对话(IM聊天体,每条 speaker ≤8字、text ≤60字),需有至少 2 个不同说话人。\n'
+            '"effects":每个参与角色的效果(体力/心情/金币/exp/attrs,克制:大部分±3~10),可逐个给不同角色不同起伏。\n'
+            '"rel_delta":-10~15 整数(本次交集对彼此关系的整体影响)。\n'
+            "memory:一句话存档(涉及哪几个人、发生了什么)。\n"
+            '严格输出 JSON:{"narration":"叙述","dialogues":[{"speaker":"","text":""}],'
+            '"effects":{[角色名或编号]: {"mood":±,"gold":±,"exp":0-12,"stamina":±,"attrs":{}}}, "rel_delta":0, "memory":"一句话"}'
+            "(effects 的键用角色名即可,尽量给每人一个条目;数值克制,日常生活不必大起大落)"
+        )
+        user = self._with_material(user, material)
+        d = await self._ask_fixed_dialogues(sys, user, limit=6)
+        if d and d.get("narration"):
+            eff = d.get("effects") if isinstance(d.get("effects"), dict) else {}
+            # 规范:effects 键 → 每角色规范化
+            per = {}
+            for key, e in eff.items():
+                if isinstance(e, dict):
+                    per[str(key)] = _clamp_effects(e)
+            return BrainResult(True, {
+                "narration": str(d["narration"])[:300],
+                "dialogues": self._norm_dialogues(d.get("dialogues"), 6),
+                "effects_by": per,
+                "rel_delta": _clamp(d.get("rel_delta", 0), -10, 15),
+                "memory": str(d.get("memory", ""))[:120],
+            })
+        return BrainResult(False, dict(FB_RESOLVE))
+
     # ════════════════ 角色互动 ════════════════
     async def resolve_interaction(self, *, world, a, b=None, npc=None, mode: str,
                                   detail: str, rel_score: int, rel_stage: str = "",
@@ -459,7 +603,35 @@ class Brain:
             )
         return BrainResult(False, dict(FB_INTERACT))
 
-    # ════════════════ 主动行动(练习/健身/打工/打怪/冒险)════════════════
+    # ════════════════ 主动行动(练习/健身/打怪/冒险)════════════════
+    async def resolve_mainline(self, *, world, char, stage: dict,
+                               material: str = "") -> BrainResult:
+        """结算世界主线一小节:角色推进这一步,LLM 写出进展与结果。"""
+        sys = self.style
+        mem = f"\n当前主线小节:{stage.get('stage','')} —— {stage.get('desc','')}"
+        user = (
+            f"世界:《{world.name}》[{world.genre}] {world.desc}\n"
+            f"主角:{char.persona_line()}\n{mem}\n"
+            "角色主动去推进这段世界主线。请写出这一步的经过与结果(轻小说式,90~180字):"
+            "要扣住主线目标、有画面感和余味,并给出数值变化(克制:±3~10)。\n"
+            '"dialogues":这段推进中的简短对话(1~3轮,IM聊天体,speaker≤8字、text≤50字,至少2个说话人)。\n'
+            '严格输出 JSON:{"narration":"推进叙述","dialogues":[{"speaker":"","text":""}],'
+            '"effects":{"mood":±,"gold":±,"exp":0-15,"attrs":{}}, "memory":"一句话存档"}'
+        )
+        user = self._with_material(user, material)
+        d = await self._ask_fixed_dialogues(sys, user, limit=3)
+        if d and d.get("narration"):
+            return BrainResult(True, {
+                "narration": str(d["narration"])[:280],
+                "dialogues": self._norm_dialogues(d.get("dialogues"), 3),
+                "effects": _clamp_effects(d.get("effects") or {}),
+                "memory": str(d.get("memory", ""))[:120],
+            })
+        return BrainResult(False, {
+            "narration": f"「{stage.get('stage','')}」有了进展——但路还长,先记下这一步。",
+            "dialogues": [], "effects": {"exp": 5, "mood": 2},
+        })
+
     async def resolve_action(self, *, world, char, action_name: str, detail: str,
                              kind: str = "safe", memories: list[str] | None = None,
                              state_note: str = "", material: str = "") -> BrainResult:
@@ -529,11 +701,14 @@ class Brain:
             )
         user = (
             f"世界:《{world.name}》。NPC「{npc['name']}」({npc.get('role','')},{npc.get('persona','')};"
-            f"钩子:{npc.get('hook','')})\n"
-            f"角色:{char.persona_line()}\n角色行为:{action[:80]}\n"
+            f"钩子:{npc.get('hook','')})"
+            + (f"\nTA的日子:平时{npc.get('daily','')}" if npc.get("daily") else "")
+            + (f";怪癖/口头禅:{npc.get('quirk','')}" if npc.get("quirk") else "")
+            + f"\n角色:{char.persona_line()}\n角色行为:{action[:80]}\n"
             f"{chr(10).join(memories[:4]) if memories else ''}\n{state_line}\n"
             "与角色进行多轮对话(3~6轮,IM聊天体:dialogues 数组,每条 speaker ≤8字、text ≤60字,"
             "口语化,保留人设与神秘感,NPC与角色交替说话),再用旁白收尾(60~120字),可给微小奖励。\n"
+            "让NPC像有自己生活的人:带上TA的行踪、习惯、语气与情绪,别念模板台词。\n"
             "禁止独角戏:NPC 与角色都必须开口,不能只有角色一人说个不停。\n"
             '严格输出 JSON:{"reply":"NPC最核心的一句台词","dialogues":[{"speaker":"","text":""}],'
             '"narration":"旁白收尾",'

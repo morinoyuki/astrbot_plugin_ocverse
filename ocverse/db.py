@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS worlds (
   gid TEXT NOT NULL,
   name TEXT, genre TEXT, desc TEXT, atmosphere TEXT,
   rules TEXT, features TEXT, npcs TEXT, event_ideas TEXT,
+  infra TEXT DEFAULT '[]', mainline TEXT DEFAULT '[]',
   source TEXT DEFAULT 'llm',
   visited INTEGER DEFAULT 0,
   created_by TEXT DEFAULT '',
@@ -120,6 +121,22 @@ CREATE TABLE IF NOT EXISTS kb (
   created_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_kb_gid ON kb (gid);
+CREATE TABLE IF NOT EXISTS plots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  gid TEXT NOT NULL,
+  world_id INTEGER NOT NULL,
+  bid INTEGER NOT NULL,           -- 地块编号
+  kind TEXT DEFAULT '房',         -- 房/公寓/小屋/宅/铺
+  name TEXT DEFAULT '',
+  desc TEXT DEFAULT '',
+  owner_uid TEXT DEFAULT '',      -- 空 = 待售
+  price INTEGER DEFAULT 0,
+  level INTEGER DEFAULT 0,        -- 建筑等级
+  amenities TEXT DEFAULT '{}',
+  built_at REAL,
+  created_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_plots_w ON plots (gid, world_id);
 """
 
 
@@ -163,6 +180,13 @@ class Database:
             # 迁移:关系阶段列(crush/lovers/couple/married + 单恋方向)
             for stmt in ("ALTER TABLE rels ADD COLUMN state TEXT DEFAULT ''",
                          "ALTER TABLE rels ADD COLUMN crush_by TEXT DEFAULT ''"):
+                try:
+                    c.execute(stmt)
+                except sqlite3.OperationalError:
+                    pass  # 已存在
+            # 迁移:世界基础设施 / 主线
+            for stmt in ("ALTER TABLE worlds ADD COLUMN infra TEXT DEFAULT '[]'",
+                         "ALTER TABLE worlds ADD COLUMN mainline TEXT DEFAULT '[]'"):
                 try:
                     c.execute(stmt)
                 except sqlite3.OperationalError:
@@ -229,23 +253,25 @@ class Database:
     def add_world(self, w: World) -> int:
         cur = self._ex(
             "INSERT INTO worlds (gid,name,genre,desc,atmosphere,rules,features,npcs,"
-            "event_ideas,source,visited,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "event_ideas,infra,mainline,source,visited,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 w.gid, w.name, w.genre, w.desc, w.atmosphere,
                 json.dumps(w.rules, ensure_ascii=False),
                 json.dumps(w.features, ensure_ascii=False),
                 json.dumps(w.npcs, ensure_ascii=False),
                 json.dumps(w.event_ideas, ensure_ascii=False),
+                json.dumps(w.infra, ensure_ascii=False),
+                json.dumps(w.mainline, ensure_ascii=False),
                 w.source, w.visited, w.created_by, time.time(),
             ),
         )
         return int(cur.lastrowid)
 
     def update_world(self, wid: int, **fields):
-        """fields 允许 rules/features/npcs/event_ideas(自动 json)。"""
+        """fields 允许 rules/features/npcs/event_ideas/infra/mainline(自动 json)。"""
         jsoned = {}
         for k, v in fields.items():
-            if k in ("rules", "features", "npcs", "event_ideas"):
+            if k in ("rules", "features", "npcs", "event_ideas", "infra", "mainline"):
                 jsoned[k] = json.dumps(v, ensure_ascii=False)
             else:
                 jsoned[k] = v
@@ -679,3 +705,39 @@ class Database:
             "(SELECT id FROM kb WHERE gid=? ORDER BY id DESC LIMIT ?)",
             (gid, gid, keep),
         )
+
+    # ── 地块/住宅(住宅区/村庄)──────────────
+    def plot_add(self, gid, world_id, bid, kind, name, desc, price):
+        cur = self._ex(
+            "INSERT INTO plots (gid,world_id,bid,kind,name,desc,price,created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (gid, world_id, bid, kind, name[:16], desc[:120], int(price), time.time()),
+        )
+        return int(cur.lastrowid)
+
+    def plots(self, gid, world_id) -> list[dict]:
+        rows = self._ex(
+            "SELECT * FROM plots WHERE gid=? AND world_id=? ORDER BY bid", (gid, world_id), "all")
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["amenities"] = _j(d.get("amenities"), {})
+            out.append(d)
+        return out
+
+    def plot_get(self, pid: int) -> dict | None:
+        row = self._ex("SELECT * FROM plots WHERE id=?", (pid,), "one")
+        if not row:
+            return None
+        d = dict(row)
+        d["amenities"] = _j(d.get("amenities"), {})
+        return d
+
+    def plot_update(self, pid: int, **fields):
+        jsoned = {}
+        for k, v in fields.items():
+            if k == "amenities":
+                jsoned[k] = json.dumps(v, ensure_ascii=False)
+            else:
+                jsoned[k] = v
+        cols = ",".join(f"{k}=?" for k in jsoned)
+        self._ex(f"UPDATE plots SET {cols} WHERE id=?", (*jsoned.values(), pid))

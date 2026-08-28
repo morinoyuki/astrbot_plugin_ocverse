@@ -42,6 +42,8 @@ class World:
     features: list = field(default_factory=list)
     npcs: list = field(default_factory=list)
     event_ideas: list = field(default_factory=list)
+    infra: list = field(default_factory=list)      # 基础设施:商店/杂货铺/旅馆/工作/地标
+    mainline: list = field(default_factory=list)   # 世界主线:{stage,title,desc,done}
     source: str = "llm"
     visited: int = 0
     created_by: str = ""
@@ -61,6 +63,8 @@ class World:
             features=_loads(row["features"], []),
             npcs=_loads(row["npcs"], []),
             event_ideas=_loads(row["event_ideas"], []),
+            infra=_loads(row["infra"], []) if "infra" in row.keys() else [],
+            mainline=_loads(row["mainline"], []) if "mainline" in row.keys() else [],
             source=row["source"] or "llm",
             visited=int(row["visited"] or 0),
             created_by=row["created_by"] or "",

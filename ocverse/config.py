@@ -125,12 +125,6 @@ ACTIONS = {
         "kind": "safe",
         "prompt": "去训练场/健身房认真地锻炼体魄,挥汗如雨。",
     },
-    "打工": {
-        "name": "打工",
-        "stamina_cost": 30,
-        "kind": "safe",
-        "prompt": "在当前世界找一份零工或差事干一整天,换取金币报酬。",
-    },
     "打怪": {
         "name": "打怪",
         "stamina_cost": 35,

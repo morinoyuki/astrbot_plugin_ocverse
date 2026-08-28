@@ -21,6 +21,18 @@ from .models import Char, EventRow, World
 
 EVENT_PICK_GROUP_PROB = 0.15   # 主动事件是全员群事件的概率
 EVENT_NPC_PROB = 0.3           # 事件涉及 NPC 的概率
+LIFE_MULTI_PROB = 0.4          # 主动/定时事件是多人生活群像的概率(2~3名玩家角色偶遇/结伴)
+LIFE_MULTI_MAX = 3             # 群像生活事件最多参与角色数
+
+
+def is_npc_uid(uid: str) -> bool:
+    """生活角色(NPC)的 uid 以 npc: 开头,与真人 uid 区分。是群级持久存在,非系世界。"""
+    return isinstance(uid, str) and uid.startswith("npc:")
+
+
+def npc_uid(gid: str, name: str) -> str:
+    """生活角色的稳定合成 uid:按群+名字在 chars 表中唯一,跨世界持久存在。"""
+    return f"npc:{gid}:{name}"
 
 
 def day_key_of(dt: datetime, rollover_hour: int) -> str:
@@ -170,14 +182,68 @@ class Game:
             features=wdata.get("features", []),
             npcs=wdata.get("npcs", []),
             event_ideas=wdata.get("event_ideas", []),
+            infra=wdata.get("infra", []),
+            mainline=wdata.get("mainline", []),
             source=source,
             visited=visited,
             created_by=by,
         )
         w.id = self.db.add_world(w)
         self.db.update_group(gid, cur_world_id=w.id, init_done=1)
+        # 把世界生成时设计的『可购住处』种子进地块表
+        self._seed_plots(gid, w, wdata.get("plots", []))
+        # 世界NPC仍是 world.npcs 里的背景角色(绑定世界);群级持久生活角色由玩家另行『定义角色』
         self.db.append_log(gid, "", "arrive", f"世界落成:《{w.name}》[{w.genre}]", w.name)
         return w
+
+    def _player_chars(self, gid: str) -> list[Char]:
+        """本群真人玩家角色(排除生活角色NPC)。"""
+        return [c for c in self.db.list_chars(gid) if not is_npc_uid(c.uid)]
+
+    def _npc_chars(self, gid: str) -> list[Char]:
+        """本群群级持久生活角色(可参与生活/结婚/变动,带uid存于chars)。"""
+        return [c for c in self.db.list_chars(gid) if is_npc_uid(c.uid)]
+
+    def _life_chars(self, gid: str) -> list[Char]:
+        """所有可参与生活的角色 = 玩家 + 群级持久生活角色。"""
+        return self.db.list_chars(gid)
+
+    def define_npc_char(self, gid: str, name: str, desc: str, by: str = "") -> Char:
+        """定义一个群级持久的『生活角色』(不属于任何真人,跨世界存在)。
+        返回新角色;名字已被占用(玩家或已有np)则抛 GameError。"""
+        if not name:
+            raise GameError("名字不能为空")
+        if self.db.get_char(gid, name):
+            raise GameError("这个名字已被占用")
+        if self.db.get_char(gid, npc_uid(gid, name)):
+            raise GameError("已有一位同名的生活角色")
+        ch = Char(
+            gid=gid, uid=npc_uid(gid, name), name=name[:12],
+            gender="保密",
+            tags=["生活角色"],
+            backstory=(desc or "").strip()[:300] or "一名生活在这个群世界里的角色。",
+        )
+        ch.attrs = self._attrs_from_setting(
+            f"{name} {ch.backstory}",
+            {k: random.randint(20, 45) for k in C.ATTR_KEYS},
+        )
+        self.db.upsert_char(ch)
+        self.db.append_log(gid, "", "misc", f"一位生活角色「{ch.name}」加入了群世界")
+        return ch
+
+    def _seed_plots(self, gid: str, w: World, plots: list):
+        """把世界生成里 LLM 设计的入手住处建成地块记录。"""
+        if self.db.plots(gid, w.id):
+            return  # 已种过(重建世界刷新区块时可能残留则跳过旧世界)
+        for i, p in enumerate(plots, 1):
+            if not isinstance(p, dict) or not (p.get("name") or ""):
+                continue
+            self.db.plot_add(gid, w.id, i, p.get("kind") or "房", p.get("name") or "住处",
+                             p.get("desc") or "", p.get("price") or 200)
+        if not self.db.plots(gid, w.id):
+            # 完全没设计出住处时给默认地块,保证可买
+            for i, nm in enumerate(["转角小屋", "街边平房", "老宅"], 1):
+                self.db.plot_add(gid, w.id, i, "房", nm, f"《{w.name}》的一处落脚处", 200 * i)
 
     async def init_world(self, gid: str, desc: str | None, by: str) -> dict:
         """管理员初始化/重建群世界。返回抵达 view。"""
@@ -219,7 +285,7 @@ class Game:
             self._ensure_group(gid)  # 先建群行,否则 update_group 落空、默认世界无法成为当前世界
             self._install_world(gid, wdata, source="default")
         maxn = self._cfgi("max_chars_per_group", 30)
-        if self.db.count_chars(gid) >= maxn:
+        if len(self._player_chars(gid)) >= maxn:
             raise GameError(f"本群角色数已达上限({maxn}),暂无法创建新角色")
         if self.db.get_char(gid, uid):
             raise GameError("你已经有一个分身了(一人一角色)。可先用「/分身 删除角色」")
@@ -325,7 +391,55 @@ class Game:
             ch.stamina = min(C.STAMINA_MAX, ch.stamina + rec)
             ch.mood = min(C.MOOD_MAX, max(0, ch.mood + (5 if ch.mood < 40 else 0)))
             self.db.upsert_char(ch)
+        # 世界人口流动:当前世界的系统NPC可能来去/换工作
+        self._npc_turnover(gid)
         self.db.update_group(gid, day_key=day)
+
+    def _npc_turnover(self, gid: str):
+        """世界NPC不定时流动:每天小概率让系统NPC变更或迎来新面孔,让世界活起来。
+        只动 builtin=1 的系统NPC,玩家自建NPC(builtin=0)不受影响。"""
+        w = self.db.cur_world(gid)
+        if not w or not w.npcs:
+            return
+        npcs = [n for n in list(w.npcs or []) if isinstance(n, dict)]
+        builtin = [n for n in npcs if n.get("builtin")]
+        if not builtin:
+            return
+        changed = False
+        out = sorted(npcs, key=lambda n: 0 if n.get("builtin") else 1)
+        # 1) 小概率搬走一位系统NPC
+        if random.random() < 0.08 and len(builtin) > 2:
+            victim = random.choice(builtin)
+            out = [n for n in out if n is not victim]
+            self.db.append_log(gid, "", "misc",
+                               f"《{w.name}》的「{victim.get('name')}」收拾行囊搬去了别处", w.name)
+            changed = True
+        # 2) 小概率一位系统NPC换工作(角色/行踪变化)
+        if random.random() < 0.06 and out:
+            cands = [n for n in out if n.get("builtin")]
+            if cands:
+                mover_idx = out.index(random.choice(cands))
+                mover = dict(out[mover_idx])
+                mover["role"] = f"{mover.get('role','居民')}→另谋生路"
+                mover["hook"] = "换了营生的旧相识"
+                out[mover_idx] = mover
+                self.db.append_log(gid, "", "misc",
+                                   f"《{w.name}》的「{mover.get('name')}」换了一份生计", w.name)
+                changed = True
+        # 3) 小概率迎来一位新面孔(用模板,后续LLM互动时自然补全)
+        if random.random() < 0.10 and len(out) < self._cfgi("max_npcs_per_world", 20):
+            names = {n.get("name") for n in out}
+            nm = f"路过者{random.randint(10,99)}"
+            while nm in names:
+                nm = f"路过者{random.randint(10,99)}"
+            out.append({
+                "name": nm[:10], "role": "新来的居民", "persona": "初来乍到,还在熟悉这里",
+                "hook": "." , "daily": "正四处找落脚处", "quirk": "", "builtin": 1,
+            })
+            self.db.append_log(gid, "", "misc", f"一位名叫「{nm}」的新面孔搬进了《{w.name}》")
+            changed = True
+        if changed:
+            self.db.update_world(w.id, npcs=out)
 
     def _active_end_hhmm(self) -> str:
         end_h = max(1, min(24, self._cfgi("active_end_hour", 23)))
@@ -386,7 +500,8 @@ class Game:
 
     # ══════════════ 事件触发/结算 ══════════════
     def _pick_char(self, gid: str) -> Char | None:
-        chars = self.db.list_chars(gid)
+        """公平挑选单人事件主角(仅真人玩家,生活角色无真人可抉择)。"""
+        chars = self._player_chars(gid)
         if not chars:
             return None
         rec = self.db.char_recency(gid)
@@ -408,9 +523,15 @@ class Game:
         chars = self.db.list_chars(gid)
         if not world or not chars:
             return None
-        is_group = char_uid is None and random.random() < EVENT_PICK_GROUP_PROB
+        # 定时推送且无人被点名时:可触发『群像生活事件』(多名玩家角色偶遇/结伴)
+        multi = None
+        if char_uid is None and random.random() < LIFE_MULTI_PROB and len(chars) >= 2:
+            multi = self._pick_life_group(gid)
+            if len(multi) < 2:
+                multi = None
+        is_group = char_uid is None and not multi and random.random() < EVENT_PICK_GROUP_PROB
         char = None
-        if not is_group:
+        if multi is None and not is_group:
             if char_uid:
                 char = self.db.get_char(gid, char_uid)
                 if char is None:
@@ -423,12 +544,42 @@ class Game:
                 if char is None:
                     is_group = True
         npc = None
-        if world.npcs and random.random() < EVENT_NPC_PROB:
+        if multi is None and not is_group and char is not None \
+                and world.npcs and random.random() < EVENT_NPC_PROB:
             npc = random.choice(world.npcs)
         mems = await self.mem.related(
             gid, f"{char.name if char else '群事件'} {world.name} {npc['name'] if npc else ''}",
             uid=char.uid if char else None,
         )
+        if multi is not None:
+            # 群像生活事件:多主角,记忆检索用共同语境
+            mems = await self.mem.related(
+                gid, f"{'、'.join(c.name for c in multi)} {world.name} 相遇 日常",
+                uid=multi[0].uid,
+            )
+            rels = self._group_rels(gid, multi)
+            r = await self.brain.make_life_event(
+                world=world, chars=multi, rels=rels, memories=mems,
+                material=await self._kb_ctx(gid, f"日常 相遇 生活 {world.name}"),
+            )
+            r.data["participants"] = [{"uid": c.uid, "name": c.name} for c in multi]
+            r.data["participant_names"] = [c.name for c in multi]
+            ev = EventRow(
+                gid=gid, uid="", world_id=world.id, kind="life_multi",
+                payload=r.data,
+                expires_at=_now() + self._cfgi("event_expire_minutes", 45) * 60,
+            )
+            ev.id = self.db.insert_event(ev)
+            return {
+                "type": "event",
+                "gid": gid,
+                "uid": ev.uid,
+                "char_name": "、".join(c.name for c in multi),
+                "world_name": world.name,
+                "payload": r.data,
+                "ok_llm": r.ok,
+                "expires_min": self._cfgi("event_expire_minutes", 45),
+            }
         r = await self.brain.make_event(world=world, char=char, kind="npc" if npc else ("group" if is_group else "solo"),
                                         npc=npc, memories=mems, ideas=world.event_ideas,
                                         state_note=self._state_note(char) if char else "",
@@ -452,6 +603,42 @@ class Game:
             "ok_llm": r.ok,
             "expires_min": self._cfgi("event_expire_minutes", 45),
         }
+
+    def _pick_life_group(self, gid: str) -> list[Char]:
+        """随机选 2~LIFE_MULTI_MAX 名未被囚禁的角色组成生活群像(玩家+生活角色共演)。
+        保证至少一名真人玩家(事件由真人抉择),生活角色作为共演增添鲜活感。"""
+        free = [c for c in self.db.list_chars(gid) if not self._is_locked(c)]
+        players = [c for c in free if not is_npc_uid(c.uid)]
+        if not players:
+            return free[:LIFE_MULTI_MAX]  # 无玩家全日真假死,退回原有(理论极难)
+        anchor = random.choice(players)  # 锚点必为真人
+        others = [c for c in free if c.uid != anchor.uid]
+        picked = [anchor]
+        rel_pool = [u for u, _s in self.db.list_rels_for(gid, anchor.uid, k=LIFE_MULTI_MAX * 2)
+                    if u in {c.uid for c in others}]
+        rest = [c for c in others if c.uid not in rel_pool]
+        chosen = rel_pool[: LIFE_MULTI_MAX - 1]
+        n = max(1, min(LIFE_MULTI_MAX - 1, len(others)))
+        for _ in range(n - len(chosen)):
+            if not rest:
+                break
+            chosen.append(rest.pop(random.randrange(len(rest))).uid)
+        for u in chosen:
+            c = self.db.get_char(gid, u)
+            if c:
+                picked.append(c)
+        return picked[:LIFE_MULTI_MAX]
+
+    def _group_rels(self, gid: str, chars: list) -> str:
+        """群像生活事件中,参与者两两关系的一句话描述(供 LLM 参考)。"""
+        lines = []
+        names = [c.name for c in chars]
+        for i in range(len(chars)):
+            for j in range(i + 1, len(chars)):
+                sc = self.db.get_rel(gid, chars[i].uid, chars[j].uid)
+                lab = C.rel_stage_label(sc, self.db.get_rel_full(gid, chars[i].uid, chars[j].uid)["state"])
+                lines.append(f"{names[i]} 与 {names[j]} 的关系:{sc} 分({lab})")
+        return "\n".join(lines) if lines else ""
 
     def _apply_effects(self, ch: Char, effects: dict) -> list[str]:
         """应用效果表,返回人话变更列表;处理升级。"""
@@ -537,6 +724,9 @@ class Game:
         # 守卫式结算:仅当事件仍为 pending 时占用,防双人同时选择
         if not self.db.resolve_event_if_pending(ev.id, idx):
             raise GameError("这个事件刚被处理完了")
+        # 群像生活事件(多角色偶遇/结伴):结算时对每个参与者应用效果并更新彼此羁绊
+        if ev.kind == "life_multi":
+            return await self._settle_life_multi(gid, uid, ev, world, idx)
         target_char = self.db.get_char(gid, ev.uid) if ev.uid else None
         # 防复读:同事件+同选项最近发生过的,要求 AI 这次明显不同
         pick_label = opts[idx]["label"] if idx < len(opts) else ""
@@ -578,6 +768,64 @@ class Game:
             "world_name": world.name if world else "",
             "event_title": ev.payload.get("title", ""),
             "chosen": opts[idx]["label"],
+            "narration": data.get("narration", ""),
+            "dialogues": data.get("dialogues") or [],
+            "avatars": self._avatar_map(gid),
+            "changes": changes,
+            "ok_llm": r.ok,
+        }
+
+    async def _settle_life_multi(self, gid: str, uid: str, ev, world, idx: int) -> dict:
+        """结算群像生活事件:对各参与者应用个体效果、更新两两羁绊、记录记忆与日志。"""
+        parts = [p for p in (ev.payload.get("participants") or []) if isinstance(p, dict) and p.get("uid")]
+        if not parts:
+            raise GameError("群像事件数据异常")  # 理论不可达(已守卫)
+        chars = [self.db.get_char(gid, p["uid"]) for p in parts]
+        chars = [c for c in chars if c]  # 角色可能被删
+        opts = ev.payload.get("options") or []
+        pick = opts[idx] if 0 <= idx < len(opts) else {"label": "顺其自然", "hint": ""}
+        rels = self._group_rels(gid, chars)
+        r = await self.brain.resolve_life_event(
+            world=world, chars=chars, event=ev.payload, choice_idx=idx, rels=rels,
+            material=await self._kb_ctx(gid, "日常 交集 结果 羁绊"),
+        )
+        data = r.data
+        changes: list[str] = []
+        # 个体效果:按角色名匹配 LLM 返回的 effects_by,其余参与者加一个小保底
+        eb = data.get("effects_by") or {}
+        for c in chars:
+            eff = eb.get(c.name) or {}
+            if not eff:
+                eff = {"mood": 2, "exp": 3}  # 保底:这段交集让大家心情略好
+            changes += [f"{c.name}: "] + self._apply_effects(c, eff)
+        # 两两羁绊:本次交集让彼此关系靠近
+        rel_delta = int(data.get("rel_delta") or 0)
+        bond = []
+        for i in range(len(chars)):
+            for j in range(i + 1, len(chars)):
+                self.db.bump_rel(gid, chars[i].uid, chars[j].uid, rel_delta, "群像交集")
+        if rel_delta:
+            bond.append(f"彼此羁绊{'+' if rel_delta > 0 else ''}{rel_delta}")
+        if bond:
+            changes.append("、".join(bond))
+        # 记忆 & 日志
+        mem_text = data.get("memory") or f"{'、'.join(c.name for c in chars)}:「{pick['label']}」——{ev.payload.get('title','')}"
+        for c in chars:
+            await self.mem.remember(gid, c.uid, "char", mem_text, ref=f"life:{ev.id}")
+        await self.mem.remember(gid, "", "world",
+                                f"《{world.name}》{ev.payload.get('title','')}:{(data.get('narration') or '')[:90]}",
+                                ref=f"life:{ev.id}")
+        self.db.append_log(gid, uid, "event",
+                           f"{ev.payload.get('title','')} 选了「{pick['label']}」:{'、'.join(c.name for c in chars)}共同经历",
+                           world.name)
+        return {
+            "type": "result",
+            "gid": gid,
+            "uid": uid,
+            "char_name": "、".join(c.name for c in chars) if chars else "",
+            "world_name": world.name if world else "",
+            "event_title": ev.payload.get("title", ""),
+            "chosen": pick["label"],
             "narration": data.get("narration", ""),
             "dialogues": data.get("dialogues") or [],
             "avatars": self._avatar_map(gid),
@@ -780,6 +1028,19 @@ class Game:
             "ok_llm": r.ok,
         }
 
+    async def interact_life_char(self, gid: str, uid: str, name: str, mode: str, detail: str) -> dict:
+        """玩家与『持久生活角色』互动(与真人互相同的完整链路:可告白/求婚/成婚)。"""
+        a = self.db.get_char(gid, uid)
+        if not a:
+            raise GameError("你还没有创建分身")
+        b_uid = npc_uid(gid, name)
+        b = self.db.get_char(gid, b_uid)
+        if not b:
+            names = "、".join(c.name for c in self._npc_chars(gid)) or "无"
+            raise GameError(f"群世界里没有叫「{name}」的持久生活角色。现有:{names}")
+        # 复用完整互动链路(关系/告白/求婚都按 uid 走,生活角色有 uid 也能成婚)
+        return await self.interact(gid, uid, b_uid, mode, detail)
+
     async def npc_interact(self, gid: str, uid: str, npc_name: str, action: str) -> dict:
         ch = self.db.get_char(gid, uid)
         if not ch:
@@ -826,7 +1087,7 @@ class Game:
             "ok_llm": r.ok,
         }
 
-    # ══════════════ 主动行动(练习/健身/打工/打怪/冒险)══════════════
+    # ══════════════ 主动行动(练习/健身/打怪/冒险)══════════════
     async def act(self, gid: str, uid: str, act_key: str, detail: str = "") -> dict:
         """玩家主动行动一次。act_key: 预设施名或'冒险'(自定义)。消耗体力+每日次数,概率触发机缘奖励。"""
         ch = self.db.get_char(gid, uid)
@@ -837,7 +1098,7 @@ class Game:
             raise GameError("世界尚未初始化,管理员:「/分身 初始化世界」")
         preset = C.ACTIONS.get(act_key) or C.ACTIONS["冒险"]
         name = preset["name"]
-        # 特殊状态:被困时只能靠『冒险』拼脱困,预设施名(练习/健身/打工/打怪)一律禁止
+        # 特殊状态:被困时只能靠『冒险』拼脱困,预设施名(练习/健身/打怪)一律禁止
         state_note = self._state_note(ch)
         if state_note and name != "冒险":
             raise GameError(
@@ -954,6 +1215,7 @@ class Game:
             "role": (role or "居民")[:20],
             "persona": (persona or "性格未详")[:40],
             "hook": (hook or "身上藏着一段待发掘的故事")[:40],
+            "builtin": 0,   # 玩家自建NPC,不参与人口流动淘汰
         }
         npcs.append(npc)
         self.db.update_world(w.id, npcs=npcs)
@@ -1001,7 +1263,9 @@ class Game:
                     self.db.update_world(w.id, genre=d.get("genre", w.genre), desc=d.get("desc", w.desc),
                                          atmosphere=d.get("atmosphere", ""), rules=d.get("rules", []),
                                          features=d.get("features", []), npcs=d.get("npcs", []),
-                                         event_ideas=d.get("event_ideas", []))
+                                         event_ideas=d.get("event_ideas", []),
+                                         infra=d.get("infra", []), mainline=d.get("mainline", []))
+                    self._seed_plots(gid, w, d.get("plots", []))
                 self.db.update_world(w.id, visited=1)
                 self.db.update_group(gid, cur_world_id=w.id)  # 降临即成为当前世界
                 world = self.db.get_world(w.id)
@@ -1101,6 +1365,146 @@ class Game:
         w.id = self.db.add_world(w)
         self.db.append_log(gid, uid, "misc", f"{ch.name} 在世界书里写下了《{name}》(等待降临)")
         return {"name": name, "id": w.id}
+
+    # ══════════════ 基础设施 / 世界主线 / 房产 ══════════════
+    async def mainline_progress(self, gid: str, uid: str) -> dict:
+        """推进世界主线一步:当前未完成的小节中,取第一小节让 LLM 结算这一步的进展。"""
+        ch = self.db.get_char(gid, uid)
+        if not ch:
+            raise GameError("你还没有创建分身")
+        state_note = self._state_note(ch)
+        if state_note:
+            raise GameError(f"⛓ 你正被「{state_note}」困住,暂时没法去推进主线。先脱困再说。")
+        w = self.db.cur_world(gid)
+        if not w:
+            raise GameError("世界尚未初始化")
+        ml = list(w.mainline or [])
+        if not ml:
+            raise GameError("这个世界暂时没有可推进的主线(等新一轮世界变动或重新生成)。")
+        cur = ml[0]
+        # 让 LLM 结算这一步
+        r = await self.brain.resolve_mainline(
+            world=w, char=ch, stage=cur, material=await self._kb_ctx(gid, "世界主线 剧情 推进"))
+        d = r.data
+        changes = self._apply_effects(ch, d.get("effects") or {})
+        cur["done"] = True
+        result_text = d.get("narration", "")
+        self.db.update_world(w.id, mainline=ml)
+        await self.mem.remember(gid, uid, "char",
+                                f"推进了《{w.name}》主线「{cur['stage']}」:{result_text[:60]}",
+                                ref=f"mainline:{w.id}")
+        await self.mem.remember(gid, "", "world",
+                                f"《{w.name}》主线进展:「{cur['stage']}」——{result_text[:80]}")
+        self.db.append_log(gid, uid, "event",
+                           f"{ch.name} 推进主线「{cur['stage']}」:{result_text[:80]}", w.name)
+        remaining = [m for m in ml if not m.get("done")]
+        return {
+            "type": "mainline",
+            "gid": gid,
+            "world_name": w.name,
+            "stage": cur["stage"],
+            "narration": result_text,
+            "changes": changes,
+            "remaining": len(remaining),
+            "ok_llm": r.ok,
+        }
+
+    def _require_free(self, gid: str, uid: str, what: str) -> Char:
+        ch = self.db.get_char(gid, uid)
+        if not ch:
+            raise GameError("你还没有创建分身")
+        if self._is_locked(ch):
+            raise GameError(f"⛓ 你正被「{self._state_note(ch)}」困住,无法{what}。")
+        return ch
+
+    def work_today(self, gid: str, uid: str) -> dict | None:
+        """在世界基础设施里找一份工作干一天(赚金币)。返回 view 或 None(无法工作)。"""
+        ch = self._require_free(gid, uid, "去工作")
+        w = self.db.cur_world(gid)
+        if not w:
+            raise GameError("世界尚未初始化")
+        infra = [x for x in (w.infra or []) if x.get("work")]
+        if not infra:
+            raise GameError(f"《{w.name}》里暂时没有能打工的地方(试试冒险、打工指令,或重新生成世界)。")
+        spot = random.choice(infra)
+        day = self._day_key()
+        flags = dict(ch.flags or {})
+        fk = f"_work:{day}"
+        n = int(flags.get(fk, 0))
+        if n >= 2:
+            raise GameError("今天的工作份额已经满了(每天最多2次),明天再来吧。")
+        flags[fk] = n + 1
+        cost = 25
+        if ch.stamina < cost:
+            raise GameError(f"体力不足({ch.stamina}/{cost}),先去歇歇。")
+        ch.stamina = max(0, ch.stamina - cost)
+        earn = random.randint(25, 55)
+        ch.gold += earn
+        ch.flags = flags
+        self.db.upsert_char(ch)
+        self.db.append_log(gid, uid, "act",
+                           f"{ch.name} 在《{w.name}》的「{spot['name']}」({spot.get('work')})打了半天工,赚了{earn}金币", w.name)
+        return {
+            "type": "work",
+            "gid": gid,
+            "char_name": ch.name,
+            "world_name": w.name,
+            "spot": str(spot.get("name") or "某处"),
+            "occupation": str(spot.get("work") or "打零工"),
+            "earn": earn,
+            "cost": cost,
+            "changes": [f"体力-{cost}", f"金币+{earn}"],
+        }
+
+    def list_plots(self, gid: str, world_ref: str = "") -> list[dict]:
+        """列出某世界的可购/已购地块。"""
+        w = self._find_world(gid, world_ref)
+        return self.db.plots(gid, w.id)
+
+    def buy_plot(self, gid: str, uid: str, idx: int, world_ref: str = "") -> tuple[World, dict, list[str]]:
+        """购买一处房产。返回 (world, plot, changes)。"""
+        ch = self._require_free(gid, uid, "购置房产")
+        w = self._find_world(gid, world_ref)
+        plots = self.db.plots(gid, w.id)
+        if not (0 <= idx < len(plots)):
+            raise GameError("没有这个地块编号")
+        p = plots[idx]
+        if p["owner_uid"]:
+            raise GameError(f"「{p['name']}」已有人购置了。")
+        price = int(p.get("price") or 200)
+        if ch.gold < price:
+            raise GameError(f"金币不足:{ch.gold}/{price}。先去打工或冒险攒钱吧。")
+        ch.gold -= price
+        self.db.upsert_char(ch)
+        self.db.plot_update(p["id"], owner_uid=uid, built_at=time.time())
+        self.db.append_log(gid, uid, "misc",
+                           f"{ch.name} 在《{w.name}》购置了「{p['name']}」({p['kind']}),花费{price}金币", w.name)
+        self.db.update_char(gid, uid, flags={**ch.flags, "home_plot": p["id"]})
+        return w, p, [f"金币-{price}", f"🏠 已购入「{p['name']}」"]
+
+    async def my_home(self, gid: str, uid: str) -> dict:
+        """造访/查看自宅:有房则给一段休息恢复。"""
+        ch = self._require_free(gid, uid, "回宅休息")
+        w = self.db.cur_world(gid)
+        pid = (ch.flags or {}).get("home_plot")
+        if not pid:
+            raise GameError("你还没有房产。用「/分身 房产」或「/分身 买房 <编号>」购置一处吧。")
+        p = self.db.plot_get(int(pid))
+        if not p or str(p.get("world_id")) != str(w.id if w else -1):
+            raise GameError("你的房产不在这里(穿越后到了另一个世界)。")
+        gain = min(C.MOOD_MAX, ch.mood + 8)
+        ch.mood = gain
+        ch.stamina = min(C.STAMINA_MAX, ch.stamina + 15)
+        self.db.upsert_char(ch)
+        self.db.append_log(gid, uid, "misc", f"{ch.name} 回《{w.name}》的「{p['name']}」休息了一阵", w.name)
+        return {
+            "type": "home",
+            "gid": gid,
+            "char_name": ch.name,
+            "world_name": w.name if w else "",
+            "plot": p,
+            "changes": ["心情+8", "体力+15"],
+        }
 
     # ══════════════ 每日小任务(轻松、按世界生成)══════════════
     async def ensure_quests(self, gid: str, uid: str) -> list[dict]:

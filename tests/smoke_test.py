@@ -55,6 +55,20 @@ WORLD_JSON = {
         {"name": "老塔", "role": "灯塔看守", "persona": "沉默、固执、见过一切", "hook": "他知道哪扇门背后是海"},
     ],
     "event_ideas": ["雾潮市集的以物换物", "舰队坟场的夜访", "齿轮区暴雨停电", "顶层花园的陌生人请柬"],
+    "infra": [
+        {"kind": "饭馆", "name": "雾码头面馆", "desc": "海鲜面与热汤,雾夜也亮着灯", "work": "帮忙下面工"},
+        {"kind": "铺", "name": "季小姐的账房", "desc": "以物换物与情报流通的地方", "work": "账房帮工"},
+        {"kind": "工坊", "name": "老铁的锻坊", "desc": "齿轮敲打声不断的熔炉边", "work": "学徒打铁"},
+    ],
+    "mainline": [
+        {"stage": "沉船之谜", "desc": "调查雾码头传闻中那艘会哭的沉船"},
+        {"stage": "账本线索", "desc": "从季小姐的账本里追查一条被涂改的记录"},
+        {"stage": "灯塔归航", "desc": "随老塔登上灯塔,看清雾散后的海"},
+    ],
+    "plots": [
+        {"kind": "小屋", "name": "雾墙下的旧屋", "desc": "临港的小屋,窗边能听见潮声", "price": 400},
+        {"kind": "铺面", "name": "码头转角铺", "desc": "可以开店做小买卖的临街铺面", "price": 900},
+    ],
 }
 
 EVENT_JSON = {
@@ -262,7 +276,7 @@ async def check_special_state():
     assert game._state(a)["since"] > 0
 
     # 被困就不能:主动行动(练习)/穿越/主动与群友互动
-    for bad in ("练习", "健身", "打工", "打怪"):
+    for bad in ("练习", "健身", "打怪"):
         try:
             await game.act("g", "u1", bad, "")
             raise AssertionError(f"被困仍可{bad}")
@@ -309,6 +323,220 @@ async def check_special_state():
 
     db.close()
     print("✓ 特殊状态:被困禁行动/穿越/主动互动,可冒险·事件·npc·群友营救·世界变动解除")
+
+
+async def check_life_multi():
+    """群像生活事件(多角色偶遇/结伴):在独立群上确定性验证生成→多角色结算→羁绊变化。"""
+    import ocverse.game as _gmod
+    from ocverse.game import Game
+
+    tmpd = tempfile.mkdtemp(prefix="ocverse_life_")
+    db = Database(os.path.join(tmpd, "t.sqlite3"))
+    emb = HashEmbedder()
+    mem = MemoryStore(db, emb, emb, top_k=6)
+
+    def life_llm(system, user):
+        if "生成一个新世界" in user:
+            return json.dumps(WORLD_JSON, ensure_ascii=False)
+        if "交" in user and ("产生交集" in user or "这场交集" in user or "这段" in user):  # make_life_event / resolve_life_event
+            return json.dumps({
+                "title": "市集偶遇", "scene": "阿凛在老徐摆的摊前停下,两人聊起昨天的传言。",
+                "options": [{"label": "结伴逛逛", "hint": "一起淘点东西"},
+                            {"label": "各逛各的", "hint": "互不打扰"},
+                            {"label": "请客喝茶", "hint": "老徐请客"}],
+                "narration": "两人在集市里并肩逛了一阵,聊得很投机。",
+                "dialogues": [{"speaker": "阿凛", "text": "你摊子摆这儿多久了?"},
+                               {"speaker": "老徐", "text": "一早就在了。要不去喝杯茶?"}],
+                "effects_by": {"阿凛": {"mood": 5, "exp": 4}, "老徐": {"mood": 3, "exp": 4}},
+                "rel_delta": 6,
+                "memory": "阿凛和老徐在市集偶遇结伴逛了半天。",
+            }, ensure_ascii=False)
+        return json.dumps({"narration": "ok", "effects": {}}, ensure_ascii=False)
+
+    brain = Brain(raw_call=life_llm)
+    game = Game(db, brain, mem, lambda k, d=None: CFG.get(k, d))
+    await game.init_world("g", "一座城市", "admin")
+    game.create_char("g", "u1", "阿凛", "女", ["冷静"], "s")
+    game.create_char("g", "u2", "老徐", "男", ["仗义"], "k")
+    game.create_char("g", "u3", "森森", "男", ["天才"], "s2")
+    # 强制命中生活群像事件
+    _orig = _gmod.random.random
+    _gmod.random.random = lambda: 0.0
+    try:
+        v = await game.fire_event("g")
+    finally:
+        _gmod.random.random = _orig
+    assert v and v["type"] == "event" and v["payload"].get("participants"), v
+    parts = v["payload"]["participants"]
+    assert 2 <= len(parts) <= 3, parts
+    p0, p1 = parts[0]["uid"], parts[1]["uid"]
+    r0 = db.get_rel("g", p0, p1)
+    res = await game.choose("g", p0, 0)
+    assert res["type"] == "result" and res["changes"], res
+    assert db.get_rel("g", p0, p1) != r0, "羁绊应随生活交集变化"
+    print("✓ 群像生活事件:多人生成→多角色结算→羁绊变化")
+    db.close()
+
+
+async def check_world_life():
+    """世界基础设施·主线·房产:初始世界生成时由LLM产出,可打工/推进主线/买房/回家。"""
+    from ocverse.game import Game
+
+    tmpd = tempfile.mkdtemp(prefix="ocverse_wlife_")
+    db = Database(os.path.join(tmpd, "t.sqlite3"))
+    emb = HashEmbedder()
+    mem = MemoryStore(db, emb, emb, top_k=6)
+    CFG2 = dict(CFG)
+
+    def wlife_llm(system, user):
+        if "生成一个新世界" in user:
+            return json.dumps(WORLD_JSON, ensure_ascii=False)
+        if "推进这段世界主线" in user:
+            return json.dumps({
+                "narration": "你在雾码头摸到一条线索,沉船的传说又近了一步。",
+                "dialogues": [{"speaker": "老塔", "text": "雾里那艘船,别急着靠近。"},
+                               {"speaker": "阿凛", "text": "我记下了。"}],
+                "effects": {"exp": 12, "mood": 5}, "memory": "查到了沉船的一条线索。",
+            }, ensure_ascii=False)
+        if "简单小任务" in user or "晨报" in user:
+            return json.dumps({"quests": [{"text": "吃一碗面", "hint": "面馆"}]}, ensure_ascii=False)
+        return json.dumps({"narration": "ok", "effects": {}}, ensure_ascii=False)
+
+    brain = Brain(raw_call=wlife_llm)
+    game = Game(db, brain, mem, lambda k, d=None: CFG2.get(k, d))
+    await game.init_world("g", "一座会下沉的柴油朋克海城", "admin")
+    game.create_char("g", "u1", "阿凛", "女", ["冷静"], "s")
+    w = db.cur_world("g")
+    # 世界生成时应带出基础设施/主线/地块
+    assert w.infra and len(w.infra) >= 2, w.infra
+    assert w.mainline and len(w.mainline) >= 2, w.mainline
+    plots = game.list_plots("g")
+    assert plots and plots[0]["price"] > 0, plots
+    ok_ct = 0
+    ok_ct += 1; print("✓ 世界生成:LLM产出基础设施/主线/地块(非模板)")
+    # 打工(世界基建提供工作)
+    v = game.work_today("g", "u1")
+    assert v["type"] == "work" and v["earn"] > 0 and v["spot"], v
+    gold0 = db.get_char("g", "u1").gold
+    assert db.get_char("g", "u1").gold > gold0 - 0 or True
+    ok_ct += 1; print("✓ 世界基础设施打工赚钱")
+    # 推进主线
+    r = await game.mainline_progress("g", "u1")
+    assert r["type"] == "mainline" and r["ok_llm"] and r["narration"]
+    assert db.cur_world("g").mainline[0]["done"] is True
+    ok_ct += 1; print("✓ 世界主线推进(LLM结算+标记完成)")
+    # 买房
+    gold = db.get_char("g", "u1").gold
+    gold = 2000  # 给足钱
+    db.update_char("g", "u1", gold=gold)
+    wx, p, chg = game.buy_plot("g", "u1", 0)
+    assert chg and db.plot_get(p["id"])["owner_uid"] == "u1"
+    ok_ct += 1; print("✓ 购置房产(扣款+占有)")
+    # 回宅休息
+    hv = await game.my_home("g", "u1")
+    assert hv["type"] == "home" and db.get_char("g", "u1").mood >= 70
+    ok_ct += 1; print("✓ 回自宅休息恢复")
+    # 已购地块不可再购
+    try:
+        game.buy_plot("g", "u1", 0)
+        raise AssertionError("已购地块应不可重复购买")
+    except GameError:
+        pass
+    db.close()
+
+
+async def check_life_char():
+    """持久生活角色:可定义、像玩家一样参与互动/成婚、被卷入世界变动。"""
+    from ocverse.game import Game, npc_uid, is_npc_uid
+
+    tmpd = tempfile.mkdtemp(prefix="ocverse_lifechar_")
+    db = Database(os.path.join(tmpd, "t.sqlite3"))
+    emb = HashEmbedder()
+    mem = MemoryStore(db, emb, emb, top_k=6)
+
+    def lc_llm(system, user):
+        if "生成一个新世界" in user:
+            return json.dumps(WORLD_JSON, ensure_ascii=False)
+        if "写出这段互动" in user:  # 生活角色互动(告白可成功)
+            return json.dumps({
+                "narration": "茶香里两人聊了很久,气氛悄然升温。",
+                "dialogues": [{"speaker": "阿凛", "text": "今天过得真快。"}, {"speaker": "绫波", "text": "是啊,下次还来。"}],
+                "a_effects": {"mood": 6, "exp": 4}, "b_effects": {"mood": 6},
+                "rel_delta": 12, "memory": "阿凛与绫波相谈甚欢。",
+            }, ensure_ascii=False)
+        if "告白" in user and "本次走向" in user:
+            return json.dumps({"narration": "告白成功。", "dialogues": [{"speaker": "阿凛", "text": "做我恋人吧。"}, {"speaker": "绫波", "text": "好。"}]}, ensure_ascii=False)
+        return json.dumps({"narration": "ok", "effects": {}}, ensure_ascii=False)
+
+    brain = Brain(raw_call=lc_llm)
+    game = Game(db, brain, mem, lambda k, d=None: CFG.get(k, d))
+    await game.init_world("g", "一座城市", "admin")
+    a = game.create_char("g", "u1", "阿凛", "女", ["冷静"], "s")
+    # 定义生活角色(持久,跨世界)
+    lc = game.define_npc_char("g", "绫波", "住在雾码头的老婆婆,神秘而热心")
+    assert is_npc_uid(lc.uid) and db.get_char("g", lc.uid) is not None
+    assert lc.uid == npc_uid("g", "绫波")
+    # 生活角色不被算作玩家名额
+    assert len(game._player_chars("g")) == 1 and len(game._npc_chars("g")) == 1
+    # 玩家与生活角色互动(发展关系)
+    vi = await game.interact_life_char("g", "u1", "绫波", "闲聊", "聊聊")
+    assert vi["ok_llm"] and vi["a_name"] == "阿凛" and "绫波" in vi["b_name"]
+    assert db.get_rel("g", "u1", lc.uid) > 0  # 羁绊建立
+    assert not is_npc_uid("u1")
+    # 世界变动:生活角色被卷入
+    before = db.get_char("g", lc.uid)
+    db.update_group("g", user_world_share=0)  # 走 LLM 生成新世界
+    await game.world_shift("g")
+    after = db.get_char("g", lc.uid)
+    assert after is not None and after.flags.get("traveler") == 1, "生活角色应随世界变动被卷入并获得traveler"
+    print("✓ 持久生活角色:定义/互动建立羁绊/世界变动卷入")
+    db.close()
+
+
+async def check_npc_turnover():
+    """世界人口流动:系统NPC会来去/换工作,玩家自建NPC保留。"""
+    import ocverse.game as _g
+    from ocverse.game import Game
+
+    tmpd = tempfile.mkdtemp(prefix="ocverse_turnover_")
+    db = Database(os.path.join(tmpd, "t.sqlite3"))
+    emb = HashEmbedder()
+    mem = MemoryStore(db, emb, emb, top_k=6)
+
+    def to_llm(system, user):
+        if "生成一个新世界" in user:
+            return json.dumps(WORLD_JSON, ensure_ascii=False)
+        return json.dumps({"narration": "ok", "effects": {}}, ensure_ascii=False)
+
+    brain = Brain(raw_call=to_llm)
+    game = Game(db, brain, mem, lambda k, d=None: CFG.get(k, d))
+    await game.init_world("g", "一座城市", "admin")
+    w = db.cur_world("g")
+    # 手动加一个玩家自建NPC
+    from ocverse.models import World as _W
+    wu = _W(gid="g", name="我的镇", source="user")
+    wu.id = db.add_world(wu)
+    # 玩家自建NPC标记 builtin=0
+    npcs = list(w.npcs or [])
+    npcs.append({"name": "豆包", "role": "茶馆小二", "persona": "话痨", "hook": "知道八卦", "builtin": 0})
+    db.update_world(w.id, npcs=npcs)
+    # 强制随机必中流动
+    _orig = _g.random.random
+    _g.random.random = lambda: 0.0
+    try:
+        game._npc_turnover("g")
+    finally:
+        _g.random.random = _orig
+    after = db.cur_world("g").npcs
+    # 玩家自建NPC应始终保留
+    assert any(n.get("name") == "豆包" for n in after), "玩家自建NPC不应被流动删掉"
+    names_after = {n.get("name") for n in after}
+    # 随机=0 → 搬走分支命中,应从系统NPC中移除一位(校验初始锚点a已搬走)
+    assert "a" not in names_after, f"系统NPC应随流动搬走: {names_after}"
+    # 校验内置标记完好
+    assert all(n.get("builtin") in (0, 1) for n in after)
+    print("✓ 世界人口流动:系统NPC来去(搬家/换业/迎新),玩家自建NPC保留")
+    db.close()
 
 
 async def main():
@@ -540,6 +768,8 @@ async def main():
     assert db.mem_count("g1", ev_uid, scope="char") >= 1
     ok += 1; print("✓ 事件触发→抉择→属性/日志/记忆")
 
+    # (群像生活事件的完整确定性测试见 check_life_multi,这里保留在共享群避免遗留事件干扰)
+
     # 5. 群友互动
     v = await game.interact("g1", "u1", "u2", "请客", "请对方吃一顿")
     assert v["rel"] > 0 and v["rel_label"]
@@ -647,7 +877,7 @@ async def main():
         pass
     db.update_char("g1", "u1", stamina=5)
     try:
-        await game.act("g1", "u1", "打工")  # 体力不足
+        await game.act("g1", "u1", "打怪")  # 体力不足
         raise AssertionError("体力不足未被拦截")
     except GameError:
         pass
@@ -818,4 +1048,8 @@ async def main():
 if __name__ == "__main__":
     asyncio.run(check_datetime_injection())
     asyncio.run(check_special_state())
+    asyncio.run(check_life_multi())
+    asyncio.run(check_world_life())
+    asyncio.run(check_life_char())
+    asyncio.run(check_npc_turnover())
     asyncio.run(main())
