@@ -119,11 +119,12 @@ class KnowledgeStore:
     语义检索复用 embedder + 哈希回退。
     """
 
-    def __init__(self, db, embedder, fallback, top_k: int = 3):
+    def __init__(self, db, embedder, fallback, top_k: int = 3, max_items: int = 40):
         self.db = db
         self.embedder = embedder
         self.fallback = fallback
         self.top_k = max(1, top_k)
+        self.max_items = max(1, max_items)
 
     async def _vec(self, text: str) -> list[float]:
         try:
@@ -143,7 +144,11 @@ class KnowledgeStore:
                     return None
         except Exception:
             return None
-        return self.db.kb_add(gid, source, theme, kind, text, v)
+        nid = self.db.kb_add(gid, source, theme, kind, text, v)
+        # 达到上限后淘汰最旧条目,给新素材腾位置(按 id 升序即入库先后)
+        if self.db.kb_count(gid) > self.max_items:
+            self.db.kb_trim(gid, keep=self.max_items)
+        return nid
 
     async def related(self, gid: str, query: str, k: int | None = None) -> list[dict]:
         try:

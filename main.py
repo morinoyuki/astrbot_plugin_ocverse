@@ -92,7 +92,7 @@ class OcversePlugin(Star):
         self.db = Database(os.path.join(data_dir, "ocverse.sqlite3"))
         emb, fb = make_embedder(_cfg, lambda: self.context.get_all_embedding_providers())
         self.mem = MemoryStore(self.db, emb, fb, top_k=self._cfgi("memory_top_k", 6))
-        self.kb = KnowledgeStore(self.db, emb, fb, top_k=3)
+        self.kb = KnowledgeStore(self.db, emb, fb, top_k=3, max_items=self._cfgi("knowledge_base_max", 40))
         self.brain = Brain(raw_call=self._llm_raw, style_extra=str(_cfg("style_prompt", "") or ""),
                            raw_call_tools=self._llm_raw_enriched)
         self.game = Game(self.db, self.brain, self.mem, _cfg, kb=self.kb)

@@ -378,6 +378,15 @@ async def main():
     before = db.kb_count("g1")
     await kb.add("g1", "雾之酒店", "异世界", "work", "雾夜里凭空出现的酒店,只接待迷路的人,退房时用它想带走的回忆结账。")
     assert db.kb_count("g1") == before, "近重复未去重"
+    # 超上限淘汰旧数据
+    kb_max = KnowledgeStore(db, HashEmbedder(), HashEmbedder(), top_k=3, max_items=5)
+    seed_words = "晨雾 灯塔 齿轮 海盗 星云 迷宫 雪原 沙漠 古城 深渊".split()
+    for i in range(10):
+        body = ("《" + seed_words[i] + "的传说》讲述" + seed_words[i] + "中一段与众不同的冒险与羁绊,风土人情各有特色。")
+        await kb_max.add("g_trim", f"源{i}", "主题", "work", body)
+    assert db.kb_count("g_trim") == 5, f"超上限后应只剩5条,实际{db.kb_count('g_trim')}"
+    old_remain = {r["source"] for r in db.kb_rows("g_trim")}
+    assert old_remain == {f"源{i}" for i in range(5, 10)}, f"应保留最新的5条,实际{old_remain}"
     db_game = Game(db, brain, mem, lambda k, d=None: CFG.get(k, d), kb=kb)  # 带 kb 的游戏层
     got = []
     b_kb = Brain(raw_call=lambda sys, usr: (got.append(usr) or json.dumps({

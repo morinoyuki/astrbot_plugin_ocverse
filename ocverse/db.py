@@ -670,3 +670,12 @@ class Database:
     def kb_sources(self, gid: str) -> list[str]:
         rows = self._ex("SELECT source FROM kb WHERE gid=?", (gid,), "all")
         return [r["source"] or "" for r in rows]
+
+    def kb_trim(self, gid: str, keep: int):
+        """知识库超上限时,删除最旧的条目,保留最新的 keep 条(按 id 即入库先后)。"""
+        keep = max(0, int(keep))
+        self._ex(
+            "DELETE FROM kb WHERE gid=? AND id NOT IN "
+            "(SELECT id FROM kb WHERE gid=? ORDER BY id DESC LIMIT ?)",
+            (gid, gid, keep),
+        )
