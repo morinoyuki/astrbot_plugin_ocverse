@@ -355,7 +355,7 @@ class Brain:
 
     # ════════════════ 角色互动 ════════════════
     async def resolve_interaction(self, *, world, a, b=None, npc=None, mode: str,
-                                  detail: str, rel_score: int,
+                                  detail: str, rel_score: int, rel_stage: str = "",
                                   previous: list[str] | None = None) -> BrainResult:
         from .config import rel_label
 
@@ -364,7 +364,8 @@ class Brain:
             b_ps = f"\nB资料:{b.persona_line()},背景:{b.backstory[:100] or '未详'},体力{b.stamina}/心情{b.mood}"
         if npc:
             b_ps = f"\nB资料:{npc.get('name','?')}({npc.get('role','')}),{npc.get('persona','')}"
-        rel_line = f"两人当前关系:{rel_score}({rel_label(rel_score)})。" if not npc else "对方是本世界的NPC。"
+        rel_line = (f"两人当前关系:{rel_score}({rel_stage or rel_label(rel_score)})。" if not npc
+                    else "对方是本世界的NPC。")
         sys = self.style
         user = (
             f"世界:《{world.name}》[{world.genre}] {world.desc}\n"
@@ -725,6 +726,54 @@ class Brain:
                 d2["dialogues"] = []  # 仍独角戏 → 丢弃对话,不渲染独角戏
                 return d2
         return d
+
+
+    # ════════════════ 关系系统:告白 / 求婚(轻小说式场景)════════════════
+    async def confess(self, *, world, a, b, score: int, outcome: str) -> BrainResult:
+        """告白场景。outcome: success(答应) | crush(婉拒留悬念) | reject(明确拒绝)。"""
+        outcome_line = {
+            "success": "告白成功,两人正式确立恋人关系(双向奔赴或水到渠成,写出动情与确定的一刻)",
+            "crush": "告白被温柔地婉拒,但对方心动未泯、留下悬念(单相思的开始,克制而不绝情)",
+            "reject": "告白被明确拒绝(写出局促、尴尬与体面收场,不要狗血)",
+        }.get(outcome, "告白场景")
+        user = (
+            f"世界:《{world.name}》[{world.genre}] {world.desc}\n"
+            f"告白者:{a.persona_line()},背景:{a.backstory[:80] or '未详'}\n"
+            f"被告白者:{b.persona_line()},背景:{b.backstory[:80] or '未详'}\n"
+            f"两人当前好感:{score}。\n"
+            f"本次走向:{outcome_line}。\n"
+            "写一段告白场景:叙述(100~180字,轻小说式)+多轮对话(3~6轮,IM聊天体,"
+            '每条"speaker"≤8字、"text"≤60字)。'
+            "禁止独角戏:双方都必须开口。\n"
+            '严格输出 JSON:{"narration":"告白场景叙述","dialogues":[{"speaker":"","text":""}]}'
+        )
+        d = await self._ask_fixed_dialogues(self.style, user, counterpart=b.name, limit=6)
+        if d and d.get("narration"):
+            return BrainResult(True, {"narration": str(d["narration"])[:300],
+                                      "dialogues": self._norm_dialogues(d.get("dialogues"), 6)})
+        return BrainResult(False, {"narration": "话到了嘴边,终究是说出口了。结果如何,彼此心里都清楚。",
+                                   "dialogues": [{"speaker": a.name, "text": "那个……我喜欢你。"},
+                                                 {"speaker": b.name, "text": "……让我想想。"}]})
+
+    async def propose(self, *, world, a, b, score: int) -> BrainResult:
+        """求婚/缔结伴侣场景(条件已在游戏层校验,必定成功)。"""
+        user = (
+            f"世界:《{world.name}》[{world.genre}] {world.desc}\n"
+            f"求婚者:{a.persona_line()}\n"
+            f"被求婚者:{b.persona_line()}\n"
+            f"两人好感:{score},早已是彼此认定的恋人。\n"
+            "写一段求婚场景:叙述(100~180字,轻小说式,仪式感与动情),"
+            "+多轮对话(3~6轮,IM聊天体,每条\"speaker\"≤8字、\"text\"≤60字)。"
+            "禁止独角戏:双方都必须开口。\n"
+            '严格输出 JSON:{"narration":"求婚场景叙述","dialogues":[{"speaker":"","text":""}]}'
+        )
+        d = await self._ask_fixed_dialogues(self.style, user, counterpart=b.name, limit=6)
+        if d and d.get("narration"):
+            return BrainResult(True, {"narration": str(d["narration"])[:300],
+                                      "dialogues": self._norm_dialogues(d.get("dialogues"), 6)})
+        return BrainResult(False, {"narration": "在那盏灯下,戒指被稳稳戴上。世界仿佛安静了一瞬,然后是彼此的笑声。",
+                                   "dialogues": [{"speaker": a.name, "text": "(单膝跪地)嫁给我,好不好?"},
+                                                 {"speaker": b.name, "text": "(哽咽)……好。"}]})
 
 
 # ════════════════ fallback 模板(离线可玩)════════════════

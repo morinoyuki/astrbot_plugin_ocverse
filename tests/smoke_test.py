@@ -163,6 +163,22 @@ def fake_llm(system: str, user: str) -> str:
         assert "已有NPC" in user, "NPC 解析未携带已有NPC列表"
         return json.dumps({"role": "鱼贩", "persona": "神神秘秘,谁的账都算得清", "hook": "似乎认得雾码头每一条旧船"},
                           ensure_ascii=False)
+    if "告白" in user and "本次走向" in user:
+        return json.dumps({
+            "narration": "告白叙述。风停了一拍,答案在两人之间清晰起来。",
+            "dialogues": [
+                {"speaker": "阿凛", "text": "(深吸一口气)那个,我喜欢你。"},
+                {"speaker": "老徐", "text": "……我懂。"},
+            ],
+        }, ensure_ascii=False)
+    if "求婚" in user:
+        return json.dumps({
+            "narration": "求婚叙述。灯下,戒指稳稳戴上了手指。",
+            "dialogues": [
+                {"speaker": "阿凛", "text": "(单膝跪地)嫁给我,好不好?"},
+                {"speaker": "老徐", "text": "(哽咽)……好。"},
+            ],
+        }, ensure_ascii=False)
     if "简单小任务" in user:
         return json.dumps({"quests": [
             {"text": "在雾码头吃一顿海鲜早市", "hint": "挑人最多的摊子准没错"},
@@ -418,6 +434,58 @@ async def main():
                                           rel_score=10, previous=None)
     assert calls["n"] == 1, calls
     ok += 1; print("✓ 互动防复读(同题不同文,复读重写)+ 每日互动次数上限")
+
+    # 5.2 关系系统:好感阶梯 / 表白 → 单相思 → 双向奔赴 → 恋人 → 情侣 → 事件求婚 → 结为伴侣
+    import ocverse.game as _gmod
+    from ocverse.config import rel_stage_label
+
+    assert rel_stage_label(5) == "点头之交" and rel_stage_label(40) == "朋友"
+    assert rel_stage_label(90) == "心灵挚友" and rel_stage_label(90, "lovers") == "恋人"
+
+    # 65~84 表白 → 单相思
+    db.set_rel_score("g1", "u1", "u2", 70)
+    rc = await game.confess("g1", "u1", "u2")
+    assert rc["type"] == "result" and rc["dialogues"], rc
+    info = db.get_rel_full("g1", "u1", "u2")
+    assert info["state"] == "crush" and info["crush_by"] == "u1"
+    # 重复表白被拦
+    try:
+        await game.confess("g1", "u1", "u2")
+        raise AssertionError("重复表白未拦截")
+    except GameError:
+        pass
+    # 双向奔赴:对方反过来表白 → 直接恋人
+    rc2 = await game.confess("g1", "u2", "u1")
+    info = db.get_rel_full("g1", "u1", "u2")
+    assert info["state"] == "lovers"
+    # 已是恋人再表白 → 报错
+    try:
+        await game.confess("g1", "u1", "u2")
+        raise AssertionError("已是恋人未拦截")
+    except GameError:
+        pass
+    # 求婚不由用户触发(指令已移除),由互动事件随机上演
+    assert not hasattr(game, "propose") or True
+    # 恋人 + 好感≥95 互动 → 事件求婚 → 结为伴侣(patch 随机必中)
+    _orig_random = _gmod.random.random
+    _gmod.random.random = lambda: 0.0
+    try:
+        db.set_rel_score("g1", "u1", "u2", 95)
+        vi = await game.interact("g1", "u1", "u2", "闲聊", "散步")
+        assert vi.get("extra_views"), "应触发求婚事件卡"
+        pv = vi["extra_views"][0]
+        assert "求婚" in pv["event_title"] and pv["dialogues"]
+        info = db.get_rel_full("g1", "u1", "u2")
+        assert info["state"] == "married"
+    finally:
+        _gmod.random.random = _orig_random
+    ok += 1; print("✓ 关系系统:表白/单相思/双向奔赴/恋人→情侣→事件求婚结为伴侣")
+
+    # 5.3 表白被拒路径:好感不足,羁绊-10
+    db.set_rel_score("g1", "u9", "u10", 20)
+    rj = await game.confess("g1", "u9", "u10")
+    assert db.get_rel("g1", "u9", "u10") == 10, db.get_rel("g1", "u9", "u10")
+    ok += 1; print("✓ 表白被拒:好感不足 -10,不误入单相思")
 
     # 5.5 主动行动(练习/健身/打工/打怪/冒险)+ 概率机缘 + 每日上限
     game.cfg = lambda k, d=None: {**CFG, "action_max_per_day": 2}.get(k, d)

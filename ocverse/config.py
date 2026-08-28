@@ -56,8 +56,35 @@ REL_LABELS = [
     (-100, "冷若冰霜"),
 ]
 
+# 关系阶段阶梯(好感度自动变化;特殊态:crush 单相思 / lovers 恋人 / couple 情侣 / married 结为伴侣)
+REL_STAGES = [
+    (80, "心灵挚友"),
+    (55, "莫逆之交"),
+    (30, "朋友"),
+    (10, "熟识"),
+    (1, "点头之交"),
+    (0, "陌生人"),
+    (-10, "看不对眼"),
+    (-35, "冷若冰霜"),
+]
+
 def rel_label(score: int) -> str:
     for th, name in REL_LABELS:
+        if score >= th:
+            return name
+    return "陌生人"
+
+def rel_stage_label(score: int, state: str = "") -> str:
+    """关系名:特殊态优先(恋人/情侣/结为伴侣/单相思),否则按好感阶梯。"""
+    special = {
+        "married": "结为伴侣",
+        "couple": "情侣",
+        "lovers": "恋人",
+        "crush": "单相思",
+    }
+    if state in special:
+        return special[state]
+    for th, name in REL_STAGES:
         if score >= th:
             return name
     return "陌生人"
@@ -128,6 +155,7 @@ LOG_KINDS = {
     "npc": "☂ NPC",
     "act": "⚙ 行动",
     "quest": "🎯 任务",
+    "bond": "💞 关系",
     "shift": "🌀 世界变动",
     "travel": "✈ 穿越抵达",
     "arrive": "☁ 抵达",

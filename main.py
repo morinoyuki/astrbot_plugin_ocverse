@@ -828,15 +828,19 @@ class OcversePlugin(Star):
         rels = self.db.list_rels_for(gid, uid, 4)
         name_map = {c.uid: c.name for c in self.db.list_chars(gid)}
         rel_named = [(name_map.get(u, u[:8]), s) for u, s in rels]
+        rel_labels = {name_map.get(u, u[:8]): self.game.rel_stage_label(gid, uid, u)
+                      for u, s in rels}
         mems = await self.mem.related(gid, f"{ch.name} 最近 经历", uid=uid, k=3)
         badges = [C.FLAG_TITLES[k] for k in ("traveler", "socialite", "survivor")
                   if (ch.flags or {}).get(k)]
         return {"__profile__": True, "ch": ch, "world": world, "rels": rel_named,
+                "rel_labels": rel_labels,
                 "mems": mems, "badges": badges}
 
     def _render_profile(self, v: dict) -> list:
         """把 _profile_view 的 view 渲染成角色卡图片列表(统一渲染入口)。"""
         return profile_card(v["ch"], v["world"], v["rels"], v["mems"], self._card_cfg(),
+                            rel_stage_labels=v.get("rel_labels"),
                             extra_badges=v.get("badges") or [])
 
     async def _yield_profile(self, event, gid: str, uid: str, extra: str = ""):
@@ -958,7 +962,8 @@ class OcversePlugin(Star):
         yield event.plain_result("⏳ 正在演绎这段互动,请稍候…")
         async with self._glock(gid):
             v = await self.game.interact(gid, self._uid(event), target, mode, detail)
-        imgs = render_views([v], self._card_cfg())
+        views = [v] + (v.pop("extra_views", []) or [])  # 事件触发的求婚等附加场景卡
+        imgs = render_views(views, self._card_cfg())
         chain = self._chain(imgs)
         if chain:
             yield event.chain_result(chain)
@@ -1221,6 +1226,26 @@ class OcversePlugin(Star):
         ch = self._char_of(event)
         f = self.game.fortune(ch.uid, ch.name)
         imgs = fortune_card(f, self._card_cfg())
+        chain = self._chain(imgs)
+        if chain:
+            yield event.chain_result(chain)
+
+    # ═══════════════════════════ 指令:关系系统 ═══════════════════════════
+    @oc.command("表白", alias={"告白", "confess"})
+    @_guard
+    async def cmd_confess(self, event: AstrMessageEvent):
+        """分身 表白 @TA - 好感≥85 确立恋人 / 65~84 单相思 / 不足被拒"""
+        gid = self._need_gid(event)
+        target = self._at_target(event)
+        if not target:
+            yield event.plain_result("格式:分身 表白 @TA\n好感≥85 确立恋人;65~84 单相思;不足会被拒绝(羁绊-10)")
+            return
+        self._char_of(event)
+        yield event.plain_result("⏳ 正在酝酿告白,请稍候…")
+        async with self._glock(gid):
+            v = await self.game.confess(gid, self._uid(event), target)
+        views = [v] + (v.pop("extra_views", []) or [])
+        imgs = render_views(views, self._card_cfg())
         chain = self._chain(imgs)
         if chain:
             yield event.chain_result(chain)

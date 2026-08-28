@@ -399,6 +399,7 @@ def help_card(cfg: dict, sub_prefix: str = "分身") -> list[Image.Image]:
             "每天会在活跃时段随机触发事件,卡片里会有 1~3 个选项",
             f"{sub_prefix} 选择 <编号> — 对遭遇做出抉择(属性会变)",
             f"{sub_prefix} 与 @群友 [互动方式/自由行动…] — 和别人的分身交朋友(或结仇)",
+            f"{sub_prefix} 表白 @TA — 好感≥85 恋人 / 65~84 单相思 / 不足被拒;恋人相处中可能自然上演求婚,结为伴侣",
             f"{sub_prefix} 任务 / 交任务 <编号> — 每日小任务(AI 按世界生成,轻松有奖)",
             f"{sub_prefix} npc <名字> <想做什么> — 找当前世界的NPC搭话",
         ]),

@@ -566,14 +566,46 @@ class Game:
         self._interaction_limit_hit(a)
         # 防复读:取最近几次同对象同方式的旧叙述,要求 AI 这次必须明显不同
         prev = self.db.recent_similar_logs(gid, uid_a, [b.name, mode], k=3)
+        pre = self.db.get_rel_full(gid, uid_a, uid_b)
         r = await self.brain.resolve_interaction(
             world=world, a=a, b=b, npc=None, mode=mode, detail=detail,
-            rel_score=self.db.get_rel(gid, uid_a, uid_b), previous=prev,
+            rel_score=pre["score"], rel_stage=C.rel_stage_label(pre["score"], pre["state"]),
+            previous=prev,
         )
         data = r.data
         changes = self._apply_effects(a, data.get("a_effects") or {})
         changes += [f"(对方){x}" for x in self._apply_effects(b, data.get("b_effects") or {})]
         rel = self.db.bump_rel(gid, uid_a, uid_b, int(data.get("rel_delta") or 0), mode)
+        # 关系阶段:恋人好感≥95 自动升温为情侣
+        info = self.db.get_rel_full(gid, uid_a, uid_b)
+        if info["state"] == "lovers" and rel >= 95:
+            self.db.set_rel_state(gid, uid_a, uid_b, "couple")
+            self.db.append_log(gid, uid_a, "bond",
+                               f"{a.name} 和 {b.name} 情感升温,正式确立为情侣", world.name)
+            changes.append("💞 关系升温:正式成为情侣!")
+        extra_views = []
+        # 💍 事件触发求婚:恋人/情侣且好感≥90,日常互动中自然上演求婚场景(而非用户敲指令)
+        if info["state"] in ("lovers", "couple") and rel >= 90 and random.random() < 0.35:
+            proposer, receiver = (a, b) if random.random() < 0.5 else (b, a)
+            pr = await self.brain.propose(world=world, a=proposer, b=receiver, score=rel)
+            self.db.set_rel_state(gid, uid_a, uid_b, "married")
+            self.db.bump_rel(gid, uid_a, uid_b, 5, "结为伴侣")
+            await self.mem.remember(gid, uid_a, "char", f"与{b.name}结为伴侣!", ref=f"marry:{uid_b}")
+            self.db.append_log(gid, uid_a, "bond",
+                               f"💍 {proposer.name} 向 {receiver.name} 求婚 —— 结为伴侣", world.name)
+            extra_views.append({
+                "type": "result",
+                "gid": gid,
+                "uid": uid_a,
+                "char_name": proposer.name,
+                "world_name": world.name,
+                "event_title": f"💍 突然的求婚 · {proposer.name} → {receiver.name}",
+                "chosen": "TA 含泪点头",
+                "narration": pr.data.get("narration", ""),
+                "dialogues": pr.data.get("dialogues") or [],
+                "changes": ["💞 关系 → 结为伴侣", "余生请多指教"],
+                "ok_llm": pr.ok,
+            })
         # 计数/称号
         self._count_interaction(a)
         a.flags["interactions"] = int(a.flags.get("interactions", 0)) + 1
@@ -594,7 +626,8 @@ class Game:
             "dialogues": data.get("dialogues") or [],
             "changes": changes,
             "rel": rel,
-            "rel_label": C.rel_label(rel),
+            "rel_label": C.rel_stage_label(rel, self.db.get_rel_full(gid, uid_a, uid_b)["state"]),
+            "extra_views": extra_views,
             "ok_llm": r.ok,
         }
 
@@ -933,6 +966,79 @@ class Game:
             "world_name": world.name,
             "event_title": f"任务·{q['text']}",
             "chosen": q["text"],
+            "narration": r.data.get("narration", ""),
+            "dialogues": r.data.get("dialogues") or [],
+            "changes": changes,
+            "ok_llm": r.ok,
+        }
+
+    # ══════════════ 关系系统:好感阶梯 / 表白 / 求婚 ══════════════
+    def rel_stage_label(self, gid: str, a: str, b: str) -> str:
+        """两人当前的关系名(特殊态优先,否则按好感阶梯)。"""
+        info = self.db.get_rel_full(gid, a, b)
+        return C.rel_stage_label(info["score"], info["state"])
+
+    async def confess(self, gid: str, uid_a: str, uid_b: str) -> dict:
+        """告白:好感≥85 确立恋人;65~84 单相思;不足被拒扣好感;互为暗恋则双向奔赴。"""
+        a = self.db.get_char(gid, uid_a)
+        if not a:
+            raise GameError("你还没有创建分身")
+        if uid_a == uid_b:
+            raise GameError("不能向自己告白哦")
+        b = self.db.get_char(gid, uid_b)
+        if not b:
+            raise GameError("对方还没有创建分身")
+        world = self.db.cur_world(gid)
+        if not world:
+            raise GameError("世界尚未初始化")
+        info = self.db.get_rel_full(gid, uid_a, uid_b)
+        score = info["score"]
+        if info["state"] in ("lovers", "couple", "married"):
+            raise GameError(f"你们已经是{C.rel_stage_label(score, info['state'])}了,别贪心~")
+        # 对方已另有伴侣/恋人 → 必被拒
+        partner = self.db.special_partner(gid, uid_b)
+        blocked = bool(partner and partner != uid_a)
+        # 双向奔赴:对方此前向我告白过(单相思挂着对方)
+        mutual = info["state"] == "crush" and info["crush_by"] == uid_b
+        if mutual:
+            outcome = "success"
+        elif score >= 85:
+            outcome = "success"
+        elif score >= 65 and not blocked:
+            outcome = "crush"
+        else:
+            outcome = "reject"
+        if info["state"] == "crush" and info["crush_by"] == uid_a and not mutual and score < 85:
+            raise GameError(f"你已向 {b.name} 表白过(单相思)。当前好感 {score},达到 85 再鼓起勇气试一次吧")
+        r = await self.brain.confess(world=world, a=a, b=b, score=score, outcome=outcome)
+        changes = []
+        if outcome == "success":
+            self.db.set_rel_state(gid, uid_a, uid_b, "lovers")
+            self.db.bump_rel(gid, uid_a, uid_b, 10, "表白成功")
+            label = "恋人" if not mutual else "恋人(双向奔赴)"
+            changes = [f"💞 关系 → {label}", "羁绊+10"]
+        elif outcome == "crush":
+            self.db.set_rel_state(gid, uid_a, uid_b, "crush", crush_by=uid_a)
+            label = "单相思"
+            changes = ["💞 关系 → 单相思", "(心动未泯,好感≥85 可再次告白)"]
+        else:
+            delta = -15 if blocked else -10
+            self.db.bump_rel(gid, uid_a, uid_b, delta, "表白被拒")
+            label = "被拒绝"
+            changes = [f"羁绊{delta:+d}", "💞 关系 → 被拒绝"]
+        await self.mem.remember(gid, uid_a, "char",
+                                f"向{b.name}告白,结果:{label}", ref=f"confess:{uid_b}")
+        self.db.append_log(gid, uid_a, "bond",
+                           f"{a.name} 向 {b.name} 告白 —— {label}", world.name)
+        chosen = {"success": "TA 答应了", "crush": "被温柔婉拒", "reject": "被拒绝了"}.get(outcome, "")
+        return {
+            "type": "result",
+            "gid": gid,
+            "uid": uid_a,
+            "char_name": a.name,
+            "world_name": world.name,
+            "event_title": f"告白 · 给 {b.name}",
+            "chosen": chosen,
             "narration": r.data.get("narration", ""),
             "dialogues": r.data.get("dialogues") or [],
             "changes": changes,

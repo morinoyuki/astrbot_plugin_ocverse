@@ -149,6 +149,13 @@ class Database:
             c.execute("PRAGMA journal_mode=WAL")
             c.execute("PRAGMA synchronous=NORMAL")
             c.executescript(SCHEMA)
+            # 迁移:关系阶段列(crush/lovers/couple/married + 单恋方向)
+            for stmt in ("ALTER TABLE rels ADD COLUMN state TEXT DEFAULT ''",
+                         "ALTER TABLE rels ADD COLUMN crush_by TEXT DEFAULT ''"):
+                try:
+                    c.execute(stmt)
+                except sqlite3.OperationalError:
+                    pass  # 已存在
             self.conn.commit()
 
     def close(self):
@@ -331,6 +338,46 @@ class Database:
         a, b = self._pair(a, b)
         row = self._ex("SELECT score FROM rels WHERE gid=? AND a=? AND b=?", (gid, a, b), "one")
         return int(row["score"]) if row else 0
+
+    def get_rel_full(self, gid: str, a: str, b: str) -> dict:
+        """完整关系信息:{score, state, crush_by}。state: crush/lovers/couple/married 或空。"""
+        a, b = self._pair(a, b)
+        row = self._ex(
+            "SELECT score, state, crush_by FROM rels WHERE gid=? AND a=? AND b=?",
+            (gid, a, b), "one",
+        )
+        if not row:
+            return {"score": 0, "state": "", "crush_by": ""}
+        return {"score": int(row["score"] or 0),
+                "state": row["state"] or "",
+                "crush_by": row["crush_by"] or ""}
+
+    def set_rel_score(self, gid: str, a: str, b: str, score: int):
+        a, b = self._pair(a, b)
+        self._ex(
+            "INSERT INTO rels (gid,a,b,score) VALUES (?,?,?,?) "
+            "ON CONFLICT(gid,a,b) DO UPDATE SET score=excluded.score",
+            (gid, a, b, max(-100, min(100, int(score)))),
+        )
+
+    def set_rel_state(self, gid: str, a: str, b: str, state: str, crush_by: str = ""):
+        a, b = self._pair(a, b)
+        self._ex(
+            "INSERT INTO rels (gid,a,b,score,state,crush_by) VALUES (?,?,?,0,?,?) "
+            "ON CONFLICT(gid,a,b) DO UPDATE SET state=excluded.state, crush_by=excluded.crush_by",
+            (gid, a, b, state, crush_by),
+        )
+
+    def special_partner(self, gid: str, uid: str) -> str | None:
+        """uid 的恋人/情侣/伴侣对象 uid(若有)。"""
+        row = self._ex(
+            "SELECT a,b FROM rels WHERE gid=? AND state IN ('lovers','couple','married') "
+            "AND (a=? OR b=?) LIMIT 1",
+            (gid, uid, uid), "one",
+        )
+        if not row:
+            return None
+        return row["b"] if row["a"] == uid else row["a"]
 
     def bump_rel(self, gid: str, a: str, b: str, delta: int, note: str = "") -> int:
         if a == b:
