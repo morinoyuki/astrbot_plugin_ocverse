@@ -759,7 +759,7 @@ class OcversePlugin(Star):
             name = parts[0][:12]
             gender = parts[1][:8] if len(parts) > 1 and parts[1] else "保密"
             tags = [t for t in re.split(r"[、,，/]", parts[2]) if t.strip()][:6] if len(parts) > 2 else []
-            backstory = parts[3][:400] if len(parts) > 3 else ""
+            backstory = parts[3][:600] if len(parts) > 3 else ""
         else:
             # 自然语言:首词为名字,余下整段描述交给 AI 整理成人设
             toks = rest.split(None, 1)
@@ -773,7 +773,7 @@ class OcversePlugin(Star):
                     gender, tags, backstory = r.data["gender"], r.data["tags"], r.data["backstory"]
                     llm_attrs = r.data.get("attrs") or None
                 else:
-                    backstory = desc[:400]  # AI 不可用:描述原文入背景,不丢信息
+                    backstory = desc[:600]  # AI 不可用:描述原文入背景,不丢信息
         async with self._glock(gid):
             ch = self.game.create_char(gid, self._uid(event), name, gender, tags, backstory, attrs=llm_attrs)
             tip = "" if (tags and backstory) else "\n💡 建议用「/分身 编辑 性格/背景 <内容>」补全人设,事件会更有戏"
@@ -890,7 +890,7 @@ class OcversePlugin(Star):
                 tags = [t for t in re.split(r"[、,，/]", val) if t.strip()][:6]
                 self.db.update_char(ch.gid, ch.uid, tags=tags)
             else:
-                self.db.update_char(ch.gid, ch.uid, backstory=val[:400])
+                self.db.update_char(ch.gid, ch.uid, backstory=val[:600])
             yield event.plain_result(f"✅ 已更新「{ch.name}」的{f}")
             return
         # 自由描述:让 AI 判断要改哪些字段(合并保留未提及的旧设定)
@@ -911,7 +911,7 @@ class OcversePlugin(Star):
                 self.db.update_char(ch.gid, ch.uid, tags=d["tags"][:6])
                 changed.append("性格")
             if d.get("backstory"):
-                self.db.update_char(ch.gid, ch.uid, backstory=d["backstory"][:400])
+                self.db.update_char(ch.gid, ch.uid, backstory=d["backstory"][:600])
                 changed.append("背景设定")
         if changed:
             yield event.plain_result(f"✅ AI 已更新「{ch.name}」的:{'、'.join(changed)}")

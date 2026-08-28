@@ -847,7 +847,7 @@ class Brain:
             return BrainResult(True, {
                 "gender": gender,
                 "tags": tags,
-                "backstory": str(d.get("backstory") or "").strip()[:400],
+                "backstory": str(d.get("backstory") or "").strip()[:600],
                 "attrs": attrs,
             })
         return BrainResult(False, {})
@@ -876,7 +876,7 @@ class Brain:
         if tags:
             out["tags"] = tags
         if str(d.get("backstory") or "").strip():
-            out["backstory"] = str(d["backstory"]).strip()[:400]
+            out["backstory"] = str(d["backstory"]).strip()[:600]
         return BrainResult(bool(out), out)
 
     async def parse_npc(self, name: str, text: str, world=None,
