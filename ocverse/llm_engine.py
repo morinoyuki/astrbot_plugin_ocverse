@@ -16,7 +16,7 @@ import json
 import re
 from dataclasses import dataclass
 
-from .config import ATTRS, ATTR_NAMES
+from .config import ATTRS, ATTR_KEYS, ATTR_NAMES
 
 STYLE_BASE = (
     "你是一个群聊文字游戏的叙事引擎,文风简洁生动、有画面感,不水字数、不出戏、"
@@ -98,8 +98,11 @@ class BrainResult:
 class Brain:
     """LLM 高层封装。raw_call 为 None 时全部走 fallback(离线可玩)。"""
 
-    def __init__(self, raw_call=None, style_extra: str = "", timeout: float = 120.0):
+    def __init__(self, raw_call=None, style_extra: str = "", timeout: float = 120.0,
+                 raw_call_tools=None):
         self.raw_call = raw_call
+        # 联网增强通道(如 tool_loop_agent + 搜索工具);仅用于低频、可接受多步耗时的生成
+        self.raw_call_tools = raw_call_tools
         self.style_extra = style_extra or ""
         self.timeout = timeout
 
@@ -110,7 +113,14 @@ class Brain:
             s += f" 文风附加要求:{self.style_extra}"
         return s
 
-    async def _ask(self, system: str, user: str):
+    async def _ask(self, system: str, user: str, use_tools: bool = False):
+        if use_tools and self.raw_call_tools:
+            res = self.raw_call_tools(system, user)
+            if inspect.isawaitable(res):
+                res = await asyncio.wait_for(res, timeout=self.timeout)
+            if res:
+                return res
+            # 联网通道不可用 → 回退普通通道
         if self.raw_call is None:
             return None
         res = self.raw_call(system, user)
@@ -118,10 +128,10 @@ class Brain:
             res = await asyncio.wait_for(res, timeout=self.timeout)
         return res
 
-    async def _ask_json(self, system: str, user: str, retries: int = 1):
+    async def _ask_json(self, system: str, user: str, retries: int = 1, use_tools: bool = False):
         for _ in range(retries + 1):
             try:
-                text = await self._ask(system, user)
+                text = await self._ask(system, user, use_tools=use_tools)
             except (asyncio.TimeoutError, Exception):
                 text = None
             if text:
@@ -139,10 +149,16 @@ class Brain:
         '"event_ideas":["该世界独有事件灵感",4-6条]}'
     )
 
-    async def gen_world(self, desc: str | None = None, avoid_names: list[str] | None = None) -> BrainResult:
+    async def gen_world(self, desc: str | None = None, avoid_names: list[str] | None = None,
+                        theme_hint: str = "") -> BrainResult:
         sys = self.style
+        if desc:
+            ref = desc
+        else:
+            theme = (theme_hint or "").strip()
+            ref = f"自由发挥。整体风格要求:{theme}" if theme else "自由发挥,题材新颖,避开烂大街的西幻冒险开局。"
         user = (
-            "为群聊文字游戏生成一个新世界。世界观设定参考:" + (desc or "自由发挥,题材新颖,避开烂大街的西幻冒险开局。")
+            "为群聊文字游戏生成一个新世界。世界观设定参考:" + ref
         )
         if avoid_names:
             user += "\n不要与这些已有世界重名:" + "、".join(avoid_names[:20])
@@ -150,7 +166,8 @@ class Brain:
             "\nNPC 4~5个(名字不超过6字,融入世界,不要套模板名)。\n"
             f"严格输出 JSON,结构:{self._WORLD_SCHEMA}"
         )
-        d = await self._ask_json(sys, user)
+        # 世界生成是低频操作,允许走联网增强通道(搜索工具)扩充知识
+        d = await self._ask_json(sys, user, use_tools=True)
         if d and d.get("name"):
             return BrainResult(True, self._norm_world(d, source="llm", desc_hint=desc))
         return BrainResult(False, self._fallback_world(desc))
@@ -163,7 +180,7 @@ class Brain:
             "请补全它的题材标签、氛围、规则、独特之处、4~5个NPC、独有事件灵感。尊重玩家设定,不推翻。\n"
             f"严格输出 JSON,结构:{self._WORLD_SCHEMA}"
         )
-        d = await self._ask_json(sys, user)
+        d = await self._ask_json(sys, user, use_tools=True)
         if d and (d.get("name") or d.get("desc")):
             d["name"] = name or d.get("name")
             d["desc"] = d.get("desc") or desc
@@ -239,10 +256,7 @@ class Brain:
             for o in (d.get("options") or [])[:3]:
                 if isinstance(o, dict) and o.get("label"):
                     opts.append({"label": str(o["label"])[:10], "hint": str(o.get("hint", ""))[:16]})
-            while len(opts) < 3:
-                opts = list(FB_EVENT["options"]) if opts == [] else opts
-                break
-            if len(opts) < 3:
+            if len(opts) < 3:  # 不足 3 个选项时用内置模板补齐
                 opts = (opts + [dict(x) for x in FB_EVENT["options"]])[:3]
             ev = {
                 "title": str(d.get("title", "突发状况"))[:12],
@@ -430,6 +444,148 @@ class Brain:
         return []
 
 
+    # ════════════════ 自由文本 → 结构化人设(创角/改角/加NPC)════════════════
+    async def parse_persona(self, text: str) -> BrainResult:
+        """把一段口语化的「设定描述」整理成 {gender, tags, backstory, attrs}。
+        attrs = 按设定分配的初始六维(如「大天才」的智力应最高)。
+        失败返回 ok=False,由调用方朴素兑底(描述原文入背景,不丢信息)。"""
+        attr_line = "、".join(f"{k}({_nm})" for k, _nm in ATTRS)
+        user = (
+            "群友在创建 OC 分身,给了一段口语化的设定描述。请整理成结构化人设,不要编造描述里没有的信息:\n"
+            f"【设定描述】{text[:600]}\n"
+            "1. gender:性别,没提就填「保密」;\n"
+            "2. tags:性格标签数组,2~6个,每个2~6字(如:腹黑/重情义/独来独往/生人勿近),从性格与行事风格中提炼;\n"
+            "3. backstory:第三人称背景设定一段话(60~150字),把外观、穿着、身份、能力、经历等信息全部合并进去,语句通顺;\n"
+            f"4. attrs:按设定强弱给六维分配初始属性(数值 18~60),与设定强相关的 1~2 项给 55~60 且为最高(如「大天才」的 intellect 应最高),普通项 25~40,短板 18~25。键:{attr_line}\n"
+            '严格输出 JSON:{"gender":"","tags":[""],"backstory":"","attrs":{"force":0,"agility":0,"intellect":0,"charm":0,"luck":0,"sanity":0}}'
+        )
+        d = await self._ask_json(self.style, user)
+        if d:
+            tags = [str(t).strip()[:8] for t in (d.get("tags") or []) if str(t).strip()][:6]
+            gender = str(d.get("gender") or "").strip()[:8] or "保密"
+            attrs_in = d.get("attrs") if isinstance(d.get("attrs"), dict) else {}
+            attrs = {}
+            for k in ATTR_KEYS:
+                try:
+                    attrs[k] = max(1, min(60, int(round(float(attrs_in.get(k))))))
+                except (TypeError, ValueError):
+                    pass
+            return BrainResult(True, {
+                "gender": gender,
+                "tags": tags,
+                "backstory": str(d.get("backstory") or "").strip()[:400],
+                "attrs": attrs,
+            })
+        return BrainResult(False, {})
+
+    async def parse_persona_update(self, *, cur_name: str, cur_gender: str,
+                                   cur_tags: list, cur_backstory: str, text: str) -> BrainResult:
+        """从一段自由描述中判断要修改哪些人设字段。
+        只返回需要更新的字段;tags/backstory 给出合并旧设定后的完整新值。"""
+        user = (
+            f"角色「{cur_name}」当前人设:性别 {cur_gender};性格标签:{'、'.join(cur_tags) or '无'};"
+            f"背景设定:{cur_backstory[:200] or '无'}\n"
+            f"玩家发出一段修改描述:{text[:400]}\n"
+            "请判断要更新哪些字段,只输出需要修改的字段:\n"
+            "- gender:仅当明确提及性别时输出;\n"
+            "- tags:输出更新后的完整标签列表(2~6个,每个2~6字,保留仍然成立的旧标签,融合新描述);\n"
+            "- backstory:输出合并后的完整背景设定(保留未被推翻的旧设定,融入新描述);\n"
+            '严格输出 JSON:{"gender":"","tags":[""],"backstory":""}(不改的字段不要出现)'
+        )
+        d = await self._ask_json(self.style, user)
+        if not isinstance(d, dict) or not d:
+            return BrainResult(False, {})
+        out: dict = {}
+        if str(d.get("gender") or "").strip():
+            out["gender"] = str(d["gender"]).strip()[:8]
+        tags = [str(t).strip()[:8] for t in (d.get("tags") or []) if str(t).strip()][:6]
+        if tags:
+            out["tags"] = tags
+        if str(d.get("backstory") or "").strip():
+            out["backstory"] = str(d["backstory"]).strip()[:400]
+        return BrainResult(bool(out), out)
+
+    async def parse_npc(self, name: str, text: str, world=None,
+                        npc_names: list[str] | None = None) -> BrainResult:
+        """把一段口语化描述整理成 NPC 档案 {role, persona, hook}。
+        world: 所在世界(World),连同世界数据一起交给 LLM,确保档案贴合世界观;
+        npc_names: 已有 NPC 名,提示避免重名/职业雷同。失败返回 ok=False。"""
+        user = (
+            f"群友要在世界里添加一位叫「{name}」的NPC,给了一段口语化描述。请整理成档案,不要编造描述里没有的信息:\n"
+            f"【描述】{text[:400]}\n"
+        )
+        if world is not None:
+            user += (
+                f"【所在世界】《{world.name}》[{world.genre}] {world.desc}\n"
+                f"氛围:{world.atmosphere};世界规则:{';'.join(world.rules or [])}\n"
+                "档案(职业/性格/钩子)必须贴合该世界的题材、氛围与规则,不要出现与世界观冲突的设定。\n"
+            )
+        if npc_names:
+            user += f"世界中已有NPC:{'、'.join(list(npc_names)[:10])}。不要与TA们重名,职业也不要雷同。\n"
+        user += (
+            "- role:职业/身份(2~10字,描述没提就结合世界背景推测一个最贴切的);\n"
+            "- persona:性格一句话(≤30字);\n"
+            "- hook:可交互的钩子/悬念一句话(≤30字,带一点神秘感或故事感);\n"
+            '严格输出 JSON:{"role":"","persona":"","hook":""}'
+        )
+        d = await self._ask_json(self.style, user)
+        if d and (d.get("persona") or d.get("role")):
+            return BrainResult(True, {
+                "role": (str(d.get("role") or "").strip() or "居民")[:20],
+                "persona": (str(d.get("persona") or "").strip() or "性格未详")[:40],
+                "hook": (str(d.get("hook") or "").strip() or "身上藏着一段待发掘的故事")[:40],
+            })
+        return BrainResult(False, {})
+
+
+    # ════════════════ 每日小任务(简单、轻松、按世界生成)════════════════
+    async def gen_quests(self, *, world, char, memories: list[str] | None = None) -> BrainResult:
+        """按世界观/角色/记忆生成 3 个日常小任务,目标不要太难。"""
+        mem = "\n".join(memories[:4]) if memories else ""
+        user = (
+            f"世界:《{world.name}》[{world.genre}] {world.desc}\n"
+            f"氛围:{world.atmosphere};世界规则:{';'.join(world.rules or [])}\n"
+            f"角色:{char.persona_line()},背景:{char.backstory[:100] or '未详'}\n"
+            f"{mem}\n"
+            "请给这个角色生成今天要做的 3 个简单小任务:日常小事、无危险、单人容易完成(如吃一顿当地早餐、"
+            "向某位NPC打听一件小事、帮别人一个小忙、找一样有趣的小东西),结合世界设定,充满生活气息。\n"
+            '严格输出 JSON:{"quests":[{"text":"任务描述≤16字","hint":"完成提示≤20字"}]}\n'
+            "恰好 3 个。"
+        )
+        d = await self._ask_json(self.style, user)
+        if d and d.get("quests"):
+            quests = [{"text": str(q.get("text", "")).strip()[:24],
+                       "hint": str(q.get("hint", "")).strip()[:30]}
+                      for q in d["quests"][:3] if isinstance(q, dict) and str(q.get("text", "")).strip()]
+            if quests:
+                return BrainResult(True, {"quests": quests})
+        return BrainResult(False, dict(FB_QUESTS))
+
+    async def finish_quest(self, *, world, char, quest: str,
+                           memories: list[str] | None = None) -> BrainResult:
+        """结算一个小任务:轻松日常的完成叙述 + 很小的奖励(数值克制)。"""
+        mem = "\n".join(memories[:3]) if memories else ""
+        user = (
+            f"世界:《{world.name}》[{world.genre}] {world.desc}\n"
+            f"角色:{char.persona_line()},背景:{char.backstory[:80] or '未详'}\n"
+            f"角色完成了今日小任务:「{quest[:30]}」\n"
+            f"{mem}\n"
+            "写一段简短的完成叙述(40~70字,轻松日常,有画面感,有余味),并给一点小奖励。\n"
+            '严格输出 JSON:{"narration":"完成叙述","effects":{"exp":5~12,"gold":0~20,"mood":0~3}}'
+        )
+        d = await self._ask_json(self.style, user)
+        if d and d.get("narration"):
+            eff_in = d.get("effects") if isinstance(d.get("effects"), dict) else {}
+            eff = {}
+            for k, lo, hi in (("exp", 0, 15), ("gold", 0, 25), ("mood", 0, 5)):
+                try:
+                    eff[k] = max(lo, min(hi, int(round(float(eff_in.get(k) or 0)))))
+                except (TypeError, ValueError):
+                    pass
+            return BrainResult(True, {"narration": str(d["narration"])[:200], "effects": eff})
+        return BrainResult(False, dict(FB_QUEST_DONE))
+
+
 # ════════════════ fallback 模板(离线可玩)════════════════
 FB_EVENT = {
     "title": "街角的异动",
@@ -476,4 +632,17 @@ FB_ARRIVE = {
 FB_MORNING = {
     "brief": "薄雾如期而至。钟楼敲了七下,集市支起了摊子。今天的风里有一点说不清的骚动。",
     "watch": "所有人都该留意脚下的路",
+}
+
+FB_QUESTS = {
+    "quests": [
+        {"text": "在附近吃一顿当地早餐", "hint": "找个顺眼的小店坐下"},
+        {"text": "向一位NPC打听一件小事", "hint": "聊上几句就算数"},
+        {"text": "捡一件有趣的小东西", "hint": "路边的、海边的都行"},
+    ],
+}
+
+FB_QUEST_DONE = {
+    "narration": "你把这件小事认真做完了。日子就是这样一件件小事攒起来的。",
+    "effects": {"exp": 8, "mood": 2},
 }

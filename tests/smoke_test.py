@@ -122,6 +122,34 @@ def fake_llm(system: str, user: str) -> str:
         return json.dumps(MORNING_JSON, ensure_ascii=False)
     if "核心记忆" in user:
         return json.dumps({"cores": ["总在雾天收集奇怪的车票", "和老铁是换过故事的朋友"]}, ensure_ascii=False)
+    if "【设定描述】" in user:
+        return json.dumps({
+            "gender": "男", "tags": ["天才", "生人勿近", "独来独往", "有钱"],
+            "backstory": "白发蓝瞳戴眼镜的帅哥,常穿白色兜帽卫衣与黑色内衬长裤,天资聪颖,家底丰厚,对陌生人冷淡,喜欢独来独往。",
+            "attrs": {"force": 25, "agility": 30, "intellect": 60, "charm": 40, "luck": 20, "sanity": 35},
+        }, ensure_ascii=False)
+    if "修改描述" in user:
+        return json.dumps({
+            "tags": ["开朗", "大胆", "重情义"],
+            "backstory": "海边的短发少女,曾怕黑如今大胆开朗,常走夜路,重情义。",
+        }, ensure_ascii=False)
+    if "整理成档案" in user:
+        # 必须携带世界数据与已有NPC列表,确保设定合理性
+        assert "锈海城" in user, "NPC 解析未携带世界数据"
+        assert "已有NPC" in user, "NPC 解析未携带已有NPC列表"
+        return json.dumps({"role": "鱼贩", "persona": "神神秘秘,谁的账都算得清", "hook": "似乎认得雾码头每一条旧船"},
+                          ensure_ascii=False)
+    if "简单小任务" in user:
+        return json.dumps({"quests": [
+            {"text": "在雾码头吃一顿海鲜早市", "hint": "挑人最多的摊子准没错"},
+            {"text": "向老铁打听齿轮区的传闻", "hint": "聊上两句就算数"},
+            {"text": "拾荒时捡一样小东西", "hint": "跟着十三走准有收获"},
+        ]}, ensure_ascii=False)
+    if "今日小任务" in user:
+        return json.dumps({
+            "narration": "你在雾码头的小摊前坐下,一碗热汤下肚,连风都变得温柔起来。",
+            "effects": {"exp": 10, "gold": 15, "mood": 3},
+        }, ensure_ascii=False)
     if "执行行动" in user:
         return json.dumps(ACT_JSON, ensure_ascii=False)
     raise AssertionError("fake_llm 未覆盖的调用: " + user[:60])
@@ -163,6 +191,34 @@ async def main():
     db.update_char("g1", "u1", avatar=av_path)
     ok += 1; print("✓ 创建角色(属性/重名/头像)")
 
+    # 2.5 自由文本 → AI 结构化(创角整理/改角判断/NPC 档案携世界数据/离线兑底)
+    pr = await game.brain.parse_persona(
+        "外观白发蓝瞳戴眼镜的帅哥 白色兜帽卫衣 黑色内衬和长裤 超级聪明的大天才 "
+        "性格陌生人不易接近 天不怕地不怕 喜欢独来独往 超有钱")
+    assert pr.ok and pr.data["gender"] == "男" and len(pr.data["tags"]) >= 2 and pr.data["backstory"]
+    assert pr.data["attrs"].get("intellect") == 60 and pr.data["attrs"]["intellect"] == max(pr.data["attrs"].values()), \
+        "「大天才」的智力应为最高(60)"
+    pu = await game.brain.parse_persona_update(
+        cur_name="阿凛", cur_gender="女", cur_tags=["胆小", "重情义"],
+        cur_backstory="海边长大,怕黑但总走夜路", text="剪了短发,性格变得开朗大胆")
+    assert pu.ok and "开朗" in "".join(pu.data["tags"]) and pu.data["backstory"]
+    w1 = db.cur_world("g1")
+    pn = await game.brain.parse_npc("鱼婆", "雾码头卖鱼的老婆婆,神神秘秘", world=w1, npc_names=w1.npc_names())
+    assert pn.ok and pn.data["role"] and pn.data["hook"]
+    b_off = Brain(raw_call=None)  # AI 不可用:解析失败 → 调用方朴素兑底
+    assert not (await b_off.parse_persona("随便写写")).ok
+    assert not (await b_off.parse_npc("阿婆", "神秘")).ok
+    ok += 1; print("✓ 自由文本→AI结构化(创角/改角/NPC携世界数据/离线兑底)")
+
+    # 2.6 初始属性按设定分配(AI 分配优先 / 关键词本地兑底)
+    c3 = game.create_char("g1", "u9", "森森", "男", ["天才", "生人勿近"],
+                          "白发蓝瞳超级聪明的大天才,喜欢独来独往", attrs=pr.data["attrs"])
+    assert c3.attrs["intellect"] == 60 and c3.attrs["intellect"] == max(c3.attrs.values())
+    c4 = game.create_char("g1", "u10", "文老", "保密", ["博学"],
+                          "博览群书的智慧长者,冷静理智,村里人都来问他事")
+    assert c4.attrs["intellect"] > 30, c4.attrs  # 关键词兑底:「智慧/博学」→ 智力加权
+    ok += 1; print("✓ 初始属性按设定分配(AI attrs / 关键词兑底)")
+
     # 3. 凌晨4点日切 + 运势
     from datetime import datetime as _dt
     assert day_key_of(_dt(2024, 1, 1, 3, 59), 4) == "2023-12-31"
@@ -180,6 +236,24 @@ async def main():
     modes = {it.get("mode") for it in plan if it["kind"] == "event"}
     assert modes <= {"active", "passive"}
     ok += 1; print(f"✓ 当日计划生成({len(plan)}项: {sorted(kinds)})")
+
+    # 3.5.1 每日重置的体力回复量可配置(同日重复调用,不扰动当日计划)
+    day0 = game._day_key()
+    stamina_before = db.get_char("g1", "u1").stamina  # 还原用,避免影响后续行动测试
+    c = db.get_char("g1", "u1"); c.stamina = 10
+    db.upsert_char(c)
+    game.cfg = lambda k, d=None: {**CFG, "daily_stamina_recovery": 100}.get(k, d)
+    game._daily_reset("g1", day0)
+    assert db.get_char("g1", "u1").stamina == 100, "recovery=100 应回满"
+    c = db.get_char("g1", "u1"); c.stamina = 10
+    db.upsert_char(c)
+    game.cfg = lambda k, d=None: {**CFG, "daily_stamina_recovery": 0}.get(k, d)
+    game._daily_reset("g1", day0)
+    assert db.get_char("g1", "u1").stamina == 10, "recovery=0 应不回复"
+    c = db.get_char("g1", "u1"); c.stamina = stamina_before  # 还原体力
+    db.upsert_char(c)
+    game.cfg = lambda k, d=None: CFG.get(k, d)
+    ok += 1; print("✓ 每日体力回复可配置(100=回满 / 0=不回,默认 40)")
 
     # 3.6 被动事件:埋伏笔 → 群消息引爆(冲着说话者来)
     day = game._day_key()
@@ -292,6 +366,17 @@ async def main():
     assert rm == "豆包" and not any(n["name"] == "豆包" for n in next(x for x in db.list_worlds("g1") if x.id == uw.id).npcs)
     ok += 1; print("✓ 世界NPC:用户自设世界内 列表/删除")
 
+    # 5.5 每日小任务:按世界生成 → 轻松结算 → 小奖励 → 防重复
+    qs = await game.ensure_quests("g1", "u1")
+    assert len(qs) == 3 and all(q["state"] == "open" for q in qs)
+    qv = await game.complete_quest("g1", "u1", 0)
+    assert qv["type"] == "result" and qv["changes"] and qv["narration"]
+    assert db.get_char("g1", "u1").exp >= 5  # 奖励到账
+    # 防重复守卫:同一任务重复结算会被拒(拿刚完成的任务 id 直接验证)
+    done_id = next(q["id"] for q in db.list_quests("g1", "u1", game._day_key()) if q["state"] == "done")
+    assert not db.resolve_quest_if_open(done_id), "重复结算未被拦截"
+    ok += 1; print("✓ 每日小任务:AI 按世界生成 → 结算 → 小奖励 → 防重复")
+
     # 6. NPC 互动
     v = await game.npc_interact("g1", "u2", "老铁", "想打听雾码头的规矩")
     assert "老铁" in v["npc"]["name"] and v["reply"]
@@ -312,7 +397,10 @@ async def main():
     assert any(w.visited and w.name == "糖果星云" for w in db.list_worlds("g1"))
     flags = db.get_char("g1", "u1").flags
     assert flags.get("traveler") == 1
-    ok += 1; print("✓ 定义世界→世界变动(自设世界降临)→全员标记")
+    # 世界变动后,旧世界的待办任务全部作废
+    qs_after = db.list_quests("g1", "u1", game._day_key())
+    assert qs_after and not any(q["state"] == "open" for q in qs_after)
+    ok += 1; print("✓ 定义世界→世界变动(自设世界降临)→全员标记→旧任务作废")
 
     # 8. 自由穿越(回到已访问的锈海城)
     game.cfg = lambda k, d=None: CFG.get(k, d)
@@ -336,6 +424,20 @@ async def main():
     done = await mem.compress_now("g1", "u1", keep=0, summarize_fn=game.brain.summarize_core)
     assert done and db.mem_count("g1", "u1", scope="core") >= 1
     ok += 1; print("✓ 记忆检索+核心记忆压缩")
+
+    # 9.5 删除角色:日志/记忆/羁绊/任务等伴生数据一并清空
+    game.create_char("g1", "u11", "路人甲", "男", [], "")
+    db.append_log("g1", "u11", "misc", "路人甲的测试日志")
+    await mem.remember("g1", "u11", "char", "路人甲的测试记忆")
+    db.bump_rel("g1", "u1", "u11", 5)
+    await game.ensure_quests("g1", "u11")
+    assert db.mem_count("g1", "u11") >= 1 and db.list_quests("g1", "u11", game._day_key())
+    game.delete_char("g1", "u11")
+    assert db.count_logs("g1", "u11") == 0
+    assert db.mem_count("g1", "u11") == 0
+    assert db.get_rel("g1", "u1", "u11") == 0
+    assert not db.list_quests("g1", "u11", game._day_key())
+    ok += 1; print("✓ 删除角色:日志/记忆/羁绊/任务一并清空")
 
     # 10. 离线降级(无LLM)
     b2 = Brain(raw_call=None)

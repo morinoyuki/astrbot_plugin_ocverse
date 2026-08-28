@@ -112,7 +112,7 @@ class Game:
         """管理员初始化/重建群世界。返回抵达 view。"""
         self._ensure_group(gid)
         prev = self.db.cur_world(gid)
-        r = await self.brain.gen_world(desc)
+        r = await self.brain.gen_world(desc, theme_hint=str(self.cfg("world_theme_hint", "") or ""))
         w = self._install_world(gid, r.data, source="llm" if r.ok else "default", by=by)
         if r.ok:
             arr_data = (await self.brain.compose_arrival(world=w, prev_name=prev.name if prev else "", via="init")).data
@@ -136,7 +136,7 @@ class Game:
 
     # ══════════════ 角色 ══════════════
     def create_char(self, gid: str, uid: str, name: str, gender: str,
-                    tags: list[str], backstory: str) -> Char:
+                    tags: list[str], backstory: str, attrs: dict | None = None) -> Char:
         if not self.is_initialized(gid):
             # 自动落内置默认世界(零 LLM 开销,管理员之后可重建)
             hint = (self.cfg("default_world_hint", "") or "").strip()
@@ -157,25 +157,53 @@ class Game:
         # 初始六维:由背景气质做个轻量倾斜,其余随机 18~40
         text = f"{name} {' '.join(ch.tags)} {ch.backstory}"
         h = zlib.crc32(text.encode())
-        random.seed(h)
+        # 局部随机源:不要 re-seed 全局 random,否则会影响同一事件循环里其它调度任务的随机性
+        rng = random.Random(h)
         w0 = self.db.cur_world(gid)
         wname = w0.name if w0 else "未知之地"
         for i, k in enumerate(C.ATTR_KEYS):
-            base = random.randint(18, 40)
+            base = rng.randint(18, 40)
             if text and (i + ord(text[0])) % 3 == 0:
-                base += random.randint(4, 9)   # 让每个角色的强项不同
+                base += rng.randint(4, 9)   # 让每个角色的强项不同
             ch.attrs[k] = min(60, base)
-        random.seed()
+        # 初始属性分配:AI 按设定分配(自然语言创建)优先;否则按设定关键词本地加权
+        # (如「超级聪明的大天才」→ 智力最高),纯离线/竖线路径也有倾斜
+        if attrs:
+            for k in C.ATTR_KEYS:
+                try:
+                    if k in attrs:
+                        ch.attrs[k] = max(1, min(60, int(attrs[k])))
+                except (TypeError, ValueError):
+                    pass
+        else:
+            ch.attrs = self._attrs_from_setting(text, ch.attrs)
         self.db.upsert_char(ch)
         self.db.append_log(gid, uid, "create", f"{name} 在《{wname}》降生", wname)
         return ch
+
+    @staticmethod
+    def _attrs_from_setting(text: str, base: dict) -> dict:
+        """零成本本地加权:设定描述命中关键词的属性加分,命中最多的额外突出。"""
+        if not text:
+            return base
+        score = {k: sum(text.count(w) for w in words) for k, words in C.ATTR_HINTS.items()}
+        if not any(score.values()):
+            return base
+        top = max(score.values())
+        out = dict(base)
+        for k, s in score.items():
+            if s > 0:
+                out[k] = min(60, out[k] + 4 + s * 3 + (6 if s == top else 0))
+        return out
 
     def delete_char(self, gid: str, uid: str) -> str:
         ch = self.db.get_char(gid, uid)
         if not ch:
             raise GameError("你还没有创建分身")
         self.db.delete_char(gid, uid)
-        self.db.append_log(gid, uid, "misc", f"分身「{ch.name}」悄然离场")
+        # 连同日志/记忆/羁绊/待决事件/任务一起清空,不留"幽灵数据"
+        self.db.purge_char_data(gid, uid)
+        self.db.append_log(gid, "", "misc", f"分身「{ch.name}」悄然离场")
         return ch.name
 
     # ══════════════ 每日计划 & 调度 ══════════════
@@ -217,8 +245,10 @@ class Game:
         return items
 
     def _daily_reset(self, gid: str, day: str):
+        # 体力日回复量可配置(钳制非负),0 = 当天不回复
+        rec = max(0, self._cfgi("daily_stamina_recovery", 40))
         for ch in self.db.list_chars(gid):
-            ch.stamina = min(C.STAMINA_MAX, ch.stamina + 40)
+            ch.stamina = min(C.STAMINA_MAX, ch.stamina + rec)
             ch.mood = min(C.MOOD_MAX, max(0, ch.mood + (5 if ch.mood < 40 else 0)))
             self.db.upsert_char(ch)
         self.db.update_group(gid, day_key=day)
@@ -667,7 +697,10 @@ class Game:
         w = self._find_world(gid, world_ref)
         self._require_user_world(w)
         if not name:
-            raise GameError("格式:分身 添加NPC <名字> | 职业 | 性格 | 钩子")
+            raise GameError(
+                "格式:分身 添加NPC <名字> [描述…] [世界名](AI 自动整理档案)\n"
+                "或:分身 添加NPC <名字>|职业|性格|钩子 [世界名]"
+            )
         npcs = list(w.npcs or [])
         if any((n.get("name") or "") == name for n in npcs if isinstance(n, dict)):
             raise GameError(f"《{w.name}》已有叫「{name}」的NPC")
@@ -734,6 +767,8 @@ class Game:
             wdata = r.data
             world = self._install_world(gid, wdata, source="llm" if r.ok else "default")
         self.db.update_group(gid, last_shift_at=_now())
+        # 旧世界的今日任务随变动作废(到新世界可重新领取)
+        self.db.expire_open_quests(gid)
         # 全员穿越奖励 + 计数
         for ch in self.db.list_chars(gid):
             ch.flags = ch.flags or {}
@@ -781,6 +816,8 @@ class Game:
         if cur and target_w.id == cur.id:
             raise GameError("你们已经在这个世界了")
         self.db.update_group(gid, cur_world_id=target_w.id, last_travel_at=_now())
+        # 任务与世界绑定:穿越后旧任务作废,到新世界可重新领取
+        self.db.expire_open_quests(gid)
         arr = await self.brain.compose_arrival(world=target_w, prev_name=cur.name if cur else "", via="travel")
         arr_data = arr.data if hasattr(arr, "data") else arr
         await self.mem.remember(gid, "", "world", f"自由穿越:从《{cur.name if cur else ''}》到《{target_w.name}》")
@@ -804,6 +841,60 @@ class Game:
         w.id = self.db.add_world(w)
         self.db.append_log(gid, uid, "misc", f"{ch.name} 在世界书里写下了《{name}》(等待降临)")
         return {"name": name, "id": w.id}
+
+    # ══════════════ 每日小任务(轻松、按世界生成)══════════════
+    async def ensure_quests(self, gid: str, uid: str) -> list[dict]:
+        """领取/查看今日小任务:无则按世界+角色+记忆生成 3 个(目标不要太难)。"""
+        day = self._day_key()
+        qs = self.db.list_quests(gid, uid, day)
+        if qs:
+            return qs
+        ch = self.db.get_char(gid, uid)
+        if not ch:
+            raise GameError("你还没有创建分身,先「分身 创建 名字」")
+        world = self.db.cur_world(gid)
+        if not world:
+            raise GameError("世界尚未初始化")
+        mems = await self.mem.related(gid, f"{ch.name} 日常 小目标", uid=uid, k=3)
+        r = await self.brain.gen_quests(world=world, char=ch, memories=mems)
+        for t in (r.data.get("quests") or [])[:3]:
+            if t.get("text"):
+                self.db.add_quest(gid, uid, day, t["text"], t.get("hint", ""))
+        return self.db.list_quests(gid, uid, day)
+
+    async def complete_quest(self, gid: str, uid: str, idx: int) -> dict:
+        """完成一个小任务:轻松结算 + 小奖励(exp/gold/mood 都很克制)。"""
+        ch = self.db.get_char(gid, uid)
+        if not ch:
+            raise GameError("你还没有创建分身")
+        world = self.db.cur_world(gid)
+        day = self._day_key()
+        open_qs = [q for q in self.db.list_quests(gid, uid, day) if q["state"] == "open"]
+        if not open_qs:
+            raise GameError("今天没有可完成的任务了(先发「分身 任务」领取)")
+        if not (0 <= idx < len(open_qs)):
+            raise GameError(f"请选择 1~{len(open_qs)} 之间的编号")
+        q = open_qs[idx]
+        if not self.db.resolve_quest_if_open(q["id"]):
+            raise GameError("这个任务刚被完成了")
+        mems = await self.mem.related(gid, f"{ch.name} {q['text']}", uid=uid, k=2)
+        r = await self.brain.finish_quest(world=world, char=ch, quest=q["text"], memories=mems)
+        changes = self._apply_effects(ch, r.data.get("effects") or {})
+        await self.mem.remember(gid, uid, "char", f"完成了小任务「{q['text']}」", ref=f"quest:{q['id']}")
+        self.db.append_log(gid, uid, "quest",
+                           f"完成小任务「{q['text']}」:{(r.data.get('narration') or '')[:80]}", world.name)
+        return {
+            "type": "result",
+            "gid": gid,
+            "uid": uid,
+            "char_name": ch.name,
+            "world_name": world.name,
+            "event_title": f"任务·{q['text']}",
+            "chosen": q["text"],
+            "narration": r.data.get("narration", ""),
+            "changes": changes,
+            "ok_llm": r.ok,
+        }
 
     # ══════════════ 晨报 ══════════════
     async def fire_morning(self, gid: str) -> dict | None:

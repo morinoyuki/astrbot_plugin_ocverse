@@ -92,7 +92,8 @@ class OcversePlugin(Star):
         self.db = Database(os.path.join(data_dir, "ocverse.sqlite3"))
         emb, fb = make_embedder(_cfg, lambda: self.context.get_all_embedding_providers())
         self.mem = MemoryStore(self.db, emb, fb, top_k=self._cfgi("memory_top_k", 6))
-        self.brain = Brain(raw_call=self._llm_raw, style_extra=str(_cfg("style_prompt", "") or ""))
+        self.brain = Brain(raw_call=self._llm_raw, style_extra=str(_cfg("style_prompt", "") or ""),
+                           raw_call_tools=self._llm_raw_enriched)
         self.game = Game(self.db, self.brain, self.mem, _cfg)
         self.avatars = AvatarStore(data_dir)
 
@@ -103,6 +104,7 @@ class OcversePlugin(Star):
         self._glocks: dict[str, asyncio.Lock] = {}  # 每群一把锁:LLM 调用期间锁定改数据的指令,防竞态
         self._confirm: dict[str, float] = {}    # 二次确认状态
         self._default_mode_hint = {m: d for m, d in C.DEFAULT_INTERACTIONS}
+        self._web_tools = None  # 联网搜索工具集(懒加载缓存)
 
     # ═══════════════════════════ 基础设施 ═══════════════════════════
     def _cfgi(self, key, default):
@@ -123,6 +125,68 @@ class OcversePlugin(Star):
         }
 
     # ── LLM provider ──────────────────────────────────────────────
+    def _web_tool_set(self):
+        """收集可用的联网搜索类 LLM 工具(如 astrbot-plugin-tavily 注册的),构建 ToolSet。"""
+        if self._web_tools is not None:
+            return self._web_tools
+        self._web_tools = []  # 空列表也作为"已探测"的缓存
+        try:
+            pm = getattr(self.context, "provider_manager", None)
+            llm_tools = getattr(pm, "llm_tools", None) if pm else None
+            get_func = getattr(llm_tools, "get_func", None) if llm_tools else None
+            if get_func is None:
+                return []
+            from astrbot.core.agent.tool import ToolSet  # noqa: 延迟导入,版本不含时走 except
+            ts = ToolSet()
+            for name in ("web_search_tavily", "web_search", "search_web",
+                         "tavily_extract_web_page", "webpage_extract"):
+                t = get_func(name)
+                if t is not None:
+                    ts.add_tool(t)
+            self._web_tools = ts if len(ts) else []
+        except Exception as e:
+            logger.debug(f"ocverse: 构建联网工具集失败: {e}")
+            self._web_tools = []
+        return self._web_tools
+
+    @staticmethod
+    def _extract_completion(resp) -> str:
+        """从 tool_loop_agent 的返回中提取最终文本(兼容 LLMResponse / result_chain 形态)。"""
+        if resp is None:
+            return ""
+        t = getattr(resp, "completion_text", None)
+        if t:
+            return t
+        rc = getattr(resp, "result_chain", None)
+        if rc is not None:
+            try:
+                for comp in getattr(rc, "chain", None) or []:
+                    if isinstance(comp, Plain):
+                        return comp.text or ""
+            except Exception:
+                pass
+        return ""
+
+    async def _llm_raw_enriched(self, system: str, user: str) -> str | None:
+        """联网增强通道:tool_loop_agent + 搜索工具,扩充世界/规则等生成的知识面。
+        任何不可用(未装搜索插件/版本不支持/失败)都返回 None,由 Brain 自动回退普通通道。"""
+        if not self._cfg("web_search_world_gen", True):
+            return None
+        tools = self._web_tool_set()
+        fn = getattr(self.context, "tool_loop_agent", None)
+        if not tools or fn is None:
+            return None
+        try:
+            async with self._sem:
+                resp = await fn(system_prompt=system, prompt=user, contexts=[], tools=tools,
+                                max_steps=self._cfgi("web_search_max_steps", 4))
+            return (self._extract_completion(resp) or "").strip() or None
+        except TypeError:
+            return None  # 版本签名不符 → 回普通通道
+        except Exception as e:
+            logger.debug(f"ocverse: 联网增强生成失败,回退普通通道: {e}")
+            return None
+
     async def _get_provider(self):
         try:
             pid = str(self._cfg("provider_id", "") or "").strip()
@@ -208,7 +272,9 @@ class OcversePlugin(Star):
     def _rest(event: AstrMessageEvent, *names: str) -> str:
         """提取命令 token 之后的所有文本(自动跳过唤醒前缀)。"""
         text = (event.message_str or "").strip()
-        for n in names:
+        # 先匹配更长的命令词(如「创建角色」优先于「创建」),
+        # 否则「分身 创建角色 凛」会被「创建」截断成名字「角色 凛」
+        for n in sorted(names, key=len, reverse=True):
             idx = text.find(n)
             if idx >= 0:
                 return text[idx + len(n):].strip()
@@ -566,33 +632,59 @@ class OcversePlugin(Star):
     @oc.command("创建", alias={"create", "创建角色"})
     @_guard
     async def cmd_create(self, event: AstrMessageEvent):
-        """分身 创建 <名字> [|性别|性格,性格|背景故事…] - 创建你的 OC 分身(一人一个)"""
+        """分身 创建 <名字> [设定描述…] - 创建你的 OC 分身(AI 自动整理人设,一人一个)"""
         gid = self._need_gid(event)
         rest = self._rest(event, "创建", "create", "创建角色")
-        parts = [p.strip() for p in rest.split("|")]
-        if not parts or not parts[0]:
+        if not rest:
             yield event.plain_result(
-                "格式:分身 创建 <名字> [|性别|性格,性格|背景故事…]\n"
-                "例如:分身 创建 凛 | 女 | 腹黑,重情义 | 曾在雾夜的海边捡到一枚会唱歌的贝壳…\n"
-                "竖线后可省略任意段,之后用「分身 编辑」补全;头像用「分身 设置头像」+ 图片"
+                "格式:分身 创建 <名字> [设定描述…](AI 自动整理成人设)\n"
+                "例如:分身 创建 森森 外观白发蓝瞳戴眼镜的帅哥,白色兜帽卫衣黑色内衬长裤,超级聪明的大天才,性格生人勿近 天不怕地不怕 喜欢独来独往 超有钱\n"
+                "也兼容竖线速写:分身 创建 <名字> |性别|性格,性格|背景设定…\n"
+                "设定可留空之后用「分身 编辑」补全;头像用「分身 设置头像」+ 图片"
             )
             return
-        name = parts[0][:12]
-        gender = parts[1][:8] if len(parts) > 1 and parts[1] else "保密"
-        tags = [t for t in re.split(r"[、,，/]", parts[2]) if t.strip()][:6] if len(parts) > 2 else []
-        backstory = parts[3][:400] if len(parts) > 3 else ""
+        if "|" in rest:
+            # 旧竖线速写:切段即可,不耗 AI
+            parts = [p.strip() for p in rest.split("|")]
+            if not parts[0]:
+                yield event.plain_result("名字不能为空:分身 创建 <名字> |性别|性格,性格|背景设定…")
+                return
+            name = parts[0][:12]
+            gender = parts[1][:8] if len(parts) > 1 and parts[1] else "保密"
+            tags = [t for t in re.split(r"[、,，/]", parts[2]) if t.strip()][:6] if len(parts) > 2 else []
+            backstory = parts[3][:400] if len(parts) > 3 else ""
+        else:
+            # 自然语言:首词为名字,余下整段描述交给 AI 整理成人设
+            toks = rest.split(None, 1)
+            name = toks[0][:12]
+            desc = (toks[1] if len(toks) > 1 else "").strip()
+            gender, tags, backstory, llm_attrs = "保密", [], "", None
+            if desc:
+                r = await self.brain.parse_persona(desc)
+                if r.ok:
+                    gender, tags, backstory = r.data["gender"], r.data["tags"], r.data["backstory"]
+                    llm_attrs = r.data.get("attrs") or None
+                else:
+                    backstory = desc[:400]  # AI 不可用:描述原文入背景,不丢信息
         async with self._glock(gid):
-            ch = self.game.create_char(gid, self._uid(event), name, gender, tags, backstory)
+            ch = self.game.create_char(gid, self._uid(event), name, gender, tags, backstory, attrs=llm_attrs)
             tip = "" if (tags and backstory) else "\n💡 建议用「分身 编辑 性格/背景 <内容>」补全人设,事件会更有戏"
-            if await self._images_with_quoted(event):
-                if await self._save_avatar_bytes(ch, (await self._images_with_quoted(event))[0]):
-                    tip += "\n🖼️ 已顺手把随指令的图片设为头像"
+            attached = await self._images_with_quoted(event)  # 只解析一次,避免重复处理引用消息
+            if attached and await self._save_avatar_bytes(ch, attached[0]):
+                tip += "\n🖼️ 已顺手把随指令的图片设为头像"
             w = self.db.cur_world(gid)
             v = await self._profile_view(gid, self._uid(event))
-        imgs = render_views([v], self._card_cfg())
-        chain = self._chain(imgs, f"✨ {ch.name} 降临于《{w.name if w else '?'}》{tip}")
+        text = f"✨ {ch.name} 降临于《{w.name if w else '?'}》{tip}"
+        try:
+            chain = self._chain(self._render_profile(v), text)
+        except Exception as e:
+            logger.warning(f"ocverse: 创建角色卡片渲染失败: {e}")
+            chain = []
         if chain:
             yield event.chain_result(chain)
+        else:
+            # 卡片渲染不可用时也必须给出成功提示,不能沉默
+            yield event.plain_result(text)
 
     async def _save_avatar_bytes(self, ch, img_comp) -> bool:
         try:
@@ -622,7 +714,7 @@ class OcversePlugin(Star):
             return
         if now - self._confirm.get(key, 0) > 120:
             self._confirm[key] = now
-            yield event.plain_result(f"⚠ 将删除分身「{ch.name}」(角色卡与头像)。确认请再发一次「分身 删除角色」")
+            yield event.plain_result(f"⚠ 将删除分身「{ch.name}」(角色卡、头像、日志与记忆全部清除)。确认请再发一次「分身 删除角色」")
             return
         self._confirm.pop(key, None)
         async with self._glock(gid):
@@ -648,33 +740,73 @@ class OcversePlugin(Star):
             yield event.plain_result("❌ 头像保存失败,请换一张图片重试")
             return
         v = await self._profile_view(gid, self._uid(event))
-        imgs_out = render_views([v], self._card_cfg())
-        chain = self._chain(imgs_out, "🖼️ 头像已更新")
+        try:
+            chain = self._chain(self._render_profile(v), "🖼️ 头像已更新")
+        except Exception as e:
+            logger.warning(f"ocverse: 头像卡片渲染失败: {e}")
+            chain = []
         if chain:
             yield event.chain_result(chain)
+        else:
+            yield event.plain_result("🖼️ 头像已更新")
 
     @oc.command("编辑", alias={"edit"})
     @_guard
     async def cmd_edit(self, event: AstrMessageEvent):
-        """分身 编辑 性别|性格|背景 <内容> - 修改人设"""
+        """分身 编辑 性别|性格|背景(设定) <内容> 或直接自由描述 - 修改人设"""
         ch = self._char_of(event)
         content = self._rest(event, "编辑", "edit")
-        m = re.match(r"^(性别|性格|背景)(?:\s+|$)(.*)$", content, re.S)
-        if not m:
-            yield event.plain_result("格式:分身 编辑 性别|性格|背景 <内容>\n例如:分身 编辑 性格 高冷,毒舌,护短")
+        if not content:
+            yield event.plain_result(self._edit_usage())
             return
-        f, val = m.group(1), m.group(2).strip()
-        if not val:
-            yield event.plain_result("内容不能为空")
+        # 「背景设定」要放在「背景」前面,否则会被截成 背景 + "设定 …"
+        m = re.match(r"^(性别|性格|背景设定|背景)(?:\s+|$)(.*)$", content, re.S)
+        if m:
+            f, val = m.group(1), m.group(2).strip()
+            if not val:
+                yield event.plain_result("内容不能为空")
+                return
+            if f == "性别":
+                self.db.update_char(ch.gid, ch.uid, gender=val[:8])
+            elif f == "性格":
+                tags = [t for t in re.split(r"[、,，/]", val) if t.strip()][:6]
+                self.db.update_char(ch.gid, ch.uid, tags=tags)
+            else:
+                self.db.update_char(ch.gid, ch.uid, backstory=val[:400])
+            yield event.plain_result(f"✅ 已更新「{ch.name}」的{f}")
             return
-        if f == "性别":
-            self.db.update_char(ch.gid, ch.uid, gender=val[:8])
-        elif f == "性格":
-            tags = [t for t in re.split(r"[、,，/]", val) if t.strip()][:6]
-            self.db.update_char(ch.gid, ch.uid, tags=tags)
+        # 自由描述:让 AI 判断要改哪些字段(合并保留未提及的旧设定)
+        r = await self.brain.parse_persona_update(
+            cur_name=ch.name, cur_gender=ch.gender, cur_tags=list(ch.tags or []),
+            cur_backstory=ch.backstory or "", text=content)
+        if not r.ok:
+            yield event.plain_result(self._edit_usage() + "\n(AI 整理失败,请改用「分身 编辑 性别/性格/背景 <内容>」)")
+            return
+        d = r.data
+        changed = []
+        async with self._glock(ch.gid):
+            if d.get("gender"):
+                self.db.update_char(ch.gid, ch.uid, gender=d["gender"][:8])
+                changed.append("性别")
+            if d.get("tags"):
+                self.db.update_char(ch.gid, ch.uid, tags=d["tags"][:6])
+                changed.append("性格")
+            if d.get("backstory"):
+                self.db.update_char(ch.gid, ch.uid, backstory=d["backstory"][:400])
+                changed.append("背景设定")
+        if changed:
+            yield event.plain_result(f"✅ AI 已更新「{ch.name}」的:{'、'.join(changed)}")
         else:
-            self.db.update_char(ch.gid, ch.uid, backstory=val[:400])
-        yield event.plain_result(f"✅ 已更新「{ch.name}」的{f}")
+            yield event.plain_result("没识别出要改的内容。\n" + self._edit_usage())
+
+    @staticmethod
+    def _edit_usage() -> str:
+        return (
+            "格式一:分身 编辑 性别|性格|背景(设定) <内容>\n"
+            "　　　例如:分身 编辑 性格 高冷,毒舌,护短\n"
+            "格式二:分身 编辑 <自由描述>(AI 自动判断改什么)\n"
+            "　　　例如:分身 编辑 我现在改成白发蓝瞳,性格变得开朗大胆"
+        )
 
     async def _profile_view(self, gid: str, uid: str) -> dict:
         ch = self.db.get_char(gid, uid)
@@ -688,13 +820,18 @@ class OcversePlugin(Star):
         return {"__profile__": True, "ch": ch, "world": world, "rels": rel_named,
                 "mems": mems, "badges": badges}
 
+    def _render_profile(self, v: dict) -> list:
+        """把 _profile_view 的 view 渲染成角色卡图片列表(统一渲染入口)。"""
+        return profile_card(v["ch"], v["world"], v["rels"], v["mems"], self._card_cfg(),
+                            extra_badges=v.get("badges") or [])
+
     async def _yield_profile(self, event, gid: str, uid: str, extra: str = ""):
         v = await self._profile_view(gid, uid)
-        imgs = profile_card(v["ch"], v["world"], v["rels"], v["mems"], self._card_cfg(),
-                            extra_badges=v["badges"])
-        chain = self._chain(imgs, extra)
+        chain = self._chain(self._render_profile(v), extra)
         if chain:
             yield event.chain_result(chain)
+        else:
+            yield event.plain_result(extra or "⚠ 角色卡渲染失败,请稍后重试")
 
     @oc.command("我的卡片", alias={"card", "状态"})
     @_guard
@@ -832,8 +969,9 @@ class OcversePlugin(Star):
         if not name or not descr:
             yield event.plain_result("格式:分身 添加互动 <名称> <说明>")
             return
-        self.db.add_interaction(gid, name[:8], descr[:80], self._uid(event))
-        yield event.plain_result(f"✅ 互动「{name}」已加入本群菜单")
+        key = name[:8]  # 与库里存储名一致,否则后续「删除互动」按全名匹配不到
+        self.db.add_interaction(gid, key, descr[:80], self._uid(event))
+        yield event.plain_result(f"✅ 互动「{key}」已加入本群菜单")
 
     @filter.permission_type(PermissionType.ADMIN)
     @oc.command("删除互动", alias={"del_interaction"})
@@ -946,17 +1084,45 @@ class OcversePlugin(Star):
         role = parts[1] if len(parts) > 1 else ""
         persona = parts[2] if len(parts) > 2 else ""
         hook = parts[3] if len(parts) > 3 else ""
-        if world_ref and not name:
-            name = parts[0] if parts else ""
         return name, role, persona, hook, world_ref
 
     @oc.command("添加NPC", alias={"添加npc", "add_npc", "new_npc", "新npc"})
     @_guard
     async def cmd_add_npc(self, event: AstrMessageEvent):
-        """分身 添加NPC <名字>|职业|性格|钩子 [世界名] - 给世界添加一位NPC"""
+        """分身 添加NPC <名字> [描述…] [世界名] - 给世界添加一位NPC(AI 自动整理档案)"""
         gid = self._need_gid(event)
         rest = self._rest(event, "添加NPC", "添加npc", "add_npc", "new_npc", "新npc")
-        name, role, persona, hook, world_ref = self._parse_npc_fields(rest)
+        if not rest:
+            yield event.plain_result(
+                "格式:分身 添加NPC <名字> [描述…] [世界名](AI 自动整理档案)\n"
+                "例如:分身 添加NPC 鱼婆 雾码头卖鱼的老婆婆,神神秘秘,似乎认得每一条旧船 [锈海城]\n"
+                "也兼容竖线:分身 添加NPC <名字>|职业|性格|钩子 [世界名]"
+            )
+            return
+        if "|" in rest:
+            # 旧竖线路径(含 [世界名] 后缀解析)
+            name, role, persona, hook, world_ref = self._parse_npc_fields(rest)
+            if not name:
+                yield event.plain_result("名字不能为空:分身 添加NPC <名字>|职业|性格|钩子 [世界名]")
+                return
+        else:
+            # 自然语言:首词为名字,余下描述连同世界数据一起交给 AI,确保档案贴合世界观
+            toks = rest.split(None, 1)
+            name = toks[0][:12]
+            desc = (toks[1] if len(toks) > 1 else "").strip()
+            world_ref = ""
+            m = re.match(r"^(.*?)\s*\[([^\[\]]+)\]\s*$", desc, re.S)
+            if m:
+                desc, world_ref = m.group(1).strip(), m.group(2).strip()
+            w = self.game._find_world(gid, world_ref)  # 提前定位世界(报错更及时)
+            self.game._require_user_world(w)           # 系统世界直接拦截,不浪费 AI 调用
+            role, persona, hook = "", "", ""
+            if desc:
+                r = await self.brain.parse_npc(name, desc, world=w, npc_names=w.npc_names())
+                if r.ok:
+                    role, persona, hook = r.data["role"], r.data["persona"], r.data["hook"]
+                else:
+                    hook = desc[:40]  # AI 不可用:描述原文兜底进钩子
         async with self._glock(gid):
             wname, npc = await self.game.add_npc(gid, self._uid(event), name, role, persona, hook, world_ref)
         yield event.plain_result(
@@ -1007,6 +1173,7 @@ class OcversePlugin(Star):
         limit = 20
         total = self.db.count_logs(gid, ch.uid)
         pages = max(1, (total + limit - 1) // limit)
+        page_n = min(page_n, pages)  # 页码超出总页数时回到最后一页
         entries = self.db.recent_logs(gid, ch.uid, limit=limit, offset=(page_n - 1) * limit)
         name_map = {c.uid: c.name for c in self.db.list_chars(gid)}
         imgs = log_card(entries, page_n, pages, f"{ch.name} 的人生日志", self._card_cfg(), name_map)
@@ -1037,6 +1204,46 @@ class OcversePlugin(Star):
         ch = self._char_of(event)
         f = self.game.fortune(ch.uid, ch.name)
         imgs = fortune_card(f, self._card_cfg())
+        chain = self._chain(imgs)
+        if chain:
+            yield event.chain_result(chain)
+
+    # ═══════════════════════════ 指令:每日小任务 ═══════════════════════════
+    @oc.command("任务", alias={"quests", "quest"})
+    @_guard
+    async def cmd_quests(self, event: AstrMessageEvent):
+        """分身 任务 - 领取/查看今天的简单小任务(AI 按世界生成)"""
+        gid = self._need_gid(event)
+        ch = self._char_of(event)
+        async with self._glock(gid):
+            qs = await self.game.ensure_quests(gid, self._uid(event))
+        open_qs = [q for q in qs if q["state"] == "open"]
+        done = len(qs) - len(open_qs)
+        if not open_qs:
+            yield event.plain_result(f"🎉 今天给「{ch.name}」的任务都完成啦,明天再来。")
+            return
+        lines = [f"📌 {ch.name} 今天的小任务({done}/{len(qs)} 已完成)", ""]
+        for i, q in enumerate(open_qs, 1):
+            lines.append(f"{i}. {q['text']}")
+            if q.get("hint"):
+                lines.append(f"　 └ {q['hint']}")
+        lines.append("")
+        lines.append("完成方式:分身 交任务 <编号>(轻松结算,有小奖励)")
+        yield event.plain_result("\n".join(lines))
+
+    @oc.command("交任务", alias={"完成任务", "quest_done"})
+    @_guard
+    async def cmd_quest_done(self, event: AstrMessageEvent, idx: str = ""):
+        """分身 交任务 <编号> - 完成今天的一个小任务,拿点小奖励"""
+        gid = self._need_gid(event)
+        self._char_of(event)
+        n = re.sub(r"\D", "", idx or self._rest(event, "交任务", "完成任务", "quest_done"))
+        if not n:
+            yield event.plain_result("格式:分身 交任务 <编号>(编号见「分身 任务」)")
+            return
+        async with self._glock(gid):
+            v = await self.game.complete_quest(gid, self._uid(event), int(n) - 1)
+        imgs = render_views([v], self._card_cfg())
         chain = self._chain(imgs)
         if chain:
             yield event.chain_result(chain)

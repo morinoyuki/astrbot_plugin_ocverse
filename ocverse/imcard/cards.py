@@ -87,10 +87,10 @@ def profile_card(ch, world, rels: list[tuple[str, int]], memories: list[str], cf
     need = exp_need(ch.level)
     res_line = f"💰 金币 {ch.gold}    ⭐ 经验 {ch.exp}/{need}    🌀 经历变动 {int((ch.flags or {}).get('shifts', 0))} 次"
     rows.append(_para(r, res_line, size=int(r.font_size * 0.82), color=r.t.text_secondary))
-    # 背景故事
+    # 背景设定
     if ch.backstory:
         story = ch.backstory if len(ch.backstory) <= 160 else ch.backstory[:157] + "…"
-        rows.append(PanelRow(r, "背景故事", lambda: [
+        rows.append(PanelRow(r, "背景设定", lambda: [
             _para(r, story, color=r.t.text_secondary, size=int(r.font_size * 0.8)),
         ]))
     # 称号徽章
@@ -354,13 +354,14 @@ def help_card(cfg: dict, sub_prefix: str = "分身") -> list[Image.Image]:
     rows = [
         sec("🎪 从这里开始", [
             f"{sub_prefix} 初始化世界 [世界观描述…] — 管理员铺设群世界(不填则 LLM 自由发挥)",
-            f"{sub_prefix} 创建 <名字> [|" + "性别|性格,性格|背景故事…] — 一个人只有一个分身",
+            f"{sub_prefix} 创建 <名字> [设定描述…] — 一句话自由描述,AI 整理人设并按设定分配初始属性(兼容竖线速写);一人一个分身",
             f"{sub_prefix} 设置头像 (随指令发一张图,或回复一张图)",
         ]),
         sec("📜 每天的生活", [
             "每天会在活跃时段随机触发事件,卡片里会有 1~3 个选项",
             f"{sub_prefix} 选择 <编号> — 对遭遇做出抉择(属性会变)",
             f"{sub_prefix} 与 @群友 [互动方式/自由行动…] — 和别人的分身交朋友(或结仇)",
+            f"{sub_prefix} 任务 / 交任务 <编号> — 每日小任务(AI 按世界生成,轻松有奖)",
             f"{sub_prefix} npc <名字> <想做什么> — 找当前世界的NPC搭话",
         ]),
         sec("⚡ 主动行动(能动起来)", [
@@ -373,14 +374,14 @@ def help_card(cfg: dict, sub_prefix: str = "分身") -> list[Image.Image]:
         sec("🌀 世界的边界", [
             "世界有小概率发生变动——全员被卷进另一个世界!",
             f"{sub_prefix} 定义世界 <名称> <描述…> — 把你设定的世界写进世界书(等待降临)",
-            f"{sub_prefix} 添加NPC <名>|职业|性格|钩子 — 只能在你自设的世界安插NPC",
+            f"{sub_prefix} 添加NPC <名> [描述…] — 在你自设的世界安插NPC(AI 结合世界整理档案)",
             f"{sub_prefix} NPC列表 / 删除NPC <名字> — 管理这些住民",
             f"{sub_prefix} 穿越世界 <编号/名称> — 只能去「穿越过」的世界",
             f"{sub_prefix} 世界 / 世界列表 — 查看当前世界与世界书",
         ]),
         sec("🧩 其他", [
             f"{sub_prefix} 我的卡片 / 名册 / 日志 [页] / 回忆 <关键词> / 运势",
-            f"{sub_prefix} 编辑 性别|性格|背景 <内容> · 删除角色 · 互动菜单",
+            f"{sub_prefix} 编辑 性别|性格|背景 <内容> 或自由描述 · 删除角色 · 互动菜单",
             f"{sub_prefix} 事件频率 min max · 变动概率 p · 触发变动 / 重开世界 (管理员)",
         ]),
     ]

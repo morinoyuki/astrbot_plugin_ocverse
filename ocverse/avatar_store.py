@@ -87,13 +87,14 @@ class AvatarStore:
         if not name:
             return None
         d = self._scope_dir(scope)
-        prefix = quote(name, safe="")
+        stem = quote(name, safe="")
         try:
-            for f in os.listdir(d):
-                if f.startswith(prefix) and f.endswith(_ALLOWED_EXT):
-                    p = os.path.join(d, f)
-                    if os.path.isfile(p):
-                        return p
+            # 只做精确文件名命中(标准落盘名 + 兼容历史后缀),不做前缀匹配,
+            # 避免「凛」取到/删掉「凛子」的头像(前缀撞名)
+            for cand in [stem] + [stem + ext for ext in _ALLOWED_EXT]:
+                p = os.path.join(d, cand)
+                if os.path.isfile(p):
+                    return p
         except OSError:
             pass
         return None

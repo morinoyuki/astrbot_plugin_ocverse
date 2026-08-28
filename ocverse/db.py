@@ -98,6 +98,17 @@ CREATE TABLE IF NOT EXISTS kv (
   value TEXT DEFAULT '',
   PRIMARY KEY (gid, key)
 );
+CREATE TABLE IF NOT EXISTS quests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  gid TEXT NOT NULL,
+  uid TEXT NOT NULL,
+  day TEXT NOT NULL,
+  text TEXT,
+  hint TEXT DEFAULT '',
+  state TEXT DEFAULT 'open',
+  created_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_quests_gud ON quests (gid, uid, day);
 """
 
 
@@ -522,3 +533,38 @@ class Database:
     def kv_get(self, gid: str, key: str) -> str | None:
         row = self._ex("SELECT value FROM kv WHERE gid=? AND key=?", (gid, key), "one")
         return row["value"] if row else None
+
+    # ── quests (每日小任务) ────────────────────────────────────
+    def add_quest(self, gid: str, uid: str, day: str, text: str, hint: str = "") -> int:
+        cur = self._ex(
+            "INSERT INTO quests (gid,uid,day,text,hint,created_at) VALUES (?,?,?,?,?,?)",
+            (gid, uid, day, text[:48], hint[:60], time.time()),
+        )
+        return int(cur.lastrowid)
+
+    def list_quests(self, gid: str, uid: str, day: str) -> list[dict]:
+        rows = self._ex(
+            "SELECT * FROM quests WHERE gid=? AND uid=? AND day=? ORDER BY id",
+            (gid, uid, day), "all",
+        )
+        return [dict(r) for r in rows]
+
+    def resolve_quest_if_open(self, qid: int) -> bool:
+        """仅当任务仍 open 时标记完成(防重复结算竞态)。"""
+        cur = self._ex("UPDATE quests SET state='done' WHERE id=? AND state='open'", (qid,))
+        return cur.rowcount > 0
+
+    def expire_open_quests(self, gid: str, day: str | None = None):
+        """世界变动/穿越后,旧世界的待办任务全部作废(可重新领取新世界的)。"""
+        if day is not None:
+            self._ex("UPDATE quests SET state='expired' WHERE gid=? AND day=? AND state='open'", (gid, day))
+        else:
+            self._ex("UPDATE quests SET state='expired' WHERE gid=? AND state='open'", (gid,))
+
+    def purge_char_data(self, gid: str, uid: str):
+        """删除角色的所有伴生数据:日志/记忆/羁绊/待决事件/任务。"""
+        self._ex("DELETE FROM timeline WHERE gid=? AND uid=?", (gid, uid))
+        self._ex("DELETE FROM memories WHERE gid=? AND uid=?", (gid, uid))
+        self._ex("DELETE FROM rels WHERE gid=? AND (a=? OR b=?)", (gid, uid, uid))
+        self._ex("DELETE FROM events WHERE gid=? AND uid=? AND state='pending'", (gid, uid))
+        self._ex("DELETE FROM quests WHERE gid=? AND uid=?", (gid, uid))
