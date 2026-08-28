@@ -57,9 +57,10 @@ def _para(r, text, color=None, size=None, margin=(0, 4, 0, 4), bold=False):
     return RichTextRow(r, [md.Span(text)], font_size=size, color=color, margin=margin, bold=bold)
 
 
-def _dialogue_rows(r, dialogues, self_name: str = "") -> list:
+def _dialogue_rows(r, dialogues, self_name: str = "", avatars: dict | None = None) -> list:
     """IM 聊天体多轮对话气泡(轻小说式你来我往)。
     self_name 为 POV 角色名:匹配到的发言者气泡靠右(自己),其余靠左(对方)。
+    avatars: 名字→头像(路径或 PIL 图),按说话人挂头像;未设置者用名字首字占位。
     防独角戏:只有一个说话人的对话不渲染(宁缺毋滥,由叙述承担表达)。"""
     dlg = []
     for d in (dialogues or [])[:8]:
@@ -71,9 +72,16 @@ def _dialogue_rows(r, dialogues, self_name: str = "") -> list:
         return []
     rows = []
     for sp, tx in dlg:
+        av = (avatars or {}).get(sp)
+        if not av:  # 宽松匹配:说话人名带括号/前缀时仍能挂上头像
+            for k, v in (avatars or {}).items():
+                if k and (k in sp or sp in k):
+                    av = v
+                    break
         rows.append(DialogueRow(
             r, speaker=sp, spans=[md.Span(tx)],
             is_self=bool(self_name and sp == self_name),
+            avatar=av or None,
         ))
     return rows
 
@@ -167,7 +175,7 @@ def result_card(view: dict, cfg: dict) -> list[Image.Image]:
     rows = []
     rows.append(PillRow(r, f"「{view.get('event_title', '')}」→ {view.get('chosen', '')}"))
     rows.append(_para(r, view.get("narration", ""), color=r.t.text, margin=(6, 8, 0, 6)))
-    dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""))
+    dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), view.get("avatars"))
     if dlg:
         rows.append(EmptyRow(r, 4))
         rows.extend(dlg)
@@ -302,7 +310,7 @@ def interact_card(view: dict, cfg: dict) -> list[Image.Image]:
     rows = []
     rows.append(PillRow(r, f"{view.get('a_name', '?')} ⇄ {view.get('b_name', '?')} ·「{view.get('mode', '互动')}」"))
     rows.append(_para(r, view.get("narration", ""), color=r.t.text, margin=(6, 8, 0, 6)))
-    dlg = _dialogue_rows(r, view.get("dialogues"), view.get("a_name", ""))
+    dlg = _dialogue_rows(r, view.get("dialogues"), view.get("a_name", ""), view.get("avatars"))
     if dlg:
         rows.append(EmptyRow(r, 4))
         rows.extend(dlg)
@@ -323,7 +331,7 @@ def npc_card(view: dict, cfg: dict) -> list[Image.Image]:
     rows.append(PillRow(r, f"{view.get('char_name', '?')} ☂ {npc.get('name', 'NPC')}"))
     rows.append(_para(r, view.get("narration", ""), color=r.t.text_secondary, margin=(6, 6, 0, 6),
                       size=int(r.font_size * 0.85)))
-    dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""))
+    dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), view.get("avatars"))
     if dlg:
         rows.append(EmptyRow(r, 4))
         rows.extend(dlg)
@@ -342,7 +350,7 @@ def act_card(view: dict, cfg: dict) -> list[Image.Image]:
     rows.append(PillRow(r, view.get("action_pill", "行动")))
     rows.append(_para(r, view.get("narration", ""), color=r.t.text,
                       margin=(6, 8, 0, 6)))
-    dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""))
+    dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), view.get("avatars"))
     if dlg:
         rows.append(EmptyRow(r, 4))
         rows.extend(dlg)

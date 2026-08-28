@@ -509,6 +509,7 @@ class Game:
             "chosen": opts[idx]["label"],
             "narration": data.get("narration", ""),
             "dialogues": data.get("dialogues") or [],
+            "avatars": self._avatar_map(gid),
             "changes": changes,
             "ok_llm": r.ok,
         }
@@ -639,6 +640,7 @@ class Game:
                     "chosen": c_chosen,
                     "narration": cr.data.get("narration", ""),
                     "dialogues": cr.data.get("dialogues") or [],
+                "avatars": self._avatar_map(gid),
                     "changes": c_changes,
                     "ok_llm": cr.ok,
                 })
@@ -663,6 +665,7 @@ class Game:
                 "chosen": "TA 含泪点头",
                 "narration": pr.data.get("narration", ""),
                 "dialogues": pr.data.get("dialogues") or [],
+                "avatars": self._avatar_map(gid),
                 "changes": ["💞 关系 → 结为伴侣", "余生请多指教"],
                 "ok_llm": pr.ok,
             })
@@ -684,6 +687,7 @@ class Game:
             "mode": mode,
             "narration": data.get("narration", ""),
             "dialogues": data.get("dialogues") or [],
+            "avatars": self._avatar_map(gid),
             "changes": changes,
             "rel": rel,
             "rel_label": C.rel_stage_label(rel, self.db.get_rel_full(gid, uid_a, uid_b)["state"]),
@@ -727,6 +731,7 @@ class Game:
             "reply": data.get("reply", ""),
             "narration": data.get("narration", ""),
             "dialogues": data.get("dialogues") or [],
+            "avatars": self._avatar_map(gid),
             "changes": changes,
             "ok_llm": r.ok,
         }
@@ -792,6 +797,7 @@ class Game:
             "world_name": world.name,
             "narration": r.data.get("narration", ""),
             "dialogues": r.data.get("dialogues") or [],
+            "avatars": self._avatar_map(gid),
             "changes": changes,
             "ok_llm": r.ok,
         }
@@ -1028,9 +1034,14 @@ class Game:
             "chosen": q["text"],
             "narration": r.data.get("narration", ""),
             "dialogues": r.data.get("dialogues") or [],
+            "avatars": self._avatar_map(gid),
             "changes": changes,
             "ok_llm": r.ok,
         }
+
+    def _avatar_map(self, gid: str) -> dict:
+        """群内所有 OC 的名字→头像路径(仅已设置头像者),供 IM 对话气泡使用。"""
+        return {c.name: c.avatar for c in self.db.list_chars(gid) if c.avatar}
 
     # ══════════════ 关系系统:好感阶梯 / 表白 / 求婚 ══════════════
     def rel_stage_label(self, gid: str, a: str, b: str) -> str:
