@@ -1213,12 +1213,12 @@ class OcversePlugin(Star):
         if chain:
             yield event.chain_result(chain)
 
-    @oc.command("找", alias={"互动", "交往", "结识"})
+    @oc.command("找", alias={"交往", "结识", "找TA", "talk"})
     @_guard
     async def cmd_char_interact(self, event: AstrMessageEvent):
         """分身 找 <生活角色名> [方式/自由描述…] - 与持久生活角色互动(可发展关系/结婚)"""
         gid = self._need_gid(event)
-        raw = self._rest(event, "找", "互动", "交往", "结识").strip()
+        raw = self._rest(event, "找", "交往", "结识", "找TA", "talk").strip()
         if not raw:
             names = "、".join(c.name for c in self.game._npc_chars(gid)) or "无"
             yield event.plain_result(
