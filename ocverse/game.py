@@ -231,7 +231,7 @@ class Game:
         if existing is not None:
             # 已有同名生活角色 → 覆盖设定,保留经历
             desc = (desc or "").strip() or "一名生活在这个群世界里的角色。"
-            existing.backstory = desc[:1200]
+            existing.backstory = desc[:4000]
             existing.tags = ["生活角色"]
             existing.gender = "保密"
             self.db.upsert_char(existing)
@@ -241,7 +241,7 @@ class Game:
             gid=gid, uid=npc_uid(gid, name), name=name[:12],
             gender="保密",
             tags=["生活角色"],
-            backstory=(desc or "").strip()[:1200] or "一名生活在这个群世界里的角色。",
+            backstory=(desc or "").strip()[:4000] or "一名生活在这个群世界里的角色。",
         )
         ch.attrs = self._attrs_from_setting(
             f"{name} {ch.backstory}",
@@ -313,7 +313,7 @@ class Game:
             raise GameError("这个名字已被本群其他分身占用")
         ch = Char(gid=gid, uid=uid, name=name, gender=gender or "保密",
                   tags=[t.strip() for t in tags if t.strip()][:6],
-                  backstory=(backstory or "").strip()[:1200])
+                  backstory=(backstory or "").strip()[:4000])
         # 初始六维:由背景气质做个轻量倾斜,其余随机 18~40
         text = f"{name} {' '.join(ch.tags)} {ch.backstory}"
         h = zlib.crc32(text.encode())
@@ -1380,7 +1380,7 @@ class Game:
                 raise GameError("已有一个同名的待降临世界,换个名字吧")
         if self.db.count_group_worlds(gid) >= 40:
             raise GameError("本群的世界列表已满(40个)")
-        w = World(gid=gid, name=name[:16], genre="玩家自设", desc=desc[:1200],
+        w = World(gid=gid, name=name[:16], genre="玩家自设", desc=desc[:4000],
                   source="user", visited=0, created_by=uid)
         w.id = self.db.add_world(w)
         self.db.append_log(gid, uid, "misc", f"{ch.name} 在世界书里写下了《{name}》(等待降临)")

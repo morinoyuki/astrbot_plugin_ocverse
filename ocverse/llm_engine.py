@@ -291,7 +291,7 @@ class Brain:
             "name": str(d.get("name", "无名世界"))[:16],
             "genre": str(d.get("genre", "未知"))[:20],
             "atmosphere": str(d.get("atmosphere", ""))[:60],
-            "desc": str(d.get("desc", desc_hint or "一个尚未展开的世界。"))[:1200],
+            "desc": str(d.get("desc", desc_hint or "一个尚未展开的世界。"))[:4000],
             "rules": [str(x)[:40] for x in (d.get("rules") or [])][:4],
             "features": [str(x)[:50] for x in (d.get("features") or [])][:5],
             "npcs": npcs,
@@ -308,7 +308,7 @@ class Brain:
         if name:
             w["name"] = name
         if desc:
-            w["desc"] = desc[:1200]
+            w["desc"] = desc[:4000]
         w["source"] = source if source != "llm" else "default"
         # 离线/失败降级世界也要有一套默认基建/主线/地块,保证功能可用不是空壳
         w.setdefault("infra", [
@@ -336,7 +336,7 @@ class Brain:
         role = (
             "这是全员都会被卷入的群事件,主角是『群里的众人』。"
             if char is None
-            else f"主角是 {char.persona_line()},背景:{char.backstory[:120] or '未详'}。"
+            else f"主角是 {char.persona_line()},背景:{char.backstory[:600] or '未详'}。"
                  f"当前体力{char.stamina}/心情{char.mood}/金币{char.gold}。"
         )
         if state_note:
@@ -390,7 +390,7 @@ class Brain:
         cast = []
         for i, c in enumerate(chars, 1):
             cast.append(
-                f"角色{i}:{c.persona_line()},背景:{c.backstory[:100] or '未详'},"
+                f"角色{i}:{c.persona_line()},背景:{c.backstory[:600] or '未详'},"
                 f"当前体力{c.stamina}/心情{c.mood}/金币{c.gold}"
             )
         cast_line = "\n".join(cast)
@@ -532,7 +532,7 @@ class Brain:
         opts = event.get("options") or []
         pick = opts[choice_idx] if 0 <= choice_idx < len(opts) else {"label": "顺其自然", "hint": ""}
         cast = "\n".join(
-            f"角色{i}:{c.persona_line()},背景:{c.backstory[:90] or '未详'},体力{c.stamina}/心情{c.mood}/金币{c.gold}"
+            f"角色{i}:{c.persona_line()},背景:{c.backstory[:600] or '未详'},体力{c.stamina}/心情{c.mood}/金币{c.gold}"
             for i, c in enumerate(chars, 1)
         )
         rel_line = ("\n" + rels) if rels else ""
@@ -578,7 +578,7 @@ class Brain:
 
         b_ps = ""
         if b:
-            b_ps = f"\nB资料:{b.persona_line()},背景:{b.backstory[:100] or '未详'},体力{b.stamina}/心情{b.mood}"
+            b_ps = f"\nB资料:{b.persona_line()},背景:{b.backstory[:600] or '未详'},体力{b.stamina}/心情{b.mood}"
         if npc:
             b_ps = f"\nB资料:{npc.get('name','?')}({npc.get('role','')}),{npc.get('persona','')}"
         rel_line = (f"两人当前关系:{rel_score}({rel_stage or rel_label(rel_score)})。" if not npc
@@ -594,7 +594,7 @@ class Brain:
         sys = self.style
         user = (
             f"世界:《{world.name}》[{world.genre}] {world.desc}\n"
-            f"A:{a.persona_line()},背景:{a.backstory[:100] or '未详'},体力{a.stamina}/心情{a.mood}/金币{a.gold}"
+            f"A:{a.persona_line()},背景:{a.backstory[:600] or '未详'},体力{a.stamina}/心情{a.mood}/金币{a.gold}"
             f"{b_ps}\n{rel_line}\n"
             f"互动:「{mode}」" + (f"({detail[:60]})" if detail else "") + state_line + "\n"
             "写出这段互动的走向与结果(轻小说式,120~220字:画面感+心理细节+余味)。\n"
@@ -682,7 +682,7 @@ class Brain:
         sys = self.style
         user = (
             f"世界:《{world.name}》[{world.genre}] {world.desc}\n"
-            f"角色:{char.persona_line()},背景:{char.backstory[:100] or '未详'},"
+            f"角色:{char.persona_line()},背景:{char.backstory[:600] or '未详'},"
             f"当前体力{char.stamina}/心情{char.mood}/金币{char.gold}\n"
             f"今日于《{world.name}》执行行动:「{action_name}」{detail[:80]}\n{risk_line}\n{mem}\n"
             "请写出这次行动的经过与结果(轻小说式,100~200字:画面感+心理细节+余味),"
@@ -826,7 +826,7 @@ class Brain:
         attr_line = "、".join(f"{k}({_nm})" for k, _nm in ATTRS)
         user = (
             "群友在创建 OC 分身,给了一段口语化的设定描述。请整理成结构化人设,不要编造描述里没有的信息:\n"
-            f"【设定描述】{text[:1200]}\n"
+            f"【设定描述】{text[:4000]}\n"
             "1. gender:性别,没提就填「保密」;\n"
             "2. tags:性格标签数组,2~6个,每个2~6字(如:腹黑/重情义/独来独往/生人勿近),从性格与行事风格中提炼;\n"
             "3. backstory:第三人称背景设定一段话(60~150字),把外观、穿着、身份、能力、经历等信息全部合并进去,语句通顺;\n"
@@ -847,7 +847,7 @@ class Brain:
             return BrainResult(True, {
                 "gender": gender,
                 "tags": tags,
-                "backstory": str(d.get("backstory") or "").strip()[:1200],
+                "backstory": str(d.get("backstory") or "").strip()[:4000],
                 "attrs": attrs,
             })
         return BrainResult(False, {})
@@ -858,7 +858,7 @@ class Brain:
         只返回需要更新的字段;tags/backstory 给出合并旧设定后的完整新值。"""
         user = (
             f"角色「{cur_name}」当前人设:性别 {cur_gender};性格标签:{'、'.join(cur_tags) or '无'};"
-            f"背景设定:{cur_backstory[:200] or '无'}\n"
+            f"背景设定:{cur_backstory[:1000] or '无'}\n"
             f"玩家发出一段修改描述:{text[:400]}\n"
             "请判断要更新哪些字段,只输出需要修改的字段:\n"
             "- gender:仅当明确提及性别时输出;\n"
@@ -876,7 +876,7 @@ class Brain:
         if tags:
             out["tags"] = tags
         if str(d.get("backstory") or "").strip():
-            out["backstory"] = str(d["backstory"]).strip()[:1200]
+            out["backstory"] = str(d["backstory"]).strip()[:4000]
         return BrainResult(bool(out), out)
 
     async def parse_npc(self, name: str, text: str, world=None,
@@ -920,7 +920,7 @@ class Brain:
         user = (
             f"世界:《{world.name}》[{world.genre}] {world.desc}\n"
             f"氛围:{world.atmosphere};世界规则:{';'.join(world.rules or [])}\n"
-            f"角色:{char.persona_line()},背景:{char.backstory[:100] or '未详'}\n"
+            f"角色:{char.persona_line()},背景:{char.backstory[:600] or '未详'}\n"
             f"{mem}\n"
             "请给这个角色生成今天要做的 3 个简单小任务:日常小事、无危险、单人容易完成(如吃一顿当地早餐、"
             "向某位NPC打听一件小事、帮别人一个小忙、找一样有趣的小东西),结合世界设定,充满生活气息。\n"
@@ -944,7 +944,7 @@ class Brain:
         mem = "\n".join(memories[:3]) if memories else ""
         user = (
             f"世界:《{world.name}》[{world.genre}] {world.desc}\n"
-            f"角色:{char.persona_line()},背景:{char.backstory[:80] or '未详'}\n"
+            f"角色:{char.persona_line()},背景:{char.backstory[:600] or '未详'}\n"
             f"角色完成了今日小任务:「{quest[:30]}」\n"
             f"{mem}\n"
             "写一段简短的完成叙述(轻小说式,60~120字,轻松日常,有画面感,有余味),并给一点小奖励。\n"
@@ -1034,8 +1034,8 @@ class Brain:
         }.get(outcome, "告白场景")
         user = (
             f"世界:《{world.name}》[{world.genre}] {world.desc}\n"
-            f"告白者:{a.persona_line()},背景:{a.backstory[:80] or '未详'}\n"
-            f"被告白者:{b.persona_line()},背景:{b.backstory[:80] or '未详'}\n"
+            f"告白者:{a.persona_line()},背景:{a.backstory[:600] or '未详'}\n"
+            f"被告白者:{b.persona_line()},背景:{b.backstory[:600] or '未详'}\n"
             f"两人当前好感:{score}。\n"
             f"本次走向:{outcome_line}。\n"
             "写一段告白场景:叙述(100~180字,轻小说式)+多轮对话(3~6轮,IM聊天体,"
