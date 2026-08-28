@@ -7,6 +7,7 @@ VerticalStack 负责把多行垂直拼接到画布;每行内部可以自由布�
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import contextmanager
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -895,8 +896,6 @@ class DialogueRow(Row):
 # ═════════════════════════════════════════════════════════════════════
 # 游戏卡片行(ocverse 新增):资料头 / 属性条 / 选项卡 / 标签胶囊 / 面板
 # ═════════════════════════════════════════════════════════════════════
-
-from contextlib import contextmanager
 
 
 def _draw_rounded_avatar(canvas, x, y, size, src, fallback_char, radius_ratio=0.24, ring=None):

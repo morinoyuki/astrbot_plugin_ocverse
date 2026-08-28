@@ -15,8 +15,22 @@ import inspect
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime
 
 from .config import ATTRS, ATTR_KEYS, ATTR_NAMES
+
+_WEEKDAYS = "一二三四五六日"
+
+
+def now_stamp() -> str:
+    """当前真实时间戳(中文),供所有 LLM 调用注入,让生成感知『今天/现在』。"""
+    now = datetime.now()
+    wd = _WEEKDAYS[now.weekday()]
+    return (
+        f"【当前时间】{now.strftime('%Y-%m-%d')}(星期{wd}) {now.strftime('%H:%M')}"
+        f" ——这是此刻的真实时刻,可据此把握『今天/昨晚/季节/日夜』的氛围来生成内容;"
+        f"但除非切题,叙事不要生硬报出现实年月。"
+    )
 
 STYLE_BASE = (
     "你是一个群聊文字游戏的叙事引擎,以轻小说的手法叙事:画面感强、有心理与感官细节、"
@@ -115,6 +129,8 @@ class Brain:
         return s
 
     async def _ask(self, system: str, user: str, use_tools: bool = False):
+        # 每次调用 LLM 都注入当前时间,保证所有生成都感知『今天/现在』
+        system = f"{system}\n{now_stamp()}"
         if use_tools and self.raw_call_tools:
             res = self.raw_call_tools(system, user)
             if inspect.isawaitable(res):
@@ -175,7 +191,7 @@ class Brain:
             return BrainResult(True, self._norm_world(d, source="llm", desc_hint=desc))
         return BrainResult(False, self._fallback_world(desc))
 
-    async def enrich_user_world(self, name: str, desc: str) -> BrainResult:
+    async def enrich_user_world(self, name: str, desc: str, material: str = "") -> BrainResult:
         """用户自设世界落地时补全细节(失败也能用原始描述)。"""
         sys = self.style
         user = (
@@ -183,6 +199,7 @@ class Brain:
             "请补全它的题材标签、氛围、规则、独特之处、4~5个NPC、独有事件灵感。尊重玩家设定,不推翻。\n"
             f"严格输出 JSON,结构:{self._WORLD_SCHEMA}"
         )
+        user = self._with_material(user, material)
         d = await self._ask_json(sys, user, use_tools=True)
         if d and (d.get("name") or d.get("desc")):
             d["name"] = name or d.get("name")

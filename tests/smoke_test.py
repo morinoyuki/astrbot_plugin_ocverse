@@ -37,6 +37,7 @@ from ocverse.imcard import (  # noqa: E402
 )
 from ocverse.llm_engine import Brain  # noqa: E402
 from ocverse.memory import KnowledgeStore, MemoryStore  # noqa: E402
+from ocverse.models import World  # noqa: E402
 
 CFG = {"card_width": 1024, "card_font_size": 34, "card_theme": "dark",
        "memory_top_k": 6, "event_expire_minutes": 45, "core_memory_threshold": 40}
@@ -130,6 +131,8 @@ ACT_JSON = {
 
 
 def fake_llm(system: str, user: str) -> str:
+    # 每次调用都应注入当前时间
+    assert "当前时间" in system and "【当前时间】" in system, system[:80]
     if "生成一个新世界" in user:
         return json.dumps(WORLD_JSON, ensure_ascii=False)
     if "生成一次突发遭遇" in user:
@@ -193,6 +196,23 @@ def fake_llm(system: str, user: str) -> str:
     if "执行行动" in user:
         return json.dumps(ACT_JSON, ensure_ascii=False)
     raise AssertionError("fake_llm 未覆盖的调用: " + user[:60])
+
+
+async def check_datetime_injection():
+    """每次 LLM 调用都必须注入当前时间(防回归)。"""
+    seen = []
+
+    def spy(system, user):
+        seen.append(system)
+        return json.dumps(RESOLVE_JSON, ensure_ascii=False)
+
+    b = Brain(raw_call=spy)
+    w = World(name="w", genre="g", desc="d", atmosphere="a", rules=["r"], npcs=[{"name": "n"}])
+    await b.resolve_event(world=w, char=None, event=EVENT_JSON, choice_idx=0)
+    await b.make_event(world=w, char=None)
+    await b.gen_world(desc="测试")
+    assert seen and all("当前时间" in s for s in seen), seen
+    print("✓ 每次LLM调用都注入当前时间")
 
 
 async def main():
@@ -691,4 +711,5 @@ async def main():
 
 
 if __name__ == "__main__":
+    asyncio.run(check_datetime_injection())
     asyncio.run(main())

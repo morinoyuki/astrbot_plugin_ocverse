@@ -133,10 +133,12 @@ class Game:
         """管理员初始化/重建群世界。返回抵达 view。"""
         self._ensure_group(gid)
         prev = self.db.cur_world(gid)
-        r = await self.brain.gen_world(desc, theme_hint=str(self.cfg("world_theme_hint", "") or ""))
+        r = await self.brain.gen_world(desc, theme_hint=str(self.cfg("world_theme_hint", "") or ""),
+                                      material=await self._kb_ctx(gid, "新世界 世界观 设定 风格"))
         w = self._install_world(gid, r.data, source="llm" if r.ok else "default", by=by)
         if r.ok:
-            arr_data = (await self.brain.compose_arrival(world=w, prev_name=prev.name if prev else "", via="init")).data
+            arr_data = (await self.brain.compose_arrival(world=w, prev_name=prev.name if prev else "", via="init",
+                                                         material=await self._kb_ctx(gid, "抵达 世界氛围"))).data
         else:
             from .llm_engine import FB_ARRIVE
             arr_data = dict(FB_ARRIVE, name=w.name)
@@ -377,7 +379,8 @@ class Game:
             uid=char.uid if char else None,
         )
         r = await self.brain.make_event(world=world, char=char, kind="npc" if npc else ("group" if is_group else "solo"),
-                                        npc=npc, memories=mems, ideas=world.event_ideas)
+                                        npc=npc, memories=mems, ideas=world.event_ideas,
+                                        material=await self._kb_ctx(gid, f"随机事件 剧情 钩子 {world.name}"))
         ev = EventRow(
             gid=gid,
             uid="" if is_group else char.uid,
@@ -908,7 +911,8 @@ class Game:
             cands = [w for w in self.db.list_worlds(gid) if w.source == "user" and not w.visited and (not prev or w.id != prev.id)]
             if cands:
                 w = random.choice(cands)
-                r = await self.brain.enrich_user_world(w.name, w.desc)
+                r = await self.brain.enrich_user_world(w.name, w.desc,
+                                                       material=await self._kb_ctx(gid, "新世界 世界观 设定"))
                 if r.ok:
                     d = r.data
                     self.db.update_world(w.id, genre=d.get("genre", w.genre), desc=d.get("desc", w.desc),

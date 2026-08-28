@@ -468,20 +468,24 @@ class OcversePlugin(Star):
             self.db.kv_set(gid, "kb_last", day)  # 占位防重复
             if not self._cfg("knowledge_collect_enabled", True) or self.kb.count(gid) >= self._cfgi("knowledge_base_max", 40):
                 continue
-            # 每群每天采集(默认1条,可配置)
+            # 每群每天采集(默认1条,可配置),用序号错开题材,避免同批同主题重复
             n = max(0, min(3, self._cfgi("knowledge_collect_daily", 1)))
-            for _ in range(n):
+            base = self.kb.count(gid)
+            for i in range(n):
+                if self.kb.count(gid) >= self._cfgi("knowledge_base_max", 40):
+                    break
                 try:
-                    await self._collect_kb(gid)
+                    await self._collect_kb(gid, offset=base + i)
                 except Exception as e:
                     logger.warning(f"ocverse: 知识库采集失败: {e}")
 
-    async def _collect_kb(self, gid: str):
-        """采集一条轻小说/动漫/漫画风格的著作素材,提炼成可复用条目存入知识库。"""
-        from .ocverse.llm_engine import _extract_json
+    async def _collect_kb(self, gid: str, offset: int = 0):
+        """采集一条轻小说/动漫/漫画风格的著作素材,提炼成可复用条目存入知识库。
+        offset: 同批内第几条,用于错开本轮题材(避免一条批次全同题)。"""
+        from .ocverse.llm_engine import _extract_json, now_stamp
         themes = ["异世界转生", "校园异能", "末世求生", "机甲战争", "修仙问道", "都市怪谈",
                   "奇幻冒险", "科幻末日", "怪盗群像", "婚约恋爱", "英灵群像", "蒸汽朋克"]
-        theme = themes[(self.game._world_day(gid) + self.kb.count(gid)) % len(themes)]
+        theme = themes[(self.game._world_day(gid) + self.kb.count(gid) + offset) % len(themes)]
         have = self.db.kb_sources(gid)[-6:]
         avoid = ("已在库的作品:" + "、".join(x for x in have if x)) if have else ""
         user = (
@@ -489,6 +493,7 @@ class OcversePlugin(Star):
             "或其典型桥段,提炼成一条可复用的创作素材,要能服务于后续的世界生成、随机事件、每日小任务、"
             "角色对话等。\n"
             f"本轮题材偏向:{theme}。{avoid}\n"
+            f"{now_stamp()}\n"
             "严格输出 JSON:{\"source\":作品名(≤20字),\"theme\":题材标签(≤12字),"
             "\"kind\":\"work|idea|dialogue|rule\"之一,"
             "\"content\":素材正文(120~300字,有设定感、可直接当世界观/钩子/台词风格使用,不要照搬原剧情主线)}\n"
@@ -500,13 +505,14 @@ class OcversePlugin(Star):
         if not text:
             return
         d = _extract_json(text) or {}
-        if not d.get("content"):
+        content = (str(d.get("content") or "")).strip()
+        if len(content) < 40:  # 内容过短(拆不出可用素材)则丢弃,不进库
             return
         await self.kb.add(gid,
                           str(d.get("source") or "")[:60],
                           str(d.get("theme") or theme)[:30],
                           str(d.get("kind") or "work")[:12],
-                          str(d.get("content"))[:1500])
+                          content[:1500])
         await asyncio.sleep(0)  # 让出事件循环
 
     async def _fire_plan_item(self, gid: str, item: dict, forced: bool = False) -> dict | None:
