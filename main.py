@@ -522,13 +522,13 @@ class OcversePlugin(Star):
     def _char_of(self, event) -> object:
         ch = self.db.get_char(self._need_gid(event), self._uid(event))
         if not ch:
-            raise GameError("你还没有创建分身,先「分身 创建 名字」")
+            raise GameError("你还没有创建分身,先「/分身 创建 名字」")
         return ch
 
     # ═══════════════════════════ 指令:引导/管理 ═══════════════════════════
     @filter.command_group("分身", alias={"oc", "ocs"})
     async def oc(self):
-        """分身的世界 · 指令组。发送「分身」或「分身 帮助」查看全部指令。"""
+        """分身的世界 · 指令组。发送「/分身」或「/分身 帮助」查看全部指令。"""
 
     @oc.command("帮助", alias={"help", "菜单"})
     @_guard
@@ -550,7 +550,7 @@ class OcversePlugin(Star):
         async with self._glock(gid):
             v = await self.game.init_world(gid, desc or None, self._uid(event))
         imgs = render_views([v], self._card_cfg())
-        chain = self._chain(imgs, "世界已就位!成员们用「分身 创建 名字」降生吧。")
+        chain = self._chain(imgs, "世界已就位!成员们用「/分身 创建 名字」降生吧。")
         if chain:
             yield event.chain_result(chain)
 
@@ -564,7 +564,7 @@ class OcversePlugin(Star):
         now = time.time()
         if now - self._confirm.get(key, 0) > 120:
             self._confirm[key] = now
-            yield event.plain_result("⚠ 将为全群重新生成一个世界(角色与记忆保留)。确认请再发一次「分身 重开世界」")
+            yield event.plain_result("⚠ 将为全群重新生成一个世界(角色与记忆保留)。确认请再发一次「/分身 重开世界」")
             return
         self._confirm.pop(key, None)
         yield event.plain_result("⏳ 正在重铸世界,请稍候…")
@@ -583,7 +583,7 @@ class OcversePlugin(Star):
         rest = self._rest(event, "定义世界", "add_world", "世界书")
         parts = rest.split(None, 1)
         if len(parts) < 2:
-            yield event.plain_result("格式:分身 定义世界 <名称> <描述…>\n例如:分身 定义世界 机械都市 一切由齿轮与蒸汽驱动,情感被禁止…")
+            yield event.plain_result("格式:/分身 定义世界 <名称> <描述…>\n例如:/分身 定义世界 机械都市 一切由齿轮与蒸汽驱动,情感被禁止…")
             return
         name, desc = parts[0][:16], parts[1]
         async with self._glock(gid):
@@ -649,17 +649,17 @@ class OcversePlugin(Star):
         rest = self._rest(event, "创建", "create", "创建角色")
         if not rest:
             yield event.plain_result(
-                "格式:分身 创建 <名字> [设定描述…](AI 自动整理成人设)\n"
-                "例如:分身 创建 森森 外观白发蓝瞳戴眼镜的帅哥,白色兜帽卫衣黑色内衬长裤,超级聪明的大天才,性格生人勿近 天不怕地不怕 喜欢独来独往 超有钱\n"
-                "也兼容竖线速写:分身 创建 <名字> |性别|性格,性格|背景设定…\n"
-                "设定可留空之后用「分身 编辑」补全;头像用「分身 设置头像」+ 图片"
+                "格式:/分身 创建 <名字> [设定描述…](AI 自动整理成人设)\n"
+                "例如:/分身 创建 森森 外观白发蓝瞳戴眼镜的帅哥,白色兜帽卫衣黑色内衬长裤,超级聪明的大天才,性格生人勿近 天不怕地不怕 喜欢独来独往 超有钱\n"
+                "也兼容竖线速写:/分身 创建 <名字> |性别|性格,性格|背景设定…\n"
+                "设定可留空之后用「分身 编辑」补全;头像用「/分身 设置头像」+ 图片"
             )
             return
         if "|" in rest:
             # 旧竖线速写:切段即可,不耗 AI
             parts = [p.strip() for p in rest.split("|")]
             if not parts[0]:
-                yield event.plain_result("名字不能为空:分身 创建 <名字> |性别|性格,性格|背景设定…")
+                yield event.plain_result("名字不能为空:/分身 创建 <名字> |性别|性格,性格|背景设定…")
                 return
             name = parts[0][:12]
             gender = parts[1][:8] if len(parts) > 1 and parts[1] else "保密"
@@ -681,7 +681,7 @@ class OcversePlugin(Star):
                     backstory = desc[:400]  # AI 不可用:描述原文入背景,不丢信息
         async with self._glock(gid):
             ch = self.game.create_char(gid, self._uid(event), name, gender, tags, backstory, attrs=llm_attrs)
-            tip = "" if (tags and backstory) else "\n💡 建议用「分身 编辑 性格/背景 <内容>」补全人设,事件会更有戏"
+            tip = "" if (tags and backstory) else "\n💡 建议用「/分身 编辑 性格/背景 <内容>」补全人设,事件会更有戏"
             attached = await self._images_with_quoted(event)  # 只解析一次,避免重复处理引用消息
             if attached and await self._save_avatar_bytes(ch, attached[0]):
                 tip += "\n🖼️ 已顺手把随指令的图片设为头像"
@@ -727,7 +727,7 @@ class OcversePlugin(Star):
             return
         if now - self._confirm.get(key, 0) > 120:
             self._confirm[key] = now
-            yield event.plain_result(f"⚠ 将删除分身「{ch.name}」(角色卡、头像、日志与记忆全部清除)。确认请再发一次「分身 删除角色」")
+            yield event.plain_result(f"⚠ 将删除分身「{ch.name}」(角色卡、头像、日志与记忆全部清除)。确认请再发一次「/分身 删除角色」")
             return
         self._confirm.pop(key, None)
         async with self._glock(gid):
@@ -794,7 +794,7 @@ class OcversePlugin(Star):
             cur_name=ch.name, cur_gender=ch.gender, cur_tags=list(ch.tags or []),
             cur_backstory=ch.backstory or "", text=content)
         if not r.ok:
-            yield event.plain_result(self._edit_usage() + "\n(AI 整理失败,请改用「分身 编辑 性别/性格/背景 <内容>」)")
+            yield event.plain_result(self._edit_usage() + "\n(AI 整理失败,请改用「/分身 编辑 性别/性格/背景 <内容>」)")
             return
         d = r.data
         changed = []
@@ -816,10 +816,10 @@ class OcversePlugin(Star):
     @staticmethod
     def _edit_usage() -> str:
         return (
-            "格式一:分身 编辑 性别|性格|背景(设定) <内容>\n"
-            "　　　例如:分身 编辑 性格 高冷,毒舌,护短\n"
-            "格式二:分身 编辑 <自由描述>(AI 自动判断改什么)\n"
-            "　　　例如:分身 编辑 我现在改成白发蓝瞳,性格变得开朗大胆"
+            "格式一:/分身 编辑 性别|性格|背景(设定) <内容>\n"
+            "　　　例如:/分身 编辑 性格 高冷,毒舌,护短\n"
+            "格式二:/分身 编辑 <自由描述>(AI 自动判断改什么)\n"
+            "　　　例如:/分身 编辑 我现在改成白发蓝瞳,性格变得开朗大胆"
         )
 
     async def _profile_view(self, gid: str, uid: str) -> dict:
@@ -880,7 +880,7 @@ class OcversePlugin(Star):
         gid = self._need_gid(event)
         w = self.db.cur_world(gid)
         if not w:
-            yield event.plain_result("世界尚未初始化。管理员:「分身 初始化世界 [世界观描述]」")
+            yield event.plain_result("世界尚未初始化。管理员:「/分身 初始化世界 [世界观描述]」")
             return
         day = self.game._world_day(gid)
         imgs = world_card(w, self._card_cfg(), is_current=True, day=day)
@@ -908,7 +908,7 @@ class OcversePlugin(Star):
         gid = self._need_gid(event)
         target = self._rest(event, "穿越世界", "穿越", "travel")
         if not target:
-            yield event.plain_result("格式:分身 穿越世界 <编号/名称>(编号见「分身 世界列表」)")
+            yield event.plain_result("格式:/分身 穿越世界 <编号/名称>(编号见「/分身 世界列表」)")
             return
         yield event.plain_result("⏳ 正在开启穿越之门,请稍候…")
         async with self._glock(gid):
@@ -926,7 +926,7 @@ class OcversePlugin(Star):
         gid = self._need_gid(event)
         n = re.sub(r"\D", "", idx or self._rest(event, "选择", "choose"))
         if not n:
-            yield event.plain_result("格式:分身 选择 <编号>(事件卡片里的 1/2/3)")
+            yield event.plain_result("格式:/分身 选择 <编号>(事件卡片里的 1/2/3)")
             return
         yield event.plain_result("⏳ 正在结算抉择,请稍候…")
         async with self._glock(gid):
@@ -943,7 +943,7 @@ class OcversePlugin(Star):
         gid = self._need_gid(event)
         target = self._at_target(event)
         if not target:
-            yield event.plain_result("请 @ 对方:分身 与 @某人 [打招呼/闲聊/请客/切磋/吐槽/送礼/倾听/合影,或自由描述]")
+            yield event.plain_result("请 @ 对方:/分身 与 @某人 [打招呼/闲聊/请客/切磋/吐槽/送礼/倾听/合影,或自由描述]")
             return
         raw = self._rest(event, "与", "互动").strip()
         raw = re.sub(r"@\S+", "", raw).strip()
@@ -979,7 +979,7 @@ class OcversePlugin(Star):
             lines.append("")
             lines += [f"· {i['name']}(自定)— {i['descr']}" for i in custom]
         lines.append("")
-        lines.append("用法:分身 与 @群友 互动方式;也可以直接自由描述一段行动,由你们的性格与羁绊决定走向。")
+        lines.append("用法:/分身 与 @群友 互动方式;也可以直接自由描述一段行动,由你们的性格与羁绊决定走向。")
         yield event.plain_result("\n".join(lines))
 
     @filter.permission_type(PermissionType.ADMIN)
@@ -989,7 +989,7 @@ class OcversePlugin(Star):
         """分身 添加互动 <名称> <说明> - 添加群自定义互动(管理员)"""
         gid = self._need_gid(event)
         if not name or not descr:
-            yield event.plain_result("格式:分身 添加互动 <名称> <说明>")
+            yield event.plain_result("格式:/分身 添加互动 <名称> <说明>")
             return
         key = name[:8]  # 与库里存储名一致,否则后续「删除互动」按全名匹配不到
         self.db.add_interaction(gid, key, descr[:80], self._uid(event))
@@ -1014,7 +1014,7 @@ class OcversePlugin(Star):
         if len(parts) < 2:
             w = self.db.cur_world(gid)
             names = "、".join(w.npc_names()) if w else "无"
-            yield event.plain_result(f"格式:分身 npc <名字> <想做什么>\n当前世界NPC:{names}")
+            yield event.plain_result(f"格式:/分身 npc <名字> <想做什么>\n当前世界NPC:{names}")
             return
         yield event.plain_result("⏳ 正在与NPC对话,请稍候…")
         async with self._glock(gid):
@@ -1073,12 +1073,12 @@ class OcversePlugin(Star):
         if not detail:
             lines = [
                 "你可以主动行动,让角色推进故事。现成的行动:",
-                "· 分身 练习 <练什么> — 修习技艺,精进属性(耗体力)",
-                "· 分身 健身 — 锻炼体魄(力量/敏捷)",
-                "· 分身 打工 — 打零工赚金币",
-                "· 分身 打怪 - 去危险地带挑战怪物(高风险高回报)",
+                "· /分身 练习 <练什么> — 修习技艺,精进属性(耗体力)",
+                "· /分身 健身 — 锻炼体魄(力量/敏捷)",
+                "· /分身 打工 — 打零工赚金币",
+                "· /分身 打怪 - 去危险地带挑战怪物(高风险高回报)",
                 "",
-                "· 分身 冒险 <自由描述> — 比如:去雾夜集市帮绫婆婆看摊 / 溜进灯塔偷看旧笔记",
+                "· /分身 冒险 <自由描述> — 比如:去雾夜集市帮绫婆婆看摊 / 溜进灯塔偷看旧笔记",
                 "每次行动消耗体力,一天限次。属性/金币/心情都会随之起落!",
             ]
             yield event.plain_result("\n".join(lines))
@@ -1115,16 +1115,16 @@ class OcversePlugin(Star):
         rest = self._rest(event, "添加NPC", "添加npc", "add_npc", "new_npc", "新npc")
         if not rest:
             yield event.plain_result(
-                "格式:分身 添加NPC <名字> [描述…] [世界名](AI 自动整理档案)\n"
-                "例如:分身 添加NPC 鱼婆 雾码头卖鱼的老婆婆,神神秘秘,似乎认得每一条旧船 [锈海城]\n"
-                "也兼容竖线:分身 添加NPC <名字>|职业|性格|钩子 [世界名]"
+                "格式:/分身 添加NPC <名字> [描述…] [世界名](AI 自动整理档案)\n"
+                "例如:/分身 添加NPC 鱼婆 雾码头卖鱼的老婆婆,神神秘秘,似乎认得每一条旧船 [锈海城]\n"
+                "也兼容竖线:/分身 添加NPC <名字>|职业|性格|钩子 [世界名]"
             )
             return
         if "|" in rest:
             # 旧竖线路径(含 [世界名] 后缀解析)
             name, role, persona, hook, world_ref = self._parse_npc_fields(rest)
             if not name:
-                yield event.plain_result("名字不能为空:分身 添加NPC <名字>|职业|性格|钩子 [世界名]")
+                yield event.plain_result("名字不能为空:/分身 添加NPC <名字>|职业|性格|钩子 [世界名]")
                 return
         else:
             # 自然语言:首词为名字,余下描述连同世界数据一起交给 AI,确保档案贴合世界观
@@ -1150,7 +1150,7 @@ class OcversePlugin(Star):
         yield event.plain_result(
             f"🗣 已在《{wname}》添加NPC「{npc['name']}」\n"
             f"职业:{npc['role']} | 性格:{npc['persona']} | 钩子:{npc['hook']}"
-            f"\n可用「分身 npc {npc['name']} <想做什么>」与TA互动"
+            f"\n可用「/分身 npc {npc['name']} <想做什么>」与TA互动"
         )
 
     @oc.command("删除NPC", alias={"删除npc", "del_npc"})
@@ -1171,7 +1171,7 @@ class OcversePlugin(Star):
         _n, _r, _p, _h, world_ref = self._parse_npc_fields(self._rest(event, "NPC列表", "npcs", "npc列表"))
         w, npcs = self.game.list_npcs(gid, world_ref)
         if not npcs:
-            yield event.plain_result(f"《{w.name}》还没有NPC。用「分身 添加NPC 名字|职业|性格|钩子」添加一位吧。")
+            yield event.plain_result(f"《{w.name}》还没有NPC。用「/分身 添加NPC 名字|职业|性格|钩子」添加一位吧。")
             return
         lines = [f"《{w.name}》的住民:({len(npcs)}位)", ""]
         for i, n in enumerate(npcs, 1):
@@ -1180,7 +1180,7 @@ class OcversePlugin(Star):
             if n.get('hook'):
                 lines.append(f"   钩子:{n.get('hook','')}")
         lines.append("")
-        lines.append("用「分身 npc <名字> <想做什么>」勾搭任意一位。")
+        lines.append("用「/分身 npc <名字> <想做什么>」勾搭任意一位。")
         yield event.plain_result("\n".join(lines))
 
     # ═══════════════════════════ 指令:记忆/杂项 ═══════════════════════════
@@ -1210,7 +1210,7 @@ class OcversePlugin(Star):
         gid = self._need_gid(event)
         q = self._rest(event, "回忆", "memory", "回忆检索")
         if not q:
-            yield event.plain_result("格式:分身 回忆 <关键词>,例如:分身 回忆 雾夜")
+            yield event.plain_result("格式:/分身 回忆 <关键词>,例如:/分身 回忆 雾夜")
             return
         results = self.mem.related_by_keyword(gid, q, k=6)
         imgs = memory_card(q, results, self._card_cfg())
@@ -1251,7 +1251,7 @@ class OcversePlugin(Star):
             if q.get("hint"):
                 lines.append(f"　 └ {q['hint']}")
         lines.append("")
-        lines.append("完成方式:分身 交任务 <编号>(轻松结算,有小奖励)")
+        lines.append("完成方式:/分身 交任务 <编号>(轻松结算,有小奖励)")
         yield event.plain_result("\n".join(lines))
 
     @oc.command("交任务", alias={"完成任务", "quest_done"})
@@ -1262,7 +1262,7 @@ class OcversePlugin(Star):
         self._char_of(event)
         n = re.sub(r"\D", "", idx or self._rest(event, "交任务", "完成任务", "quest_done"))
         if not n:
-            yield event.plain_result("格式:分身 交任务 <编号>(编号见「分身 任务」)")
+            yield event.plain_result("格式:/分身 交任务 <编号>(编号见「/分身 任务」)")
             return
         yield event.plain_result("⏳ 正在结算任务,请稍候…")
         async with self._glock(gid):

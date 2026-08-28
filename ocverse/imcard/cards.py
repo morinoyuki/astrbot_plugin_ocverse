@@ -165,7 +165,7 @@ def event_card(view: dict, cfg: dict) -> list[Image.Image]:
     for i, opt in enumerate(p.get("options") or [], 1):
         rows.append(ChoiceRow(r, i, str(opt.get("label", "?")), str(opt.get("hint", ""))))
     rows.append(EmptyRow(r, 4))
-    rows.append(_para(r, f"回复「选择 编号」做出抉择 · {view.get('expires_min', 45)} 分钟内有效",
+    rows.append(_para(r, f"回复「/分身 选择 编号」做出抉择 · {view.get('expires_min', 45)} 分钟内有效",
                       size=int(r.font_size * 0.72), color=r.t.text_muted))
     return r.render_rows(rows, title=f"遭遇 · {p.get('title', '突发状况')}")
 
@@ -233,7 +233,7 @@ def world_list_card(visited, pending, cur_id: int, cfg: dict) -> list[Image.Imag
             ]
         rows.append(PanelRow(r, "🔒 沉眠中的自设世界(需等待世界变动降临)", pending_rows))
     rows.append(EmptyRow(r, 4))
-    rows.append(_para(r, "自由穿越:「分身 穿越世界 编号/名称」(穿越过才能自由穿越)",
+    rows.append(_para(r, "自由穿越:「/分身 穿越世界 编号/名称」(穿越过才能自由穿越)",
                       size=int(r.font_size * 0.72), color=r.t.text_muted))
     return r.render_rows(rows, title="世界列表")
 
@@ -390,7 +390,7 @@ def render_views(views: list[dict], cfg: dict) -> list[Image.Image]:
 
 
 # ══════════════════════════ 帮助卡 / 名册 ══════════════════════════
-def help_card(cfg: dict, sub_prefix: str = "分身") -> list[Image.Image]:
+def help_card(cfg: dict, sub_prefix: str = "/分身") -> list[Image.Image]:
     r = _mk(cfg)
     fs = int(r.font_size * 0.78)
 
@@ -439,7 +439,7 @@ def roster_card(chars: list, cfg: dict, world_name: str = "") -> list[Image.Imag
     r = _mk(cfg)
     rows = []
     if not chars:
-        rows.append(_para(r, "这个世界还没有居民。用「分身 创建 名字」成为第一个!", color=r.t.text_muted))
+        rows.append(_para(r, "这个世界还没有居民。用「/分身 创建 名字」成为第一个!", color=r.t.text_muted))
     for ch in chars:
         rows.append(AvatarHeadRow(
             r, avatar=_avatar_img(ch.avatar), name=ch.name,

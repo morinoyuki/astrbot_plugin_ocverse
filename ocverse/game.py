@@ -158,7 +158,7 @@ class Game:
         if self.db.count_chars(gid) >= maxn:
             raise GameError(f"本群角色数已达上限({maxn}),暂无法创建新角色")
         if self.db.get_char(gid, uid):
-            raise GameError("你已经有一个分身了(一人一角色)。可先用「分身 删除角色」")
+            raise GameError("你已经有一个分身了(一人一角色)。可先用「/分身 删除角色」")
         if self.db.get_char_by_name(gid, name):
             raise GameError("这个名字已被本群其他分身占用")
         ch = Char(gid=gid, uid=uid, name=name, gender=gender or "保密",
@@ -455,7 +455,7 @@ class Game:
         """结算某人「选择 idx」:找其最近的 pending 事件。"""
         ch = self.db.get_char(gid, uid)
         if not ch:
-            raise GameError("你还没有创建分身,先「分身 创建 名字」")
+            raise GameError("你还没有创建分身,先「/分身 创建 名字」")
         ev = self.db.latest_pending_event(gid, uid)
         if not ev:
             raise GameError("当前没有等待抉择的事件")
@@ -741,10 +741,10 @@ class Game:
         """玩家主动行动一次。act_key: 预设施名或'冒险'(自定义)。消耗体力+每日次数,概率触发机缘奖励。"""
         ch = self.db.get_char(gid, uid)
         if not ch:
-            raise GameError("你还没有创建分身,先「分身 创建 名字」")
+            raise GameError("你还没有创建分身,先「/分身 创建 名字」")
         world = self.db.cur_world(gid)
         if not world:
-            raise GameError("世界尚未初始化,管理员:「分身 初始化世界」")
+            raise GameError("世界尚未初始化,管理员:「/分身 初始化世界」")
         preset = C.ACTIONS.get(act_key) or C.ACTIONS["冒险"]
         name = preset["name"]
         cost = int(preset["stamina_cost"])
@@ -808,7 +808,7 @@ class Game:
         if w.source != "user":
             raise GameError(
                 f"《{w.name}》是由系统生成的世界,住民由造世者注定,无法手动改动。"
-                "只有用「分身 定义世界」亲手创造的世界,才能添加/修改NPC。"
+                "只有用「/分身 定义世界」亲手创造的世界,才能添加/修改NPC。"
             )
         return w.name
 
@@ -826,7 +826,7 @@ class Game:
                 raise GameError(f"找不到叫「{ref}」的世界。现有:{names}")
             target = found
         elif not target:
-            raise GameError("世界尚未初始化,管理员:「分身 初始化世界」")
+            raise GameError("世界尚未初始化,管理员:「/分身 初始化世界」")
         return target
 
     async def add_npc(self, gid: str, uid: str, name: str, role: str, persona: str,
@@ -839,8 +839,8 @@ class Game:
         self._require_user_world(w)
         if not name:
             raise GameError(
-                "格式:分身 添加NPC <名字> [描述…] [世界名](AI 自动整理档案)\n"
-                "或:分身 添加NPC <名字>|职业|性格|钩子 [世界名]"
+                "格式:/分身 添加NPC <名字> [描述…] [世界名](AI 自动整理档案)\n"
+                "或:/分身 添加NPC <名字>|职业|性格|钩子 [世界名]"
             )
         npcs = list(w.npcs or [])
         if any((n.get("name") or "") == name for n in npcs if isinstance(n, dict)):
@@ -953,7 +953,7 @@ class Game:
                     target_w = w
                     break
         if target_w is None:
-            raise GameError("没找到这个世界。注意:只有「穿越过」的世界才能自由穿越(用「分身 世界列表」查看编号)")
+            raise GameError("没找到这个世界。注意:只有「穿越过」的世界才能自由穿越(用「/分身 世界列表」查看编号)")
         if cur and target_w.id == cur.id:
             raise GameError("你们已经在这个世界了")
         self.db.update_group(gid, cur_world_id=target_w.id, last_travel_at=_now())
@@ -971,7 +971,7 @@ class Game:
         if not ch:
             raise GameError("创建分身后才能定义世界")
         if not name or not desc:
-            raise GameError("格式:分身 定义世界 名称 描述…")
+            raise GameError("格式:/分身 定义世界 名称 描述…")
         for w0 in self.db.list_worlds(gid):
             if w0.name == name and not w0.visited:
                 raise GameError("已有一个同名的待降临世界,换个名字吧")
@@ -992,7 +992,7 @@ class Game:
             return qs
         ch = self.db.get_char(gid, uid)
         if not ch:
-            raise GameError("你还没有创建分身,先「分身 创建 名字」")
+            raise GameError("你还没有创建分身,先「/分身 创建 名字」")
         world = self.db.cur_world(gid)
         if not world:
             raise GameError("世界尚未初始化")
@@ -1012,7 +1012,7 @@ class Game:
         day = self._day_key()
         open_qs = [q for q in self.db.list_quests(gid, uid, day) if q["state"] == "open"]
         if not open_qs:
-            raise GameError("今天没有可完成的任务了(先发「分身 任务」领取)")
+            raise GameError("今天没有可完成的任务了(先发「/分身 任务」领取)")
         if not (0 <= idx < len(open_qs)):
             raise GameError(f"请选择 1~{len(open_qs)} 之间的编号")
         q = open_qs[idx]
