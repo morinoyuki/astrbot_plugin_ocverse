@@ -97,6 +97,7 @@ pip install -r requirements.txt   # pillow / numpy / aiohttp
 | `embedding_backend` | astrbot | 记忆语义向量后端:astrbot = 用 AstrBot 内置 Embedding 提供商(WebUI 配置即可);hash = 零依赖哈希词向量 |
 | `core_memory_threshold` | 40 | 长期记忆压缩阈值 |
 | `action_max_per_day` | 4 | 每人每日主动行动次数上限(练习/健身/打工/打怪/冒险) |
+| `interactions_max_per_day` | 10 | 每人每日互动次数上限(与NPC/群友共享,0=不限;内置防复读守卫) |
 | `max_npcs_per_world` | 20 | 每个世界手动添加的 NPC 数上限 |
 
 完整项见 `_conf_schema.json`。

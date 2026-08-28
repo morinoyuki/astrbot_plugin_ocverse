@@ -158,6 +158,12 @@
     "default": 4,
     "hint": "练习/健身/打工/打怪/冒险等主动行动会消耗体力且每天限次,防止刷属性"
   },
+  "interactions_max_per_day": {
+    "description": "每人每日互动次数上限",
+    "type": "int",
+    "default": 10,
+    "hint": "与NPC/群友互动(含对话)共享该额度,防止无限刷羁绊;0 = 不限。复读守卫自动生效:同对象同方式的重复互动,AI 会被要求换新场景新话题,输出不得雷同"
+  },
   "max_npcs_per_world": {
     "description": "每个世界NPC数量上限",
     "type": "int",

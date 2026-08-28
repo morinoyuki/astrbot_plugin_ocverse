@@ -383,6 +383,42 @@ async def main():
     assert db.get_rel("g1", "u1", "u2") == v["rel"]
     ok += 1; print("✓ 群友互动(羁绊)")
 
+    # 5.1 互动次数上限 + 防复读守卫
+    game.cfg = lambda k, d=None: {**CFG, "interactions_max_per_day": 1}.get(k, d)
+    try:
+        await game.interact("g1", "u1", "u2", "闲聊", "再聊一次")
+        raise AssertionError("互动次数上限未拦截")
+    except GameError as e:
+        assert "互动次数" in str(e), e
+    game.cfg = lambda k, d=None: CFG.get(k, d)
+
+    calls = {"n": 0}
+
+    def repeat_llm(system, user):
+        calls["n"] += 1
+        fixed = "重要纠正" in user  # 第二次带纠正提示
+        payload = {
+            "narration": "你们比划了几句" if not fixed else "新场景:你们一起去修了那条旧帆,聊到了海况。",
+            "dialogues": [{"speaker": "阿凛", "text": "你好呀。"}, {"speaker": "老徐", "text": "哟,来啦。"}],
+            "a_effects": {}, "b_effects": {}, "rel_delta": 1, "memory": "m",
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
+    b_rep = Brain(raw_call=repeat_llm)
+    prev = ["阿凛 对 老徐「闲聊」:你们比划了几句,气氛微妙地平衡着。(羁绊12)"]
+    rr = await b_rep.resolve_interaction(world=db.cur_world("g1"), a=db.get_char("g1", "u1"),
+                                        b=db.get_char("g1", "u2"), mode="闲聊", detail="",
+                                        rel_score=10, previous=prev)
+    assert calls["n"] == 2, calls  # 复读被检测并重写
+    assert "新场景" in rr.data["narration"], rr.data["narration"]
+    # 守卫不误伤:无历史(previous=None)时不触发重写,一次调用直接放行
+    calls["n"] = 0
+    rr2 = await b_rep.resolve_interaction(world=db.cur_world("g1"), a=db.get_char("g1", "u1"),
+                                          b=db.get_char("g1", "u2"), mode="闲聊", detail="",
+                                          rel_score=10, previous=None)
+    assert calls["n"] == 1, calls
+    ok += 1; print("✓ 互动防复读(同题不同文,复读重写)+ 每日互动次数上限")
+
     # 5.5 主动行动(练习/健身/打工/打怪/冒险)+ 概率机缘 + 每日上限
     game.cfg = lambda k, d=None: {**CFG, "action_max_per_day": 2}.get(k, d)
     _st = db.get_char("g1", "u1").stamina

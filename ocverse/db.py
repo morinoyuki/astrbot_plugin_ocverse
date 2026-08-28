@@ -476,6 +476,23 @@ class Database:
             r = self._ex("SELECT COUNT(*) c FROM timeline WHERE gid=?", (gid,), "one")
         return int(r["c"])
 
+    def recent_similar_logs(self, gid: str, uid: str, patterns: list[str], k: int = 3) -> list[str]:
+        """最近 k 条同时命中所有 patterns 的日志原文(防复读:喂给 LLM 要求情节明显不同)。"""
+        rows = self._ex(
+            "SELECT text FROM timeline WHERE gid=? AND uid=? AND kind IN ('interaction','npc','event') "
+            "ORDER BY id DESC LIMIT 200",
+            (gid, uid), "all",
+        )
+        pats = [p for p in (patterns or []) if p]
+        out = []
+        for r in rows:
+            t = r["text"] or ""
+            if all(p in t for p in pats):
+                out.append(t)
+                if len(out) >= k:
+                    break
+        return out
+
     # ── memories (raw; 语义在 MemoryStore) ─────────────────────
     def mem_add(self, gid: str, uid: str, scope: str, text: str, vec: list[float], ref: str = "") -> int:
         cur = self._ex(

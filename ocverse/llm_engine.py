@@ -269,7 +269,53 @@ class Brain:
             return BrainResult(True, ev)
         return BrainResult(False, dict(FB_EVENT))
 
-    async def resolve_event(self, *, world, char=None, event: dict, choice_idx: int) -> BrainResult:
+    @staticmethod
+    def _previous_block(previous: list[str] | None) -> str:
+        """把最近同类互动的旧叙述拼进 prompt,要求这次明显不同。"""
+        if not previous:
+            return ""
+        return ("\n此前同类互动的旧叙述(这次必须在场景、话题、对话上明显不同,禁止重复旧梗):\n"
+                + "\n".join(f"- {t[:90]}" for t in previous[:3]))
+
+    @staticmethod
+    def _text_similar(a: str, b: str) -> bool:
+        """字符 bigram 包含度:a 的内容大部分出现在 b 中(或反之)视为复读。"""
+        def bigrams(s: str) -> set:
+            s = re.sub(r"\s", "", s or "")
+            return {s[i:i + 2] for i in range(len(s) - 1)} if len(s) > 1 else ({s} if s else set())
+        ba, bb = bigrams(a), bigrams(b)
+        if not ba or not bb:
+            return False
+        inter = len(ba & bb)
+        return inter / max(1, min(len(ba), len(bb))) >= 0.6
+
+    def _too_similar(self, text: str, previous: list[str] | None) -> bool:
+        t = (text or "").strip()
+        if not t or not previous:
+            return False
+        return any(self._text_similar(t, (old or "")[:400]) for old in previous)
+
+    async def _ensure_fresh(self, system: str, user: str, d,
+                            previous: list[str] | None = None,
+                            counterpart: str = "", limit: int = 6,
+                            max_fix: int = 2):
+        """复读守卫:输出与最近同类互动过于相似时,带纠正提示重写(最多 max_fix 次)。"""
+        if not previous:
+            return d
+        tries = 0
+        while (isinstance(d, dict) and d.get("narration")
+               and self._too_similar(str(d["narration"]), previous) and tries < max_fix):
+            tries += 1
+            user2 = user + ("\n\n【重要纠正】你这次的输出与之前发生过的情节几乎一模一样,这是敷衍的复读,不可接受。"
+                            "完全重写:换新的场景、新话题、新对话,让情节向前推进。")
+            d2 = await self._ask_fixed_dialogues(system, user2, counterpart=counterpart, limit=limit)
+            if not (isinstance(d2, dict) and d2.get("narration")):
+                break
+            d = d2
+        return d
+
+    async def resolve_event(self, *, world, char=None, event: dict, choice_idx: int,
+                            previous: list[str] | None = None) -> BrainResult:
         """结算一次选择。char=None(群事件)时叙述群体结果。"""
         who = char.persona_line() if char else "群里的众人"
         opts = event.get("options") or []
@@ -287,11 +333,14 @@ class Brain:
             '"attrs":{"force":0}}, "memory":"第三人称一句话记忆存档"}\n'
             "数值克制:大部分±5~15,exp 5~20;负反馈不要毁灭性。memory 一句话,30字内。"
         )
+        user += self._previous_block(previous)
         d = await self._ask_fixed_dialogues(
             sys, user,
             counterpart=str(event.get("npc") or ""),  # 事件涉及NPC时(payload里的名字),必须开口
             limit=5,
         )
+        d = await self._ensure_fresh(sys, user, d, previous,
+                                     counterpart=str(event.get("npc") or ""), limit=5)
         if d and d.get("narration"):
             return BrainResult(
                 True,
@@ -306,7 +355,8 @@ class Brain:
 
     # ════════════════ 角色互动 ════════════════
     async def resolve_interaction(self, *, world, a, b=None, npc=None, mode: str,
-                                  detail: str, rel_score: int) -> BrainResult:
+                                  detail: str, rel_score: int,
+                                  previous: list[str] | None = None) -> BrainResult:
         from .config import rel_label
 
         b_ps = ""
@@ -330,11 +380,13 @@ class Brain:
             '"stamina":±,"attrs":{}}, "b_effects":{"mood":±,"gold":±},'
             ' "rel_delta":-20~20整数, "memory":"一句话存档"}'
         )
+        user += self._previous_block(previous)
+        counterpart = b.name if b else (str(npc.get("name", "")) if npc else "")
         d = await self._ask_fixed_dialogues(
-            sys, user,
-            counterpart=(b.name if b else (str(npc.get("name", "")) if npc else "")),
-            limit=6,
+            sys, user, counterpart=counterpart, limit=6,
         )
+        d = await self._ensure_fresh(sys, user, d, previous,
+                                     counterpart=counterpart, limit=6)
         if d and d.get("narration"):
             return BrainResult(
                 True,
@@ -390,7 +442,8 @@ class Brain:
 
     # ════════════════ NPC 对话 ════════════════
     async def npc_chat(self, *, world, npc: dict, char, action: str,
-                       memories: list[str] | None = None) -> BrainResult:
+                       memories: list[str] | None = None,
+                       previous: list[str] | None = None) -> BrainResult:
         sys = self.style
         user = (
             f"世界:《{world.name}》。NPC「{npc['name']}」({npc.get('role','')},{npc.get('persona','')};"
@@ -404,9 +457,11 @@ class Brain:
             '"narration":"旁白收尾",'
             '"effects":{"mood":±,"gold":±,"exp":0-8}, "memory":"一句话存档"}'
         )
-        d = await self._ask_fixed_dialogues(
-            sys, user, counterpart=str(npc.get("name", "")), limit=6,
-        )
+        user += self._previous_block(previous)
+        counterpart = str(npc.get("name", ""))
+        d = await self._ask_fixed_dialogues(sys, user, counterpart=counterpart, limit=6)
+        d = await self._ensure_fresh(sys, user, d, previous,
+                                     counterpart=counterpart, limit=6)
         if d and d.get("reply"):
             return BrainResult(
                 True,

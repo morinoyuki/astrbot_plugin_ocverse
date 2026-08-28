@@ -462,7 +462,12 @@ class Game:
         if not self.db.resolve_event_if_pending(ev.id, idx):
             raise GameError("这个事件刚被处理完了")
         target_char = self.db.get_char(gid, ev.uid) if ev.uid else None
-        r = await self.brain.resolve_event(world=world, char=target_char, event=ev.payload, choice_idx=idx)
+        # 防复读:同事件+同选项最近发生过的,要求 AI 这次明显不同
+        pick_label = opts[idx]["label"] if idx < len(opts) else ""
+        prev = self.db.recent_similar_logs(
+            gid, ev.uid or uid, [str(ev.payload.get("title", "")), pick_label], k=2)
+        r = await self.brain.resolve_event(
+            world=world, char=target_char, event=ev.payload, choice_idx=idx, previous=prev)
         data = r.data
         changes: list[str] = []
         if target_char:
@@ -526,6 +531,26 @@ class Game:
         return []
 
     # ══════════════ 互动(角色 ↔ 角色/NPC)══════════════
+    def _interaction_limit_hit(self, ch, raise_if: bool = True) -> bool:
+        """每日互动次数上限(与NPC/群友共享额度),0 = 不限。"""
+        day = self._day_key()
+        flags = dict(ch.flags or {})
+        ik = f"_inters:{day}"
+        limit = self._cfgi("interactions_max_per_day", 10)
+        if not limit:
+            return False
+        if int(flags.get(ik, 0)) >= limit:
+            if raise_if:
+                raise GameError(f"今天的互动次数用完了({limit}/天),明天再聊!")
+            return True
+        return False
+
+    def _count_interaction(self, ch):
+        """互动成功后计数(存在 flags 里,按日分键)。"""
+        ch.flags = ch.flags or {}
+        ik = f"_inters:{self._day_key()}"
+        ch.flags[ik] = int(ch.flags.get(ik, 0)) + 1
+
     async def interact(self, gid: str, uid_a: str, uid_b: str, mode: str, detail: str) -> dict:
         a = self.db.get_char(gid, uid_a)
         if not a:
@@ -538,16 +563,19 @@ class Game:
         world = self.db.cur_world(gid)
         if not world:
             raise GameError("世界尚未初始化")
+        self._interaction_limit_hit(a)
+        # 防复读:取最近几次同对象同方式的旧叙述,要求 AI 这次必须明显不同
+        prev = self.db.recent_similar_logs(gid, uid_a, [b.name, mode], k=3)
         r = await self.brain.resolve_interaction(
             world=world, a=a, b=b, npc=None, mode=mode, detail=detail,
-            rel_score=self.db.get_rel(gid, uid_a, uid_b),
+            rel_score=self.db.get_rel(gid, uid_a, uid_b), previous=prev,
         )
         data = r.data
         changes = self._apply_effects(a, data.get("a_effects") or {})
         changes += [f"(对方){x}" for x in self._apply_effects(b, data.get("b_effects") or {})]
         rel = self.db.bump_rel(gid, uid_a, uid_b, int(data.get("rel_delta") or 0), mode)
         # 计数/称号
-        a.flags = a.flags or {}
+        self._count_interaction(a)
         a.flags["interactions"] = int(a.flags.get("interactions", 0)) + 1
         self.db.upsert_char(a)
         self._check_flags(a)
@@ -586,8 +614,12 @@ class Game:
             names = "、".join(world.npc_names()) or "无"
             raise GameError(f"本世界没有叫「{npc_name}」的NPC。现有:{names}")
         mems = await self.mem.related(gid, f"{npc_name} {ch.name} {action}", uid=uid)
-        r = await self.brain.npc_chat(world=world, npc=npc, char=ch, action=action, memories=mems)
+        self._interaction_limit_hit(ch)
+        prev = self.db.recent_similar_logs(gid, uid, [npc_name], k=3)
+        r = await self.brain.npc_chat(world=world, npc=npc, char=ch, action=action,
+                                      memories=mems, previous=prev)
         data = r.data
+        self._count_interaction(ch)
         changes = self._apply_effects(ch, data.get("effects") or {})
         await self.mem.remember(gid, uid, "npc",
                                 data.get("memory") or f"{ch.name}找{npc_name}:{action[:30]}")
