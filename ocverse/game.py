@@ -172,6 +172,17 @@ class Game:
         return bool(g and g["init_done"])
 
     def _install_world(self, gid: str, wdata: dict, source: str, by: str = "", visited: int = 1) -> World:
+        # 系统世界解析/LLM没给基建时,用默认模板兜底,避免世界是空壳
+        if not wdata.get("infra"):
+            wdata["infra"] = [
+                {"kind": "杂货铺", "name": "街角杂货铺", "desc": "什么都有一点,也能换零用钱", "work": "杂货铺帮工"},
+                {"kind": "饭馆", "name": "街边饭馆", "desc": "热汤热饭,招呼四方来客", "work": "饭馆跑堂"},
+            ]
+        if not wdata.get("mainline"):
+            wdata["mainline"] = [
+                {"stage": "初来乍到", "desc": "先摸清这个世界的风气与规矩。"},
+                {"stage": "名字背后的故事", "desc": "这个地方似乎藏着一段被遗忘的往事。"},
+            ]
         w = World(
             gid=gid,
             name=wdata.get("name", "无名世界"),

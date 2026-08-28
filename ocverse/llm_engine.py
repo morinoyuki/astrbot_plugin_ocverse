@@ -164,7 +164,9 @@ class Brain:
         '"features":["独特之处1","独特之处2","独特之处3"],'
         '"npcs":[{"name":"","role":"身份","persona":"性格一句话","hook":"可交互的钩子一句话","daily":"这名NPC每天一般会去做什么/在哪里","quirk":"一个鲜活的小怪癖/口头禅"}],'
         '"event_ideas":["该世界独有事件灵感",4-6条],'
-        '"infra":[...],"mainline":[...],"plots":[...]}'
+        '"infra":[{"kind":"设施类型(店/馆/铺/工坊/祭坛/据点/地标…)","name":"设施名(2~6字)","desc":"功能/氛围一句话(≤20字)","work":"在这里能打工赚钱的职业(无则不填)"}],'
+        '"mainline":[{"stage":"主线小节名(≤10字)","desc":"这一步要做什么/线索(≤30字)"}],'
+        '"plots":[{"kind":"房|宅|小屋|公寓|铺面|庄园…","name":"可购住处名(2~6字)","desc":"一句话","price":整数金币价}]}'
     )
 
     @staticmethod
@@ -231,15 +233,25 @@ class Brain:
             "\nNPC 5~8个(名字不超过6字,融入世界,不要套模板名)。每个NPC都要有自己的"
             "日常行踪(daily:TA每天一般在哪/做什么)、鲜活小怪癖或口头禅(quirk),"
             "让这个世界住着活生生的人。\n"
-            "同时请设计这个世界的基础设施(商店/饭馆/工坊/据点等)、一段世界主线(3~6节)、"
-            "以及可供居民购置的住处(房/宅/小屋/铺面等,含价格)——全部贴合该世界题材与时代,"
-            "不要套用同一套现代模板:\n"
+            "然后为这个世界设计以下内容(必须全部给出,分别填入 infra / mainline / plots 三个数组):\n"
+            "- infra: 3~5个贴合该世界题材与时代的基础设施(商店/饭馆/工坊/祭坛/据点/驿站等),\n"
+            "  kind/name/desc/work 必填,其中至少 1 个能打工赚钱(填 work 职业);\n"
+            "- mainline: 3~6 节世界主线(stage/desc),是一段能推动这个世界的故事;\n"
+            "- plots: 3~5 处可供居民购置的住处(kind/name/desc/price),price 用整数金币。\n"
+            "全部要贴合该世界的题材与时代,不要套用同一套现代模板。\n"
             f"严格输出 JSON,结构:{self._WORLD_SCHEMA}"
         )
         # 世界生成是低频操作,允许走联网增强通道(搜索工具)扩充知识
         user = self._with_material(user, material)
         d = await self._ask_json(sys, user, use_tools=True)
         if d and d.get("name"):
+            # 校验:infra/mainline 必须至少各 1 条,否则带纠正提示重试一次
+            if not (self._norm_infra(d) and self._norm_mainline(d)):
+                d2 = await self._ask_json(sys, user + "\n\n【纠正】你漏掉了基础设施或主线,请补全:infra 至少 3 个可去的场所(含至少1个能打工的 work),mainline 至少 3 节主线,plots 至少 3 处可购住处。不要省略这些数组。", use_tools=True)
+                if d2 and d2.get("name"):
+                    d = {**d, "infra": d2.get("infra") or d.get("infra"),
+                         "mainline": d2.get("mainline") or d.get("mainline"),
+                         "plots": d2.get("plots") or d.get("plots")}
             return BrainResult(True, self._norm_world(d, source="llm", desc_hint=desc))
         return BrainResult(False, self._fallback_world(desc))
 
@@ -298,6 +310,22 @@ class Brain:
         if desc:
             w["desc"] = desc[:300]
         w["source"] = source if source != "llm" else "default"
+        # 离线/失败降级世界也要有一套默认基建/主线/地块,保证功能可用不是空壳
+        w.setdefault("infra", [
+            {"kind": "杂货铺", "name": "绫婆婆的杂货铺", "desc": "什么都有,也可以换些零用钱", "work": "杂货铺帮工"},
+            {"kind": "面馆", "name": "雾边面馆", "desc": "热汤下肚,雾天也暖", "work": "面馆跑堂"},
+            {"kind": "灯塔", "name": "旧灯塔", "desc": "灯叔守着的地方,夜里亮着", "work": ""},
+        ])
+        w.setdefault("mainline", [
+            {"stage": "雾夜来客", "desc": "雾最浓的那夜,镇口的猫不停叫——好像有什么在靠近。"},
+            {"stage": "旧物现形", "desc": "灯塔下捡到一件不该存在的东西,顺着它查下去。"},
+            {"stage": "钟声十三", "desc": "钟楼的第十三声钟响,据说会把人领到雾散之后的地方。"},
+        ])
+        w.setdefault("plots", [
+            {"kind": "小屋", "name": "转角小屋", "desc": "石板路尽头、旧灯塔能望见的那间", "price": 200},
+            {"kind": "平房", "name": "街边平房", "desc": "紧挨着港口集市的一间", "price": 400},
+            {"kind": "老宅", "name": "镇口老宅", "desc": "有院门的那座,据说镇子初建时就在了", "price": 600},
+        ])
         return w
 
     # ════════════════ 事件生成 ════════════════
