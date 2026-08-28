@@ -19,7 +19,8 @@ from dataclasses import dataclass
 from .config import ATTRS, ATTR_KEYS, ATTR_NAMES
 
 STYLE_BASE = (
-    "你是一个群聊文字游戏的叙事引擎,文风简洁生动、有画面感,不水字数、不出戏、"
+    "你是一个群聊文字游戏的叙事引擎,以轻小说的手法叙事:画面感强、有心理与感官细节、"
+    "节奏明快、对话生动口语化、结尾留有余味或小小的转折;不水字数、不出戏、"
     "不提及任何现实平台或AI身份。所有输出必须是严格的 JSON,不要 markdown 代码围栏,不要解释。"
 )
 
@@ -278,8 +279,10 @@ class Brain:
         user = (
             f"世界:《{world.name}》。{who}遭遇了:「{event.get('title')}」——{event.get('scene')}\n"
             f"TA选择了「{pick['label']}」({pick.get('hint','')})。\n"
-            "请结算:叙述结果(60-110字,有反转或余味),并给出数值变化。属性键:" + attrs_names + "。\n"
-            '严格输出 JSON:{"narration":"结果叙述","effects":{"stamina":±,"mood":±,"gold":±,"exp":0-25,'
+            "请结算:叙述结果(轻小说式,120~220字:画面感+心理细节+余味或小转折),并给出数值变化。"
+            "属性键:" + attrs_names + "。\n"
+            '"dialogues":事件中人物的多轮对话(2~5轮,IM聊天体,每条"speaker"≤8字、"text"≤60字,可含(动作)小注)。\n'
+            '严格输出 JSON:{"narration":"结果叙述","dialogues":[{"speaker":"","text":""}],"effects":{"stamina":±,"mood":±,"gold":±,"exp":0-25,'
             '"attrs":{"force":0}}, "memory":"第三人称一句话记忆存档"}\n'
             "数值克制:大部分±5~15,exp 5~20;负反馈不要毁灭性。memory 一句话,30字内。"
         )
@@ -288,7 +291,8 @@ class Brain:
             return BrainResult(
                 True,
                 {
-                    "narration": str(d["narration"])[:250],
+                    "narration": str(d["narration"])[:280],
+                    "dialogues": self._norm_dialogues(d.get("dialogues"), 5),
                     "effects": _clamp_effects(d.get("effects") or {}),
                     "memory": str(d.get("memory", ""))[:120],
                 },
@@ -312,7 +316,9 @@ class Brain:
             f"A:{a.persona_line()},背景:{a.backstory[:100] or '未详'},体力{a.stamina}/心情{a.mood}/金币{a.gold}"
             f"{b_ps}\n{rel_line}\n"
             f"互动:「{mode}」" + (f"({detail[:60]})" if detail else "") + "\n"
-            "写出这段互动的走向与结果(70-130字,让性格碰撞出戏)。"
+            "写出这段互动的走向与结果(轻小说式,120~220字:画面感+心理细节+余味)。\n"
+            '"dialogues":A与B你来我往的多轮对话(3~6轮,IM聊天体,每条"speaker"用角色名,'
+            '"text"≤60字,口语化,可含(动作/神态)小注),要能看出性格碰撞。\n'
             "若是消费类互动(请客/送礼),务必扣 A 的金币并给 B 心情。\n"
             '严格输出 JSON:{"narration":"互动叙述","a_effects":{"mood":±,"gold":±,"exp":0-10,'
             '"stamina":±,"attrs":{}}, "b_effects":{"mood":±,"gold":±},'
@@ -323,7 +329,8 @@ class Brain:
             return BrainResult(
                 True,
                 {
-                    "narration": str(d["narration"])[:280],
+                    "narration": str(d["narration"])[:300],
+                    "dialogues": self._norm_dialogues(d.get("dialogues"), 6),
                     "a_effects": _clamp_effects(d.get("a_effects") or {}),
                     "b_effects": _clamp_effects(d.get("b_effects") or {}),
                     "rel_delta": _clamp(d.get("rel_delta", 0), -20, 20),
@@ -349,7 +356,9 @@ class Brain:
             f"角色:{char.persona_line()},背景:{char.backstory[:100] or '未详'},"
             f"当前体力{char.stamina}/心情{char.mood}/金币{char.gold}\n"
             f"今日于《{world.name}》执行行动:「{action_name}」{detail[:80]}\n{risk_line}\n{mem}\n"
-            "请写出这次行动的经过与结果(60-120字,结合世界设定与角色性格,有画面感与余味)。\n"
+            "请写出这次行动的经过与结果(轻小说式,100~200字:画面感+心理细节+余味),"
+            "结合世界设定与角色性格。\n"
+            '"dialogues":行动中与场景人物的简短对话(2~4轮,IM聊天体,每条"speaker"≤8字、"text"≤60字)。\n'
             "属性键:" + attrs_names + "。日常型行动要消耗的体力由系统扣除,效果表里不要写体力。\n"
             '严格输出 JSON:{"narration":"行动叙述",'
             '"effects":{"mood":±,"gold":±,"exp":0-25,"stamina":±(仅风险型可写),"attrs":{"force":0}},"memory":"一句话存档"}\n'
@@ -360,7 +369,8 @@ class Brain:
             return BrainResult(
                 True,
                 {
-                    "narration": str(d["narration"])[:280],
+                    "narration": str(d["narration"])[:300],
+                    "dialogues": self._norm_dialogues(d.get("dialogues"), 4),
                     "effects": _clamp_effects(d.get("effects") or {}),
                     "memory": str(d.get("memory", ""))[:120],
                 },
@@ -376,8 +386,10 @@ class Brain:
             f"钩子:{npc.get('hook','')})\n"
             f"角色:{char.persona_line()}\n角色行为:{action[:80]}\n"
             f"{chr(10).join(memories[:4]) if memories else ''}\n"
-            "以NPC的口吻回应1-3句(保留人设与神秘感),旁白一句收尾,可给微小奖励。\n"
-            '严格输出 JSON:{"reply":"NPC台词","narration":"旁白",'
+            "与角色进行多轮对话(3~6轮,IM聊天体:dialogues 数组,每条 speaker ≤8字、text ≤60字,"
+            "口语化,保留人设与神秘感,NPC与角色交替说话),再用旁白收尾(60~120字),可给微小奖励。\n"
+            '严格输出 JSON:{"reply":"NPC最核心的一句台词","dialogues":[{"speaker":"","text":""}],'
+            '"narration":"旁白收尾",'
             '"effects":{"mood":±,"gold":±,"exp":0-8}, "memory":"一句话存档"}'
         )
         d = await self._ask_json(sys, user)
@@ -386,7 +398,8 @@ class Brain:
                 True,
                 {
                     "reply": str(d["reply"])[:160],
-                    "narration": str(d.get("narration", ""))[:160],
+                    "dialogues": self._norm_dialogues(d.get("dialogues"), 6),
+                    "narration": str(d.get("narration", ""))[:200],
                     "effects": _clamp_effects(d.get("effects") or {}),
                     "memory": str(d.get("memory", ""))[:120],
                 },
@@ -570,7 +583,8 @@ class Brain:
             f"角色:{char.persona_line()},背景:{char.backstory[:80] or '未详'}\n"
             f"角色完成了今日小任务:「{quest[:30]}」\n"
             f"{mem}\n"
-            "写一段简短的完成叙述(40~70字,轻松日常,有画面感,有余味),并给一点小奖励。\n"
+            "写一段简短的完成叙述(轻小说式,60~120字,轻松日常,有画面感,有余味),并给一点小奖励。\n"
+            '"dialogues":完成过程中的一小段对话(1~3轮,IM聊天体,每条"speaker"≤8字、"text"≤40字)。\n'
             '严格输出 JSON:{"narration":"完成叙述","effects":{"exp":5~12,"gold":0~20,"mood":0~3}}'
         )
         d = await self._ask_json(self.style, user)
@@ -582,8 +596,25 @@ class Brain:
                     eff[k] = max(lo, min(hi, int(round(float(eff_in.get(k) or 0)))))
                 except (TypeError, ValueError):
                     pass
-            return BrainResult(True, {"narration": str(d["narration"])[:200], "effects": eff})
+            return BrainResult(True, {"narration": str(d["narration"])[:250],
+                                     "dialogues": self._norm_dialogues(d.get("dialogues"), 3),
+                                     "effects": eff})
         return BrainResult(False, dict(FB_QUEST_DONE))
+
+    @staticmethod
+    def _norm_dialogues(raw, limit: int = 6) -> list:
+        """规范 IM 对话轮次:[{speaker, text}], speaker≤12字、text≤100字,最多 limit 条。"""
+        if not isinstance(raw, list):
+            return []
+        out = []
+        for d in raw[:limit]:
+            if not isinstance(d, dict):
+                continue
+            sp = str(d.get("speaker") or "").strip()[:12]
+            tx = str(d.get("text") or "").strip()[:100]
+            if sp and tx:
+                out.append({"speaker": sp, "text": tx})
+        return out
 
 
 # ════════════════ fallback 模板(离线可玩)════════════════
@@ -598,13 +629,24 @@ FB_EVENT = {
 }
 
 FB_RESOLVE = {
-    "narration": "事情以一种说不上好也说不上坏的方式落幕了。世界继续运转,而你记下了这一笔。",
+    "narration": "事情以一种说不上好也说不上坏的方式落幕了。远处钟声又敲了一遍,你把衣角掀了掀,继续往前走。"
+                 "世界还在运转,只是从今往后,你记下了这一笔。",
+    "dialogues": [
+        {"speaker": "路人", "text": "(压低声音)喂,刚才那一幕你也看见了吧?"},
+        {"speaker": "老人", "text": "别看啦,这地方奇怪的事,还多着呢。"},
+    ],
     "effects": {"exp": 6, "mood": 0},
     "memory": "经历了一场无名的街头遭遇。",
 }
 
 FB_INTERACT = {
-    "narration": "你们比划了几句,气氛微妙地平衡着。世界很大,相遇总是件小事,但小事攒多了就成了故事。",
+    "narration": "你们比划了几句,气氛微妙地平衡着。风从巷口掠过去,谁都没先开口,谁也没先走。"
+                 "世界很大,相遇总是件小事,但小事攒多了,就成了故事。",
+    "dialogues": [
+        {"speaker": "对方", "text": "……你就这么看着我干嘛?"},
+        {"speaker": "自己", "text": "(移开视线)没什么。下次请我吃饭,就原谅你刚才的眼神。"},
+        {"speaker": "对方", "text": "(嗤笑)你还挺上道。"},
+    ],
     "a_effects": {"exp": 4},
     "b_effects": {"mood": 2},
     "rel_delta": 2,
@@ -613,13 +655,23 @@ FB_INTERACT = {
 
 FB_NPC = {
     "reply": "……嗯?稀客。这镇子上的事,知道得越少,睡得越香。",
-    "narration": "对方摆了摆手,没再多说。",
+    "dialogues": [
+        {"speaker": "NPC", "text": "……嗯?稀客。这镇子上的事,知道得越少,睡得越香。"},
+        {"speaker": "自己", "text": "(笑了笑)可我偏偏是个爱打听的人。"},
+        {"speaker": "NPC", "text": "(摆摆手)那你得先请我喝一杯。"},
+    ],
+    "narration": "对方摆了摆手,转身回了屋里,只留下一盏在风里晃的灯。",
     "effects": {"exp": 3},
     "memory": "与一位本地人打过照面。",
 }
 
 FB_ACT = {
-    "narration": "你把这件事认真做下来,出了不少汗,也攒下了一点东西。唯有自己清楚这份收获。",
+    "narration": "你把这件事认真做了下来,汗顺着下巴滴在尘土里。收工时天色已经暗了,掌心多了道新茧。"
+                 "出了不少汗,也攒下了一点东西——唯有自己清楚这份收获。",
+    "dialogues": [
+        {"speaker": "旁人", "text": "哟,又是你?今天这么拼?"},
+        {"speaker": "自己", "text": "总得把今天的事做完。"},
+    ],
     "effects": {"exp": 8, "mood": 2},
     "memory": "认真行动了一天,略有进境。",
 }
@@ -643,6 +695,10 @@ FB_QUESTS = {
 }
 
 FB_QUEST_DONE = {
-    "narration": "你把这件小事认真做完了。日子就是这样一件件小事攒起来的。",
+    "narration": "你把这件小事认真做完了。热汤见了底,连风都变得温柔。日子就是这样一件件小事攒起来的。",
+    "dialogues": [
+        {"speaker": "摊主", "text": "(递来热汤)慢慢喝,别急。"},
+        {"speaker": "自己", "text": "(捧着碗)嗯,今天也麻烦你了。"},
+    ],
     "effects": {"exp": 8, "mood": 2},
 }

@@ -485,6 +485,10 @@ class OcversePlugin(Star):
         if not armed:
             return
         item = armed[0]
+        # 角色事件只能被本人消息触发:无分身的群友发言不引爆、不提示,
+        # 事件保持待命等本人(或有分身者)发言;绝不把别人的角色卷进来
+        if not self.db.get_char(gid, self._uid(event)):
+            return
         yield event.plain_result("⏳ 似乎有什么正朝这里靠近…")
         try:
             async with self._glock(gid):

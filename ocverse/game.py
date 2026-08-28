@@ -324,10 +324,11 @@ class Game:
         return random.choices(chars, weights=weights, k=1)[0]
 
     async def fire_event(self, gid: str, char_uid: str | None = None) -> dict | None:
-        """到点生成一次遭遇,落库并返回卡片 view。
+        """生成一次遭遇,落库并返回卡片 view。
 
         char_uid: 被动事件引爆时传入说话者 uid —— 事件"是冲着 TA 来的"。
-        没有角色时返回 None。
+        角色事件只能被本人消息触发:char_uid 无对应分身时返回 None(不引爆、
+        绝不退化成随机选别人角色);随机选角仅限定时推送(主动事件/兜底 force)。
         """
         world = self.db.cur_world(gid)
         chars = self.db.list_chars(gid)
@@ -338,10 +339,15 @@ class Game:
         if not is_group:
             if char_uid:
                 char = self.db.get_char(gid, char_uid)
-            if char is None:
+                if char is None:
+                    # 说话人自己没有分身 → 不引爆:不能因路人的消息,
+                    # 把某个群友的角色随机卷进事件(事件保持待命,等本人发言)
+                    return None
+            else:
+                # 定时推送(主动事件/窗口结束兜底):没有指定目标才允许公平随机选角
                 char = self._pick_char(gid)
-            if char is None:
-                is_group = True
+                if char is None:
+                    is_group = True
         npc = None
         if world.npcs and random.random() < EVENT_NPC_PROB:
             npc = random.choice(world.npcs)
@@ -487,6 +493,7 @@ class Game:
             "event_title": ev.payload.get("title", ""),
             "chosen": opts[idx]["label"],
             "narration": data.get("narration", ""),
+            "dialogues": data.get("dialogues") or [],
             "changes": changes,
             "ok_llm": r.ok,
         }
@@ -556,6 +563,7 @@ class Game:
             "world_name": world.name,
             "mode": mode,
             "narration": data.get("narration", ""),
+            "dialogues": data.get("dialogues") or [],
             "changes": changes,
             "rel": rel,
             "rel_label": C.rel_label(rel),
@@ -593,6 +601,7 @@ class Game:
             "world_name": world.name,
             "reply": data.get("reply", ""),
             "narration": data.get("narration", ""),
+            "dialogues": data.get("dialogues") or [],
             "changes": changes,
             "ok_llm": r.ok,
         }
@@ -657,6 +666,7 @@ class Game:
             "action_pill": f"{ch.name} · {name}",
             "world_name": world.name,
             "narration": r.data.get("narration", ""),
+            "dialogues": r.data.get("dialogues") or [],
             "changes": changes,
             "ok_llm": r.ok,
         }
@@ -892,6 +902,7 @@ class Game:
             "event_title": f"任务·{q['text']}",
             "chosen": q["text"],
             "narration": r.data.get("narration", ""),
+            "dialogues": r.data.get("dialogues") or [],
             "changes": changes,
             "ok_llm": r.ok,
         }

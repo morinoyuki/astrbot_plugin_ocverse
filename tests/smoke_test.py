@@ -67,13 +67,26 @@ EVENT_JSON = {
 }
 
 RESOLVE_JSON = {
-    "narration": "你在雾里撞上了一个支着旧灯的小摊。摊主看不清脸,只递来一枚还带温度的船票,雾便散了。",
+    "narration": "你在雾里撞上了一个支着旧灯的小摊。摊主看不清脸,只递来一枚还带温度的船票,雾便散了。"
+                 "你捏着船票站了很久,直到路灯次第亮起,才发觉手心里全是汗——这枚船票,到底是谁想让你拿到的?",
+    "dialogues": [
+        {"speaker": "摊主", "text": "(压低声音)拿着吧,今晚的雾,会带你去该去的地方。"},
+        {"speaker": "阿凛", "text": "(后退半步)等等,你到底是谁?"},
+        {"speaker": "摊主", "text": "(轻轻推回船票)到了地方,你自然会知道。"},
+    ],
     "effects": {"mood": 8, "exp": 14, "gold": 30, "attrs": {"luck": 2}},
     "memory": "在雾里收到过一张来路不明的暖船票。",
 }
 
 INTERACT_JSON = {
-    "narration": "你们在齿轮区的面摊拼了桌,聊起雾码头的传闻。TA把最后一块炸鱼推给了你,自己嗦了口汤。",
+    "narration": "你们在齿轮区的面摊拼了桌,聊起雾码头的传闻。汤面的热气糊了镜片,TA把最后一块炸鱼推给了你,自己嗦了口汤。"
+                 "有些交情,就是从一块炸鱼开始的。",
+    "dialogues": [
+        {"speaker": "阿凛", "text": "雾码头晚上真的有人失踪?"},
+        {"speaker": "老徐", "text": "(嗦了口汤)失踪的可不一定是人。"},
+        {"speaker": "阿凛", "text": "……你这话说一半很讨人厌知不知道。"},
+        {"speaker": "老徐", "text": "(把炸鱼推过去)吃完再说,凉了就不脆了。"},
+    ],
     "a_effects": {"mood": 10, "gold": -25, "exp": 8},
     "b_effects": {"mood": 12},
     "rel_delta": 12,
@@ -82,7 +95,14 @@ INTERACT_JSON = {
 
 NPC_JSON = {
     "reply": "新来的?哈,我这儿的规矩——听故事,拿东西。你讲一个,我送你一盏旧灯。",
-    "narration": "老铁擦了擦手上的铁屑,眯眼打量你。",
+    "dialogues": [
+        {"speaker": "老铁", "text": "新来的?哈,我这儿的规矩——听故事,拿东西。"},
+        {"speaker": "阿凛", "text": "听谁的?"},
+        {"speaker": "老铁", "text": "(拍拍身后那堆废铁)谁的都行,雾码头那些事,我个人比较爱听。"},
+        {"speaker": "阿凛", "text": "那要是讲砸了呢?"},
+        {"speaker": "老铁", "text": "(眯眼)砸了嘛……你就欠我一顿面。你讲一个,我送你一盏旧灯。"},
+    ],
+    "narration": "老铁擦了擦手上的铁屑,眯眼打量你,火光在你们之间噼啪作响。",
     "effects": {"exp": 6, "mood": 4},
     "memory": "从老铁那儿听规矩、换过一盏旧灯。",
 }
@@ -98,7 +118,11 @@ MORNING_JSON = {
 }
 
 ACT_JSON = {
-    "narration": "你咬着牙把这一套练完,酸痛里透着踏实。临下工,在旧排气管里摸出一枚发锈的齿轮币,权当彩头。",
+    "narration": "你咬着牙把这一套练完,酸痛里透着踏实。邻摊的学徒擎着扳手冲你咦了一声。临下工,在旧排气管里摸出一枚发锈的齿轮币,权当彩头。",
+    "dialogues": [
+        {"speaker": "学徒", "text": "嚯,又练到这么晚?铁皮都要被你敲醒了。"},
+        {"speaker": "阿凛", "text": "(甩着手腕)不练完,睡不着。"},
+    ],
     "effects": {"mood": 4, "exp": 12, "gold": 20, "attrs": {"force": 2}},
     "memory": "在齿轮区认真训练了一天,还顺手捞到一枚旧齿轮。",
 }
@@ -272,6 +296,21 @@ async def main():
     game.mark_done("g1", {"id": 999})
     assert not any(it.get("id") == 999 for it in game.armed_passives("g1"))
     ok += 1; print("✓ 被动事件:埋伏笔→群消息引爆(以说话者为主角)")
+
+    # 3.6.2 角色事件只能被本人消息触发:无分身者的消息绝不引爆、绝不随机选别人角色
+    plan = game.db.get_plan("g1", day) or []
+    plan.append({"id": 997, "hhmm": "00:00", "kind": "event", "mode": "passive", "armed": 0, "done": 0})
+    game.db.put_plan("g1", day, plan)
+    acts = game.tick_items("g1")
+    tgt = [(it, a) for it, a in acts if it.get("id") == 997]
+    game.arm_passive("g1", tgt[0][0])
+    for _ in range(5):
+        v = await game.fire_event("g1", char_uid="u_no_char")  # 无分身者发言
+        assert v is None, "无分身者的消息不应引爆角色事件"
+    armed = game.armed_passives("g1")
+    assert any(it.get("id") == 997 for it in armed), "事件应保持待命,而不是被路人消息消耗"
+    game.mark_done("g1", {"id": 997})
+    ok += 1; print("✓ 角色事件只能被本人消息触发(无分身不引爆/不随机拉人/伏笔保留)")
 
     # 3.7 被动事件兜底:活跃时段结束仍无人引爆 → 强制主动推送
     game._active_end_hhmm = lambda: "00:00"  # 测试:视为已过活跃时段
