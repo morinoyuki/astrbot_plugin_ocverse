@@ -83,6 +83,56 @@ class Game:
             int(g.get("travel_cooldown_h") or 0) or self._cfgi("travel_cooldown_hours", 6),
         )
 
+    # ══════════════ 特殊状态(囚禁/束缚等) ══════════════
+    def _state(self, ch: Char) -> dict:
+        """当前特殊状态 {type, reason, since},无则空 dict。"""
+        s = (ch.flags or {}).get("_state")
+        return s if isinstance(s, dict) else {}
+
+    def _is_locked(self, ch: Char) -> bool:
+        return bool(self._state(ch))
+
+    def _state_note(self, ch: Char) -> str:
+        """状态的一句话描述(供注入 LLM),无状态返回空串。"""
+        s = self._state(ch)
+        if not s:
+            return ""
+        typ = str(s.get("type") or "特殊状态").strip()
+        reason = str(s.get("reason") or "").strip()
+        return f"{typ}" + (f"({reason})" if reason else "")
+
+    def _set_state(self, ch: Char, typ: str, reason: str = ""):
+        """施加/替换特殊状态。"""
+        ch.flags = ch.flags or {}
+        ch.flags["_state"] = {
+            "type": (typ or "").strip()[:20] or "特殊状态",
+            "reason": (reason or "").strip()[:80],
+            "since": _now(),
+        }
+        self.db.upsert_char(ch)
+
+    def _lift_state(self, ch: Char) -> bool:
+        """解除特殊状态,返回是否曾处于状态。"""
+        if not (ch.flags or {}).get("_state"):
+            return False
+        ch.flags = dict(ch.flags or {})
+        ch.flags.pop("_state", None)
+        self.db.upsert_char(ch)
+        return True
+
+    def _apply_state_result(self, ch: Char, data: dict) -> list[str]:
+        """按 LLM 输出的 state / state_lift 施加或解除特殊状态,返回人话变更。"""
+        changes: list[str] = []
+        s = data.get("state")
+        if isinstance(s, dict) and (str(s.get("type") or "").strip() or str(s.get("reason") or "").strip()):
+            self._set_state(ch, str(s.get("type") or ""), str(s.get("reason") or ""))
+            changes.append(f"⛓ 陷入「{self._state_note(ch)}」")
+        if data.get("state_lift"):
+            if self._is_locked(ch):
+                self._lift_state(ch)
+                changes.append("🗝 脱困:特殊状态解除")
+        return changes
+
     # ══════════════ 世界初始化 ══════════════
     async def _kb_ctx(self, gid: str, query: str, k: int = 3) -> str:
         """从知识库取相关素材,返回可注入 prompt 的文本(空库/无KB返回空串)。"""
@@ -166,6 +216,7 @@ class Game:
             wdata = dict(C.DEFAULT_WORLD)
             if hint:
                 wdata["desc"] = hint
+            self._ensure_group(gid)  # 先建群行,否则 update_group 落空、默认世界无法成为当前世界
             self._install_world(gid, wdata, source="default")
         maxn = self._cfgi("max_chars_per_group", 30)
         if self.db.count_chars(gid) >= maxn:
@@ -380,6 +431,7 @@ class Game:
         )
         r = await self.brain.make_event(world=world, char=char, kind="npc" if npc else ("group" if is_group else "solo"),
                                         npc=npc, memories=mems, ideas=world.event_ideas,
+                                        state_note=self._state_note(char) if char else "",
                                         material=await self._kb_ctx(gid, f"随机事件 剧情 钩子 {world.name}"))
         ev = EventRow(
             gid=gid,
@@ -490,13 +542,17 @@ class Game:
         pick_label = opts[idx]["label"] if idx < len(opts) else ""
         prev = self.db.recent_similar_logs(
             gid, ev.uid or uid, [str(ev.payload.get("title", "")), pick_label], k=2)
+        state_note = self._state_note(target_char) if target_char else ""
         r = await self.brain.resolve_event(
             world=world, char=target_char, event=ev.payload, choice_idx=idx, previous=prev,
+            state_note=state_note,
             material=await self._kb_ctx(gid, "事件结算 结果 剧情 氛围"))
         data = r.data
         changes: list[str] = []
         if target_char:
             changes = self._apply_effects(target_char, data.get("effects") or {})
+            if state_note:  # 事件可脱困/加深/换困境(仅个人事件;群事件不动状态)
+                changes += self._apply_state_result(target_char, data)
         else:
             # 全员事件:同样效果落到每个角色(金币不重复发放,避免通胀)
             ge = dict(data.get("effects") or {})
@@ -590,17 +646,29 @@ class Game:
         if not world:
             raise GameError("世界尚未初始化")
         self._interaction_limit_hit(a)
+        # 特殊状态:被困者不能主动与群友互动(等别人来救/脱困后再说)
+        a_state = self._state_note(a)
+        if a_state:
+            raise GameError(
+                f"⛓ 你正被「{a_state}」困住,无法自由走上前与人搭话。"
+                "让别人来救你吧,或用「/分身 冒险 <描述>」自行挣扎脱困、找特殊NPC求助。"
+            )
+        # 目标被困:这是一次『营救』,是否救得成由 LLM 判断
+        b_state = self._state_note(b)
         # 防复读:取最近几次同对象同方式的旧叙述,要求 AI 这次必须明显不同
         prev = self.db.recent_similar_logs(gid, uid_a, [b.name, mode], k=3)
         pre = self.db.get_rel_full(gid, uid_a, uid_b)
         r = await self.brain.resolve_interaction(
             world=world, a=a, b=b, npc=None, mode=mode, detail=detail,
             rel_score=pre["score"], rel_stage=C.rel_stage_label(pre["score"], pre["state"]),
-            previous=prev, material=await self._kb_ctx(gid, f"互动 对话 {mode}"),
+            previous=prev, state_note=b_state,
+            material=await self._kb_ctx(gid, f"互动 对话 {mode}"),
         )
         data = r.data
         changes = self._apply_effects(a, data.get("a_effects") or {})
         changes += [f"(对方){x}" for x in self._apply_effects(b, data.get("b_effects") or {})]
+        if b_state:  # 营救结果:是否救出/换一种困局,由 LLM 判定并落实到 b
+            changes += self._apply_state_result(b, data)
         rel = self.db.bump_rel(gid, uid_a, uid_b, int(data.get("rel_delta") or 0), mode)
         # 关系阶段:恋人好感≥95 自动升温为热恋中的情侣
         info = self.db.get_rel_full(gid, uid_a, uid_b)
@@ -730,12 +798,16 @@ class Game:
         mems = await self.mem.related(gid, f"{npc_name} {ch.name} {action}", uid=uid)
         self._interaction_limit_hit(ch)
         prev = self.db.recent_similar_logs(gid, uid, [npc_name], k=3)
+        # 被困玩家找NPC:是否为能帮上忙的『特殊NPC』,由 LLM 判断
+        state_note = self._state_note(ch)
         r = await self.brain.npc_chat(world=world, npc=npc, char=ch, action=action,
-                                      memories=mems, previous=prev,
+                                      memories=mems, previous=prev, state_note=state_note,
                                       material=await self._kb_ctx(gid, "NPC构图 对话 人物"))
         data = r.data
         self._count_interaction(ch)
         changes = self._apply_effects(ch, data.get("effects") or {})
+        if state_note:
+            changes += self._apply_state_result(ch, data)
         await self.mem.remember(gid, uid, "npc",
                                 data.get("memory") or f"{ch.name}找{npc_name}:{action[:30]}")
         self.db.append_log(gid, uid, "npc",
@@ -765,6 +837,13 @@ class Game:
             raise GameError("世界尚未初始化,管理员:「/分身 初始化世界」")
         preset = C.ACTIONS.get(act_key) or C.ACTIONS["冒险"]
         name = preset["name"]
+        # 特殊状态:被困时只能靠『冒险』拼脱困,预设施名(练习/健身/打工/打怪)一律禁止
+        state_note = self._state_note(ch)
+        if state_note and name != "冒险":
+            raise GameError(
+                f"⛓ 你正被「{state_note}」困住,无法自由行动。"
+                "试试用「/分身 冒险 <描述>」挣扎脱困、找特殊NPC求助,或等群友来救你 / 时机变化。"
+            )
         cost = int(preset["stamina_cost"])
         if ch.stamina < cost:
             raise GameError(f"体力不足({ch.stamina}/{cost}),先去歇歇,或等明天体力恢复")
@@ -783,7 +862,7 @@ class Game:
         mems = await self.mem.related(gid, f"{ch.name} {name} {detail}", uid=uid)
         r = await self.brain.resolve_action(
             world=world, char=ch, action_name=name, detail=action_hint,
-            kind=preset["kind"], memories=mems,
+            kind=preset["kind"], memories=mems, state_note=state_note,
             material=await self._kb_ctx(gid, f"主动行动 {name} 进展"),
         )
         effects = dict(r.data.get("effects") or {})
@@ -801,6 +880,10 @@ class Game:
         changes.insert(0, f"体力-{cost}")
         if bonus_note:
             changes.append(bonus_note)
+        state_changes = []
+        if state_note:  # 冒险脱困:在 flags 复位后施加/解除状态,避免被覆盖
+            state_changes = self._apply_state_result(ch, r.data)
+        changes += state_changes
         mem_text = r.data.get("memory") or f"{ch.name}在《{world.name}》「{name}」:{detail[:30]}"
         await self.mem.remember(gid, uid, "char", mem_text, ref=f"act:{_now():.0f}")
         await self.mem.remember(gid, "", "world",
@@ -931,17 +1014,24 @@ class Game:
         self.db.update_group(gid, last_shift_at=_now())
         # 旧世界的今日任务随变动作废(到新世界可重新领取)
         self.db.expire_open_quests(gid)
-        # 全员穿越奖励 + 计数
+        # 全员穿越奖励 + 计数;被困者也被卷走并顺势脱困
+        freed = 0
         for ch in self.db.list_chars(gid):
             ch.flags = ch.flags or {}
             ch.flags["shifts"] = int(ch.flags.get("shifts", 0)) + 1
             if not ch.flags.get("traveler"):
                 ch.flags["traveler"] = 1
                 self.db.append_log(gid, ch.uid, "title", f"{ch.name} 获得称号「{C.FLAG_TITLES['traveler']}」")
+            if (ch.flags or {}).get("_state"):
+                freed += 1
+                ch.flags.pop("_state", None)
+                self.db.append_log(gid, ch.uid, "misc", f"世界变动把被困的「{ch.name}」一并卷走,牢笼/束缚在时空震荡中崩解")
             ch.mood = min(C.MOOD_MAX, ch.mood + 5)
             ch.exp += 8
             self.db.upsert_char(ch)
             self._check_flags(ch)
+        if freed:
+            self.db.append_log(gid, "", "shift", f"🌀 世界变动顺带解救了 {freed} 名被困者(全员穿越)")
         arr = await self.brain.compose_arrival(world=world, prev_name=prev_name, via="shift",
                                                material=await self._kb_ctx(gid, "抵达 世界氛围"))
         arr_data = arr.data if hasattr(arr, "data") else arr
@@ -956,6 +1046,12 @@ class Game:
         ch = self.db.get_char(gid, uid)
         if not ch:
             raise GameError("你还没有创建分身")
+        state_note = self._state_note(ch)
+        if state_note:
+            raise GameError(
+                f"⛓ 你正被「{state_note}」困住,无法开启穿越之门。"
+                "先脱困再说——试试「/分身 冒险 <描述>」、找特殊NPC求助,或等世界变动把你卷走 / 群友来救。"
+            )
         cd = self._limits_for(g)[4]
         wait = cd * 3600 - (_now() - float(g.get("last_travel_at") or 0))
         if wait > 0:
@@ -1008,14 +1104,20 @@ class Game:
 
     # ══════════════ 每日小任务(轻松、按世界生成)══════════════
     async def ensure_quests(self, gid: str, uid: str) -> list[dict]:
-        """领取/查看今日小任务:无则按世界+角色+记忆生成 3 个(目标不要太难)。"""
+        """领取/查看今日小任务:无则按世界+角色+记忆生成 3 个(目标不要太难)。被困时无法领取/查看。"""
         day = self._day_key()
-        qs = self.db.list_quests(gid, uid, day)
-        if qs:
-            return qs
         ch = self.db.get_char(gid, uid)
         if not ch:
             raise GameError("你还没有创建分身,先「/分身 创建 名字」")
+        state_note = self._state_note(ch)
+        if state_note:
+            raise GameError(
+                f"⛓ 你正被「{state_note}」困住,连今日的小任务也无从下手。"
+                "先脱困再说——「/分身 冒险 <描述>」、找特殊NPC求助,或等群友来救 / 时机变化。"
+            )
+        qs = self.db.list_quests(gid, uid, day)
+        if qs:
+            return qs
         world = self.db.cur_world(gid)
         if not world:
             raise GameError("世界尚未初始化")
@@ -1032,6 +1134,12 @@ class Game:
         ch = self.db.get_char(gid, uid)
         if not ch:
             raise GameError("你还没有创建分身")
+        state_note = self._state_note(ch)
+        if state_note:
+            raise GameError(
+                f"⛓ 你正被「{state_note}」困住,没法去完成今日小任务。"
+                "先脱困再说——「/分身 冒险 <描述>」、找特殊NPC求助,或等群友来救 / 时机变化。"
+            )
         world = self.db.cur_world(gid)
         day = self._day_key()
         open_qs = [q for q in self.db.list_quests(gid, uid, day) if q["state"] == "open"]

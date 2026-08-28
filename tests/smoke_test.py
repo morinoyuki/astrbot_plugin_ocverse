@@ -215,6 +215,102 @@ async def check_datetime_injection():
     print("✓ 每次LLM调用都注入当前时间")
 
 
+async def check_special_state():
+    """特殊状态(囚禁/束缚):被困不能主动行动/穿越/主动互动;可冒险、事件、npc、群友营救、世界变动解除。"""
+    from ocverse.game import Game
+
+    tmpd = tempfile.mkdtemp(prefix="ocverse_state_")
+    db = Database(os.path.join(tmpd, "t.sqlite3"))
+    emb = HashEmbedder()
+    mem = MemoryStore(db, emb, emb, top_k=6)
+
+    def state_llm(system, user):
+        # 被困者用冒险/事件/npc互动/群友营救时,一律成功脱困
+        if "请结算" in user or "执行行动" in user or "写出这段互动" in user or "与角色进行多轮对话" in user:
+            return json.dumps({
+                "narration": "挣脱束缚,重获自由。",
+                "reply": "来,我帮你解开。",
+                "dialogues": [{"speaker": "阿凛", "text": "得救了!"}, {"speaker": "老徐", "text": "走!"}],
+                "effects": {"exp": 5, "mood": 5},
+                "state_lift": True,
+            }, ensure_ascii=False)
+        # 世界生成等其余路径
+        if "生成一个新世界" in user:
+            return json.dumps(WORLD_JSON, ensure_ascii=False)
+        if "生成一次突发遭遇" in user:
+            return json.dumps(EVENT_JSON, ensure_ascii=False)
+        if "抵达播报" in user:
+            return json.dumps(ARRIVE_JSON, ensure_ascii=False)
+        if "晨报" in user:
+            return json.dumps(MORNING_JSON, ensure_ascii=False)
+        if "【设定描述】" in user:
+            return json.dumps({"gender": "男", "tags": ["冷静"], "backstory": "x",
+                               "attrs": {"force": 30, "agility": 30, "intellect": 30, "charm": 30, "luck": 30, "sanity": 30}}, ensure_ascii=False)
+        return json.dumps({"narration": "ok", "effects": {}}, ensure_ascii=False)
+
+    brain = Brain(raw_call=state_llm)
+    game = Game(db, brain, mem, lambda k, d=None: CFG.get(k, d))
+
+    await game.init_world("g", "一座城市", "admin")
+    a = game.create_char("g", "u1", "阿凛", "女", ["冷静"], "strong")
+    b = game.create_char("g", "u2", "老徐", "男", ["仗义"], "kind")
+
+    # 施加囚禁状态
+    assert not game._is_locked(a)
+    game._set_state(a, "囚禁", "被关进雾码头的地牢")
+    assert game._is_locked(a) and "囚禁" in game._state_note(a)
+    assert game._state(a)["since"] > 0
+
+    # 被困就不能:主动行动(练习)/穿越/主动与群友互动
+    for bad in ("练习", "健身", "打工", "打怪"):
+        try:
+            await game.act("g", "u1", bad, "")
+            raise AssertionError(f"被困仍可{bad}")
+        except GameError as e:
+            assert "困住" in str(e) or "无法自由行动" in str(e) or "被困" in str(e), e
+    try:
+        await game.travel("g", "u1", "城市")
+        raise AssertionError("被困仍可穿越")
+    except GameError:
+        pass
+    try:
+        await game.interact("g", "u1", "u2", "闲聊", "")
+        raise AssertionError("被困仍可主动互动")
+    except GameError:
+        pass
+    try:
+        await game.ensure_quests("g", "u1")
+        raise AssertionError("被困仍可领取任务")
+    except GameError:
+        pass
+
+    # 但可以:冒险脱困 / npc交互(特殊NPC判定) / 事件
+    va = await game.act("g", "u1", "冒险", "砸开牢门")
+    assert va["ok_llm"] and not game._is_locked(db.get_char("g", "u1")), "冒险应脱困"
+    assert any("脱困" in c for c in va["changes"]), va["changes"]
+
+    # 重新困住 → 群友救援可解除
+    game._set_state(a, "束缚", "被绳索捆住")
+    assert game._is_locked(db.get_char("g", "u1"))
+    await game.interact("g", "u2", "u1", "帮忙", "帮阿凛解开绳索")  # b(自由)救 a(被困)
+    assert not game._is_locked(db.get_char("g", "u1")), "群友救援应解除"
+
+    # 重新困住 → npc 交互可解除(特殊NPC)
+    game._set_state(a, "囚禁", "又被逮回地牢")
+    n = db.cur_world("g").npcs[0]["name"]
+    await game.npc_interact("g", "u1", n, "求老铁帮忙")
+    assert not game._is_locked(db.get_char("g", "u1")), "特殊NPC应能助脱困"
+
+    # 世界变动:被困者被卷走并解除
+    game._set_state(b, "囚禁", "受困于异空间")
+    db.update_group("g", user_world_share=0)  # 确保走 LLM 生成新世界
+    await game.world_shift("g")
+    assert not game._is_locked(db.get_char("g", "u2")), "世界变动应解除被困状态"
+
+    db.close()
+    print("✓ 特殊状态:被困禁行动/穿越/主动互动,可冒险·事件·npc·群友营救·世界变动解除")
+
+
 async def main():
     tmp = tempfile.mkdtemp(prefix="ocverse_smoke_")
     out = os.environ.get("OCVERSE_SMOKE_OUT") or os.path.join(tmp, "cards")
@@ -712,4 +808,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(check_datetime_injection())
+    asyncio.run(check_special_state())
     asyncio.run(main())

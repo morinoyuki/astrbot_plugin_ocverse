@@ -106,6 +106,14 @@ def profile_card(ch, world, rels: list[tuple[str, int]], memories: list[str], cf
         tags=tags,
         foot=f"入世于 {time.strftime('%Y-%m-%d', time.localtime(ch.created_at))}",
     ))
+    # 特殊状态(囚禁/束缚等)横幅:优先展示,提醒无法自由行动
+    _st = (ch.flags or {}).get("_state")
+    if isinstance(_st, dict) and (_st.get("type") or _st.get("reason")):
+        _styp = str(_st.get("type") or "特殊状态")
+        _srs = str(_st.get("reason") or "").strip()
+        _stext = f"⛓ {_styp}" + (f" ─ {_srs}" if _srs else "")
+        rows.append(_para(r, _stext, size=int(r.font_size * 0.82),
+                          color=r.t.warn if hasattr(r.t, "warn") else "#E0A04A"))
     # 六维
     stat_items = [(nm, ch.attrs.get(k, 0), 100, ATTR_COLORS.get(k, "#888888")) for k, nm in ATTRS]
     # 资源

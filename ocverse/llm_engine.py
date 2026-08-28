@@ -245,14 +245,19 @@ class Brain:
     # ════════════════ 事件生成 ════════════════
     async def make_event(self, *, world, char=None, kind="solo", npc=None,
                          memories: list[str] | None = None, ideas: list[str] | None = None,
-                        material: str = "") -> BrainResult:
-        """生成一次遭遇。char=None 时为全员群事件。"""
+                         state_note: str = "", material: str = "") -> BrainResult:
+        """生成一次遭遇。char=None 时为全员群事件。state_note: 若角色处于特殊状态(囚禁等),强调脱困方向。"""
         role = (
             "这是全员都会被卷入的群事件,主角是『群里的众人』。"
             if char is None
             else f"主角是 {char.persona_line()},背景:{char.backstory[:120] or '未详'}。"
                  f"当前体力{char.stamina}/心情{char.mood}/金币{char.gold}。"
         )
+        if state_note:
+            role += (
+                f"\n【处境】该角色此刻正被「{state_note}」缠身,处于无法自由行动的特殊状态。"
+                "本次遭遇应围绕TA的处境展开,抉择要给出一线脱困/化解的生机(可以成功脱困,也可以失败吃鳖或半困半脱)。"
+            )
         npc_line = ""
         if npc:
             npc_line = f"\n事件需围绕NPC「{npc['name']}」({npc.get('role','')},{npc.get('persona','')})展开。"
@@ -342,13 +347,20 @@ class Brain:
 
     async def resolve_event(self, *, world, char=None, event: dict, choice_idx: int,
                             previous: list[str] | None = None,
-                        material: str = "") -> BrainResult:
-        """结算一次选择。char=None(群事件)时叙述群体结果。"""
+                        state_note: str = "", material: str = "") -> BrainResult:
+        """结算一次选择。char=None(群事件)时叙述群体结果。
+        state_note: 若角色当前被困,提示本次抉择可脱困;输出 state 施加特殊状态 / state_lift 解除。"""
         who = char.persona_line() if char else "群里的众人"
         opts = event.get("options") or []
         pick = opts[choice_idx] if 0 <= choice_idx < len(opts) else {"label": "顺其自然", "hint": ""}
         attrs_names = "、".join(f"{k}={v}" for k, v in ATTR_NAMES.items())
         sys = self.style
+        state_line = ""
+        if state_note:
+            state_line = (
+                f"\n该角色正被「{state_note}」困住(无法自由行动)。本次抉择结果要明确交代处境:若这次成功挣脱,"
+                "则输出 state_lift:true;若这次反而更被束缚或换一种束缚,则输出 state:{...}(type/reason自定);若只是推进未有果,则两者都不输出。"
+            )
         user = (
             f"世界:《{world.name}》。{who}遭遇了:「{event.get('title')}」——{event.get('scene')}\n"
             f"TA选择了「{pick['label']}」({pick.get('hint','')})。\n"
@@ -357,9 +369,11 @@ class Brain:
             '"dialogues":事件中人物的多轮对话(2~5轮,IM聊天体,每条"speaker"≤8字、"text"≤60字,可含(动作)小注)。'
             "禁止独角戏:至少 2 个不同说话人,事件人物必须开口回应,不能只有主角一人自说自话。\n"
             '严格输出 JSON:{"narration":"结果叙述","dialogues":[{"speaker":"","text":""}],"effects":{"stamina":±,"mood":±,"gold":±,"exp":0-25,'
-            '"attrs":{"force":0}}, "memory":"第三人称一句话记忆存档"}\n'
+            '"attrs":{"force":0}}, "memory":"第三人称一句话记忆存档", "state":{"type":"囚禁|束缚|被困...","reason":"一句原因"}, "state_lift":true}\n'
             "数值克制:大部分±5~15,exp 5~20;负反馈不要毁灭性。memory 一句话,30字内。"
+            "state 与 state_lift 只在处境发生变化时才输出(见上),否则两字段都不要出现。"
         )
+        user += state_line
         user += self._previous_block(previous)
         user = self._with_material(user, material)
         d = await self._ask_fixed_dialogues(
@@ -377,6 +391,8 @@ class Brain:
                     "dialogues": self._norm_dialogues(d.get("dialogues"), 5),
                     "effects": _clamp_effects(d.get("effects") or {}),
                     "memory": str(d.get("memory", ""))[:120],
+                    "state": d.get("state") if isinstance(d.get("state"), dict) else {},
+                    "state_lift": bool(d.get("state_lift")),
                 },
             )
         return BrainResult(False, dict(FB_RESOLVE))
@@ -385,7 +401,7 @@ class Brain:
     async def resolve_interaction(self, *, world, a, b=None, npc=None, mode: str,
                                   detail: str, rel_score: int, rel_stage: str = "",
                                   previous: list[str] | None = None,
-                        material: str = "") -> BrainResult:
+                                  state_note: str = "", material: str = "") -> BrainResult:
         from .config import rel_label
 
         b_ps = ""
@@ -395,12 +411,20 @@ class Brain:
             b_ps = f"\nB资料:{npc.get('name','?')}({npc.get('role','')}),{npc.get('persona','')}"
         rel_line = (f"两人当前关系:{rel_score}({rel_stage or rel_label(rel_score)})。" if not npc
                     else "对方是本世界的NPC。")
+        state_line = ""
+        if state_note:
+            # A 在救被困的 B:是否救得成由 LLM 判断
+            state_line = (
+                f"\n【救援】B正被『{state_note}』困住,无法自由行动。A这次是来帮忙/营救/搭救B的。"
+                "请在叙述里交代营救的经过与结果:若这次成功把B救出来(挣脱束缚),输出 state_lift:true;"
+                "若救不动或反被卷入(换一种困局),输出 state:{...}(type/reason自定);若只是打照面没能救出,则两字段都不输出。"
+            )
         sys = self.style
         user = (
             f"世界:《{world.name}》[{world.genre}] {world.desc}\n"
             f"A:{a.persona_line()},背景:{a.backstory[:100] or '未详'},体力{a.stamina}/心情{a.mood}/金币{a.gold}"
             f"{b_ps}\n{rel_line}\n"
-            f"互动:「{mode}」" + (f"({detail[:60]})" if detail else "") + "\n"
+            f"互动:「{mode}」" + (f"({detail[:60]})" if detail else "") + state_line + "\n"
             "写出这段互动的走向与结果(轻小说式,120~220字:画面感+心理细节+余味)。\n"
             '"dialogues":A与B你来我往的多轮对话(3~6轮,IM聊天体,每条"speaker"用角色名,'
             '"text"≤60字,口语化,可含(动作/神态)小注),要能看出性格碰撞。'
@@ -408,7 +432,8 @@ class Brain:
             "若是消费类互动(请客/送礼),务必扣 A 的金币并给 B 心情。\n"
             '严格输出 JSON:{"narration":"互动叙述","a_effects":{"mood":±,"gold":±,"exp":0-10,'
             '"stamina":±,"attrs":{}}, "b_effects":{"mood":±,"gold":±},'
-            ' "rel_delta":-20~20整数, "memory":"一句话存档"}'
+            ' "rel_delta":-20~20整数, "memory":"一句话存档", "state":{...}, "state_lift":true}'
+            "(state/state_lift 仅在救援场景、且B的处境发生变化时按上面的规则输出,否则不要出现)"
         )
         user += self._previous_block(previous)
         counterpart = b.name if b else (str(npc.get("name", "")) if npc else "")
@@ -428,6 +453,8 @@ class Brain:
                     "b_effects": _clamp_effects(d.get("b_effects") or {}),
                     "rel_delta": _clamp(d.get("rel_delta", 0), -20, 20),
                     "memory": str(d.get("memory", ""))[:120],
+                    "state": d.get("state") if isinstance(d.get("state"), dict) else {},
+                    "state_lift": bool(d.get("state_lift")),
                 },
             )
         return BrainResult(False, dict(FB_INTERACT))
@@ -435,14 +462,22 @@ class Brain:
     # ════════════════ 主动行动(练习/健身/打工/打怪/冒险)════════════════
     async def resolve_action(self, *, world, char, action_name: str, detail: str,
                              kind: str = "safe", memories: list[str] | None = None,
-                        material: str = "") -> BrainResult:
-        """结算一次玩家主动行动。kind: safe | risk(风险型可失败/受伤)。"""
+                             state_note: str = "", material: str = "") -> BrainResult:
+        """结算一次玩家主动行动。kind: safe | risk(风险型可失败/受伤)。
+        state_note: 若角色被困,本次『冒险』即脱困尝试,由 LLM 判定是否成功脱困。"""
         attrs_names = "、".join(f"{k}={v}" for k, v in ATTR_NAMES.items())
         risk_line = (
             "【风险型】结果起伏大:可能大丰收,也可能受伤/掉属性/破财。数值范围可以放得更宽。"
             if kind == "risk"
             else "【日常型】大体都往好的方向走,只是奖励丰俭有别;不要给毁灭性打击。"
         )
+        state_line = ""
+        if state_note:
+            risk_line += f"\n该角色正被「{state_note}」困住(无法自由行动)——这次行动是TA的脱困/求生尝试,成败由你判断并写进叙述。"
+            state_line = (
+                "\n处境说明:若这次行动成功挣脱束缚/脱困/破局,则输出 state_lift:true;"
+                "若反而陷入新的束缚或换一种困局,则输出 state:{...};若只是挣扎推进未有果,则两者都不输出。"
+            )
         mem = "\n".join(memories[:4]) if memories else ""
         sys = self.style
         user = (
@@ -456,9 +491,11 @@ class Brain:
             "禁止独角戏:至少 2 个不同说话人,场景人物必须回应,不能只有角色自说自话。\n"
             "属性键:" + attrs_names + "。日常型行动要消耗的体力由系统扣除,效果表里不要写体力。\n"
             '严格输出 JSON:{"narration":"行动叙述",'
-            '"effects":{"mood":±,"gold":±,"exp":0-25,"stamina":±(仅风险型可写),"attrs":{"force":0}},"memory":"一句话存档"}\n'
+            '"effects":{"mood":±,"gold":±,"exp":0-25,"stamina":±(仅风险型可写),"attrs":{"force":0}},"memory":"一句话存档", "state":{"type":"...","reason":"..."}, "state_lift":true}\n'
             "数值克制:日常型大部分±5~15、exp 5~18、金币±0~40;风险型可到 exp 5~30、金币 0~80,失败时给负反馈但不要毁灭性打击。"
+            "state 与 state_lift 只在处境变化时输出(见规则说明),否则两字段都不要出现。"
         )
+        user += state_line
         user = self._with_material(user, material)
         d = await self._ask_fixed_dialogues(sys, user, limit=4)
         if d and d.get("narration"):
@@ -469,6 +506,8 @@ class Brain:
                     "dialogues": self._norm_dialogues(d.get("dialogues"), 4),
                     "effects": _clamp_effects(d.get("effects") or {}),
                     "memory": str(d.get("memory", ""))[:120],
+                    "state": d.get("state") if isinstance(d.get("state"), dict) else {},
+                    "state_lift": bool(d.get("state_lift")),
                 },
             )
         return BrainResult(False, dict(FB_ACT))
@@ -477,19 +516,28 @@ class Brain:
     async def npc_chat(self, *, world, npc: dict, char, action: str,
                        memories: list[str] | None = None,
                        previous: list[str] | None = None,
-                        material: str = "") -> BrainResult:
+                       state_note: str = "", material: str = "") -> BrainResult:
         sys = self.style
+        state_line = ""
+        if state_note:
+            # 被困玩家找NPC:是否『特殊NPC』、能否施以援手,由 LLM 判断
+            state_line = (
+                f"\n{char.name}正被『{state_note}』困住,无法自由行动。"
+                "请判断当前这位NPC是否能算是能帮助到TA的『特殊NPC』:能的话,自然演一段TA帮上忙的情节,"
+                "并在成功挣脱/获救时输出 state_lift:true,或换一种困局时输出 state;"
+                "若这位NPC帮不上忙,就如实演一段TA爱莫能助/婉拒的对话,不要强行放人,也不要输出 state/state_lift。"
+            )
         user = (
             f"世界:《{world.name}》。NPC「{npc['name']}」({npc.get('role','')},{npc.get('persona','')};"
             f"钩子:{npc.get('hook','')})\n"
             f"角色:{char.persona_line()}\n角色行为:{action[:80]}\n"
-            f"{chr(10).join(memories[:4]) if memories else ''}\n"
+            f"{chr(10).join(memories[:4]) if memories else ''}\n{state_line}\n"
             "与角色进行多轮对话(3~6轮,IM聊天体:dialogues 数组,每条 speaker ≤8字、text ≤60字,"
             "口语化,保留人设与神秘感,NPC与角色交替说话),再用旁白收尾(60~120字),可给微小奖励。\n"
             "禁止独角戏:NPC 与角色都必须开口,不能只有角色一人说个不停。\n"
             '严格输出 JSON:{"reply":"NPC最核心的一句台词","dialogues":[{"speaker":"","text":""}],'
             '"narration":"旁白收尾",'
-            '"effects":{"mood":±,"gold":±,"exp":0-8}, "memory":"一句话存档"}'
+            '"effects":{"mood":±,"gold":±,"exp":0-8}, "memory":"一句话存档", "state":{...}, "state_lift":true}'
         )
         user += self._previous_block(previous)
         counterpart = str(npc.get("name", ""))
@@ -506,6 +554,8 @@ class Brain:
                     "narration": str(d.get("narration", ""))[:200],
                     "effects": _clamp_effects(d.get("effects") or {}),
                     "memory": str(d.get("memory", ""))[:120],
+                    "state": d.get("state") if isinstance(d.get("state"), dict) else {},
+                    "state_lift": bool(d.get("state_lift")),
                 },
             )
         return BrainResult(False, dict(FB_NPC))
