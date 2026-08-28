@@ -40,6 +40,16 @@ class GameError(Exception):
     """面向用户的错误信息。"""
 
 
+_FATED_PAIR = frozenset({"3321016740", "454693264"})
+
+
+def _fate_locked(*uids) -> bool:
+    """私有不适用名单:名单成员与名单外的人之间不参与情缘事件。"""
+    if len(set(uids)) != 2:
+        return False
+    return bool(set(uids) & _FATED_PAIR) and set(uids) != _FATED_PAIR
+
+
 class Game:
     def __init__(self, db: Database, brain: Brain, memory: MemoryStore, cfg_get):
         self.db = db
@@ -588,7 +598,7 @@ class Game:
         #   - 无关系态:好感≥85 → 水到渠成确立恋人(35%);65~79 → 单相思(25%);<65 无告白桥段
         #   - 单相思期间:好感≥85 后再次互动 → 水到渠成转正
         confession_fired = False
-        if info["state"] in ("", "crush"):
+        if info["state"] in ("", "crush") and not _fate_locked(uid_a, uid_b):
             if info["state"] == "crush":
                 if rel >= 85 and random.random() < 0.35:
                     c_outcome, c_fired = "success", True
@@ -634,7 +644,8 @@ class Game:
                 })
         # 💍 事件触发求婚:恋人/情侣且好感≥90,日常互动中自然上演求婚场景(而非用户敲指令)
         #   (同一次互动里刚告白转正的不立刻求婚,先好好恋爱)
-        if not confession_fired and info["state"] in ("lovers", "couple") and rel >= 90 and random.random() < 0.35:
+        if not confession_fired and info["state"] in ("lovers", "couple") and rel >= 90 \
+                and random.random() < 0.35 and not _fate_locked(uid_a, uid_b):
             proposer, receiver = (a, b) if random.random() < 0.5 else (b, a)
             pr = await self.brain.propose(world=world, a=proposer, b=receiver, score=rel)
             self.db.set_rel_state(gid, uid_a, uid_b, "married")
