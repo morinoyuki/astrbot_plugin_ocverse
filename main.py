@@ -506,6 +506,11 @@ class OcversePlugin(Star):
                 async with plugin._glock(gid):
                     return plugin.game.delete_char(gid, uid)
 
+            async def regen_infra(self_, gid: str, world_id: int | None = None) -> dict:
+                async with plugin._glock(gid):
+                    msg, infra = await plugin.game.regen_infra(gid, world_id=world_id)
+                return {"message": msg, "infra": infra}
+
         return _Ops()
 
     async def terminate(self):
@@ -762,6 +767,17 @@ class OcversePlugin(Star):
         chain = self._chain(imgs, "世界已重铸。")
         if chain:
             yield event.chain_result(chain)
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @oc.command("重建设施", alias={"regen_infra", "重新生成设施"})
+    @_guard
+    async def cmd_regen_infra(self, event: AstrMessageEvent):
+        """分身 重建设施 - 管理员让 AI 重新规划当前世界设施(贴合世界观,保证生存基线)"""
+        gid = self._need_gid(event)
+        yield event.plain_result("⏳ 正在重新规划世界设施…")
+        async with self._glock(gid):
+            msg, _infra = await self.game.regen_infra(gid)
+        yield event.plain_result(msg)
 
     @oc.command("定义世界", alias={"add_world", "世界书"})
     @_guard

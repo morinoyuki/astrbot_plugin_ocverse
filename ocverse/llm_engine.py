@@ -260,6 +260,42 @@ class Brain:
             return BrainResult(True, self._norm_world(d, source="llm", desc_hint=desc))
         return BrainResult(False, self._fallback_world(desc))
 
+    async def regen_infra(self, *, world, material: str = "") -> BrainResult:
+        """管理员:重新规划世界基础设施。必须贴合世界观与时代,
+        6~10 个、覆盖生存必要类型(补给/住宿/餐饮/医疗/据点)、至少 2 个可打工。"""
+        sys = self.style
+        existing = "、".join(
+            str(i.get("name", "")) for i in (world.infra or []) if isinstance(i, dict) and i.get("name"))
+        user = (
+            f"世界:《{world.name}》[{world.genre}] {world.desc}\n"
+            f"氛围:{world.atmosphere}\n世界规则:{';'.join(world.rules or [])}\n"
+            f"现有设施(重新规划,不要照抄这些名字):{existing or '无'}\n\n"
+            "请以世界规划者的身份,重新设计这个世界的基础设施。\n"
+            "【硬性要求】\n"
+            "1. 6~10 个,种类丰富不重复,全部必须贴合该世界的题材、时代与科技水平;\n"
+            "2. 必须覆盖生存必要类型:补给(店铺/集市)、住宿(旅馆/酒店)、餐饮(饭馆/食堂)、"
+            "医疗(医院/诊所)、据点(聚居/集会之所),缺一不可;\n"
+            "3. 其中至少 2 个能打工赚钱(填 work 职业,职业符合世界观);\n"
+            "4. 名字 2~6 字,融入世界观,不要套用现代模板。\n"
+            '严格输出 JSON:{"infra":[{"kind":"类型","name":"设施名",'
+            '"desc":"功能/氛围一句话(≤20字)","work":"打工职业(无则不填)"}]}'
+        )
+        user = self._with_material(user, material)
+        d = await self._ask_json(sys, user, use_tools=True)
+        if d and d.get("infra"):
+            infra = self._norm_infra(d)
+            if len(infra) >= 5:
+                return BrainResult(True, {"infra": infra})
+            # 数量不足:带纠正提示重试一次
+            d2 = await self._ask_json(
+                sys,
+                user + "\n\n【纠正】设施太少或不合规,请补全:至少 6 个、种类丰富,"
+                       "覆盖补给/住宿/餐饮/医疗/据点五类,至少 2 个可打工。",
+                use_tools=True)
+            if d2 and self._norm_infra(d2):
+                return BrainResult(True, {"infra": self._norm_infra(d2)})
+        return BrainResult(False, {"infra": []})
+
     async def enrich_user_world(self, name: str, desc: str, material: str = "") -> BrainResult:
         """用户自设世界落地时补全细节(失败也能用原始描述)。"""
         sys = self.style

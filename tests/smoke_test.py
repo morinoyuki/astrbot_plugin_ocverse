@@ -171,6 +171,16 @@ def fake_llm(system: str, user: str) -> str:
             "effects": {"mood": 6, "exp": 4},
             "memory": "阿凛成了老徐的爸爸,老徐认了。",
         }, ensure_ascii=False)
+    if "重新设计这个世界的基础设施" in user:
+        # 故意不含打工位/医疗/据点/补给 → 验证基线保底会补齐
+        return json.dumps({"infra": [
+            {"kind": "符阵广场", "name": "星槎符阵广场", "desc": "传送与集会", "work": ""},
+            {"kind": "灵膳坊", "name": "云膳坊", "desc": "灵膳飘香", "work": "膳夫"},
+            {"kind": "洞府", "name": "云栖洞府", "desc": "修士居所", "work": ""},
+            {"kind": "器坊", "name": "星辉器坊", "desc": "法器修理", "work": "器师"},
+            {"kind": "茶寮", "name": "雾隐茶寮", "desc": "灵茶一盏", "work": "茶倌"},
+            {"kind": "坊市", "name": "星槎坊市", "desc": "灵材交易", "work": "市令"},
+        ]}, ensure_ascii=False)
     if "与角色进行多轮对话" in user:
         # NPC 互动(resolve_npc):必须携带切题铁律
         assert "切题铁律" in user, "NPC 互动 prompt 缺少切题约束(跑题回归)"
@@ -540,6 +550,7 @@ async def check_event_quote_binding():
     assert any("平淡收场" in str(t.get("text", "")) for t in db.recent_logs("gq", "u1", 5)), "到期应留痕"
     print("✓ 事件真实到期:抉择时严格拦截;清理循环自动平淡收场+日志")
 
+
     # 4) 归属守卫:别人的个人事件不可代为抉择
     v3 = _delivered(db, await game.fire_event("gq", char_uid="u1"))
     try:
@@ -628,6 +639,10 @@ async def check_admin_server():
         async def delete_char(self_, gid, uid):
             return game.delete_char(gid, uid)
 
+        async def regen_infra(self_, gid, world_id=None):
+            msg, infra = await game.regen_infra(gid, world_id=world_id)
+            return {"message": msg, "infra": infra}
+
     # 1) 真实注册:register_web_api 收到带插件名前缀的路由
     registered = []
 
@@ -689,6 +704,41 @@ async def check_admin_server():
     j = await call(panel.api_world_edit, method="POST", query={"gid": "ga"},
                    body={"world_id": 99999, "npcs": []})
     assert not j["ok"] and "不属于该群" in j["error"]
+    # 4c) 设施:AI 重新生成(贴合世界观 + 基线保底:必要类别与打工位≥2)
+    import ocverse.game as _gmod
+    import time as _time
+    w4 = World(gid="ga", name="修仙界", genre="修仙 仙侠", desc="灵气充沛的修真世界", source="user", visited=1)
+    wid4 = db.add_world(w4)
+    j = await call(panel.api_infra_regen, method="POST", query={"gid": "ga"},
+                   body={"gid": "ga", "world_id": wid4})
+    assert "重新规划" in j["message"] and isinstance(j["infra"], list) and j["infra"], j
+    w4db = db.get_world(wid4)
+    infra = w4db.infra or []
+    work_n = sum(1 for i in infra if str(i.get("work", "")).strip())
+    assert work_n >= 2, f"重规划后打工位应≥2,实为 {work_n}"
+    blob = "".join(i.get("kind", "") + i.get("name", "") for i in infra)
+    for kw in ("坊市杂货铺", "云来客栈", "醉仙楼", "回春药庐"):
+        assert kw in blob, f"修仙风格基线设施缺失:{kw}(风格应贴合世界观)"
+    from ocverse import config as _C
+    for _cat, kws in _C.INFRA_ESSENTIALS:
+        assert any(kw in blob for kw in kws), f"必要类别缺失:{_cat}"
+    ids = [i["name"] for i in infra]
+    assert len(ids) == len(set(ids)), "设施名字应唯一"
+    # 4d) 每日流转:强制随机 → 倒闭与新开同时发生,日志留痕,基线不破坏
+    seq = iter([0.0, 0.0])  # 先触发倒闭,再触发新开
+    _orig_r = _gmod.random.random
+    _gmod.random.random = lambda: next(seq, 0.9)
+    try:
+        game._infra_turnover("ga")
+    finally:
+        _gmod.random.random = _orig_r
+    w4db = db.get_world(wid4)
+    infra = w4db.infra or []
+    work_n = sum(1 for i in infra if str(i.get("work", "")).strip())
+    assert work_n >= 2, "流转后打工位仍应≥2"
+    logs = "".join(str(t.get("text", "")) for t in db.recent_logs("ga", "", 30))
+    assert "倒闭" in logs and ("开业" in logs or "启用" in logs or "重新开张" in logs), logs
+    print("✓ 后台设施:AI重规划(贴合世界观)+基线保底(必要类别/打工位≥2)+每日流转")
     # 5) 事件列表 + 强制收场
     _delivered(db, await game.fire_event("ga", char_uid="u1"))
     j = await call(panel.api_events, query={"gid": "ga"})

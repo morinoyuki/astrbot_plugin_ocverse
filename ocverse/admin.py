@@ -66,6 +66,7 @@ class AdminPanel:
             (f"{base}/api/world", self.api_world_edit, ["POST"], "编辑世界/NPC"),
             (f"{base}/api/events", self.api_events, ["GET"], "事件列表"),
             (f"{base}/api/event/expire", self.api_event_expire, ["POST"], "事件收场"),
+            (f"{base}/api/infra/regen", self.api_infra_regen, ["POST"], "AI 重新生成世界设施"),
             (f"{base}/api/logs", self.api_logs, ["GET"], "时间线日志"),
             (f"{base}/api/memories", self.api_memories, ["GET"], "记忆列表"),
             (f"{base}/api/memory/delete", self.api_mem_delete, ["POST"], "删除记忆"),
@@ -277,6 +278,25 @@ class AdminPanel:
         if not ok:
             return error_response("事件不存在或已结束", status_code=400)
         return {"expired": True}
+
+    async def api_infra_regen(self):
+        """AI 重新生成世界设施(贴合世界观,保证生存基线与打工位)。
+        body/query: gid 必填;world_id 可选(默认当前世界)。"""
+        if self.ops is None:
+            return error_response("未接入重新生成操作", status_code=400)
+        body = await self._body()
+        gid = self._gid() or str(body.get("gid") or "")
+        world_id = body.get("world_id")
+        if not gid:
+            return error_response("需要 gid", status_code=400)
+        try:
+            wid = int(world_id) if world_id is not None else None
+        except (TypeError, ValueError):
+            return error_response("world_id 应为整数", status_code=400)
+        try:
+            return await self.ops.regen_infra(gid, wid)
+        except Exception as e:
+            return error_response(str(e), status_code=400)
 
     # ── 日志 / 记忆 ───────────────────────────────────────────
     async def api_logs(self):

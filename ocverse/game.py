@@ -199,6 +199,8 @@ class Game:
             visited=visited,
             created_by=by,
         )
+        # 生存必要设施与打工位保底(不足则按世界观风格补齐模板设施)
+        w.infra, _notes = self._ensure_infra_baseline(w, w.infra)
         w.id = self.db.add_world(w)
         self.db.update_group(gid, cur_world_id=w.id, init_done=1)
         # 把世界生成时设计的『可购住处』种子进地块表
@@ -413,7 +415,132 @@ class Game:
             self.db.upsert_char(ch)
         # 世界人口流动:当前世界的系统NPC可能来去/换工作
         self._npc_turnover(gid)
+        # 世界设施流转:小概率新开/建成/倒闭(贴合同世界题材,保证生存基线)
+        self._infra_turnover(gid)
         self.db.update_group(gid, day_key=day)
+
+    # ══════════════ 世界设施:基线保底 / 每日流转 / AI 重新规划 ══════════════
+    INFRA_WORK_MIN = 2      # 每个世界至少 2 处可打工的设施
+    INFRA_OPEN_P = 0.06     # 每日「新开/建成」一家设施的概率
+    INFRA_CLOSE_P = 0.04    # 每日「倒闭」一家设施的概率
+
+    def _ensure_infra_baseline(self, world: World, infra: list) -> tuple[list[dict], list[str]]:
+        """生存必要设施与打工位保底:缺补给/住宿/餐饮/医疗/据点或打工位 <2 时,
+        按世界观题材风格补齐模板设施。返回(补齐后的 infra, 补充说明列表)。"""
+        pack = C.infra_style_for(world.genre, world.desc)
+        infra = [dict(i) for i in (infra or []) if isinstance(i, dict) and str(i.get("name", "")).strip()]
+        notes: list[str] = []
+        used = {str(i.get("name", "")) for i in infra}
+
+        def add_tpl(tpl: dict, note: str):
+            name, n = tpl["name"], 2
+            while name in used:
+                name = f"{tpl['name']}{n}"
+                n += 1
+            item = {**tpl, "name": name}
+            infra.append(item)
+            used.add(name)
+            notes.append(note)
+
+        # 1) 打工位保底(≥2)
+        work_n = sum(1 for i in infra if str(i.get("work", "")).strip())
+        guard = 0
+        while work_n < self.INFRA_WORK_MIN and guard < 8:
+            guard += 1
+            tpl = next((dict(t) for t in pack[5:] if t.get("work") and t["name"] not in used), None) \
+                or next((dict(t) for t in pack if t.get("work")), None)
+            if tpl is None:
+                break
+            add_tpl(tpl, f"补齐打工设施「{tpl['name']}」({tpl.get('work', '')})")
+            work_n += 1
+        # 2) 生存必要类别:补给/住宿/餐饮/医疗/据点
+        for idx, (cat, kws) in enumerate(C.INFRA_ESSENTIALS):
+            covered = any(
+                any(kw in (i.get("kind", "") + i.get("name", "")) for kw in kws)
+                for i in infra
+            )
+            if not covered:
+                tpl = pack[idx] if idx < len(pack) else pack[0]
+                add_tpl(dict(tpl), f"补齐{cat}设施「{tpl['name']}」")
+        return infra, notes
+
+    def _infra_turnover(self, gid: str):
+        """世界设施小概率流转:新开/建成一家,或经营不善倒闭一家。
+        题材风格随世界;流转后保证生存基线(必要设施与打工位不会被破坏)。"""
+        w = self.db.cur_world(gid)
+        if not w:
+            return
+        pack = C.infra_style_for(w.genre, w.desc)
+        infra = [dict(i) for i in (w.infra or []) if isinstance(i, dict) and str(i.get("name", "")).strip()]
+        changed = False
+        essential_kws = [kws for _cat, kws in C.INFRA_ESSENTIALS]
+
+        def is_essential(i: dict) -> bool:
+            blob = i.get("kind", "") + i.get("name", "")
+            return any(kw in blob for kws in essential_kws for kw in kws)
+
+        work_n = sum(1 for i in infra if str(i.get("work", "")).strip())
+        # 倒闭:只关非必要设施,且打工位不跌破保底、总数不缩到冷清
+        if random.random() < self.INFRA_CLOSE_P and len(infra) > 4:
+            cands = [i for i in infra
+                     if not is_essential(i)
+                     and not (str(i.get("work", "")).strip() and work_n <= self.INFRA_WORK_MIN)]
+            if cands:
+                victim = random.choice(cands)
+                if str(victim.get("work", "")).strip():
+                    work_n -= 1
+                infra.remove(victim)
+                self.db.append_log(gid, "", "misc",
+                                   f"《{w.name}》的「{victim.get('name')}」(「{victim.get('kind', '')}」)"
+                                   "经营不善,倒闭了",
+                                   w.name)
+                changed = True
+        # 新开/建成:从同风格模板池里挑一家(名字避重)
+        if random.random() < self.INFRA_OPEN_P and len(infra) < 12:
+            used = {i.get("name") for i in infra}
+            pool = [dict(t) for t in pack if t["name"] not in used] or [dict(t) for t in pack]
+            tpl = random.choice(pool)
+            flavor = random.choice(["新开业", "建成完工,正式启用", "重新开张"])
+            infra.append(tpl)
+            self.db.append_log(gid, "", "misc",
+                               f"《{w.name}》的「{tpl['name']}」({tpl.get('kind', '')}){flavor}",
+                               w.name)
+            changed = True
+        # 生存基线保底
+        infra, notes = self._ensure_infra_baseline(w, infra)
+        if changed or notes:
+            self.db.update_world(w.id, infra=infra)
+            for note in notes:
+                self.db.append_log(gid, "", "misc", f"《{w.name}》{note}", w.name)
+
+    async def regen_infra(self, gid: str, world_id: int | None = None) -> tuple[str, list[dict]]:
+        """管理员:让 AI 重新规划世界设施(贴合世界观),并保证生存基线。
+        world_id 为空时规划当前世界。返回(给管理员的总结文本, 新设施列表)。"""
+        if world_id is not None:
+            w = self.db.get_world(int(world_id))
+            if not w or w.gid != gid:
+                raise GameError("世界不存在或不属于该群")
+        else:
+            w = self.db.cur_world(gid)
+            if not w:
+                raise GameError("世界尚未初始化")
+        r = await self.brain.regen_infra(world=w,
+                                         material=await self._kb_ctx(gid, "设施 规划 世界"))
+        new_infra = r.data.get("infra") if r.ok else None
+        base = list(new_infra) if new_infra else list(w.infra or [])
+        base, notes = self._ensure_infra_baseline(w, base)
+        self.db.update_world(w.id, infra=base)
+        self.db.append_log(gid, "", "misc",
+                           f"《{w.name}》设施重新规划完成,共 {len(base)} 处"
+                           + ("" if new_infra else "(AI 不可用,保留原设施并补齐基线)"),
+                           w.name)
+        names = "、".join(f"{i.get('name')}({i.get('kind', '')})" for i in base)
+        msg = f"《{w.name}》设施已重新规划,共 {len(base)} 处:\n{names}"
+        if notes:
+            msg += "\n基线补齐:" + ";".join(notes)
+        if not new_infra:
+            msg = "(AI 规划不可用,保留原设施并补齐生存基线)\n" + msg
+        return msg, base
 
     def _npc_turnover(self, gid: str):
         """世界NPC不定时流动:每天小概率让系统NPC变更或迎来新面孔,让世界活起来。

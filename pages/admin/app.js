@@ -261,6 +261,7 @@
       </table></div>
       <div class="row-end">
         <button class="btn" id="infra-add">+ 添加设施</button>
+        <button class="btn" id="infra-regen">🎲 AI 重新生成设施</button>
         <button class="btn primary" id="infra-save">保存全部设施</button>
       </div></div>
       <div class="card"><h3>NPC(保存为整表替换)</h3>
@@ -296,6 +297,16 @@
       await apiPost("/admin/api/world", { gid: GID, world_id: WID, infra: INFRA });
       toast("✅ 设施已保存");
     };
+    $("#infra-regen").onclick = () => confirmAction("AI 重新生成设施",
+      "将丢弃当前设施清单,由 AI 贴合世界观重新规划(6~10 个,覆盖生存必要设施与打工位)。继续?",
+      async () => {
+        toast("⏳ AI 规划中,可能需要一点时间…");
+        const r = await apiPost("/admin/api/infra/regen", { gid: GID, world_id: WID });
+        const w = WORLDS.find((x) => x.id === WID);
+        if (w) w.infra = r.infra || [];
+        toast("✅ " + String(r.message || "已重新生成").split("\n")[0]);
+        renderWorldEditor();
+    });
     $$("#npc-tbl input").forEach((inp) => {
       inp.onchange = () => { NPCS[parseInt(inp.dataset.i, 10)][inp.dataset.k] = inp.value; };
     });
