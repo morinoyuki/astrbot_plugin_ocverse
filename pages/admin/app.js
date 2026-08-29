@@ -73,12 +73,14 @@
   };
 
   // ── Tab 切换 ──
+  let CURRENT = "overview";
   const TAB_LOADERS = {
     overview: loadOverview, chars: loadChars, world: loadWorld,
     events: loadEvents, logs: loadLogs, mems: loadMems,
     config: loadConfig, ops: () => {},
   };
   function switchTab(name) {
+    CURRENT = name;
     $$(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
     $$(".panel").forEach((p) => p.classList.toggle("active", p.id === "tab-" + name));
     (TAB_LOADERS[name] || (() => {}))().catch((e) => toast("❌ " + e.message));
@@ -354,7 +356,7 @@
     const ctx = P.getContext?.();
     if (ctx?.username) $("#who").textContent = "@" + ctx.username;
     try {
-      await connect();
+      await loadOverview(); // 拉取群列表并填充 gid 选择器,设定默认 GID
       $$(".tab").forEach((t) => { t.onclick = () => switchTab(t.dataset.tab); });
       $("#gid").onchange = () => { GID = $("#gid").value; switchTab(CURRENT); };
       $("#btn-refresh").onclick = () => switchTab(CURRENT);
@@ -388,10 +390,6 @@
         <p class="muted">请确认已登录 Dashboard,并从「插件 → 分身的世界 → 页面」打开本页。</p>`;
     }
   }
-
-  let CURRENT = "overview";
-  const _switch = switchTab;
-  switchTab = (name) => { CURRENT = name; _switch(name); };
 
   boot();
 })();
