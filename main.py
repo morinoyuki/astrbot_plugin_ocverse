@@ -29,6 +29,7 @@ from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.utils.quoted_message.extractor import QuotedMessageExtractor
 
 from .ocverse import config as C
+from .ocverse.admin import AdminPanel, page_html_handler
 from .ocverse.avatar_store import AvatarStore
 from .ocverse.db import Database
 from .ocverse.embedder import make_embedder
@@ -70,6 +71,7 @@ def _guard(fn):
 
 AUTHOR = "morinoyuki"
 VERSION = "1.0.0"
+PLUGIN_NAME = "astrbot_plugin_ocverse"
 REPO = "https://github.com/morinoyuki/astrbot_plugin_ocverse"
 
 
@@ -90,6 +92,8 @@ class OcversePlugin(Star):
         data_dir = self._data_dir()
         self.data_dir = data_dir
         self.db = Database(os.path.join(data_dir, "ocverse.sqlite3"))
+        for version, desc in getattr(self.db, "migrations", []) or []:
+            logger.info(f"ocverse: 数据库迁移 v{version}: {desc}")
         emb, fb = make_embedder(_cfg, lambda: self.context.get_all_embedding_providers())
         self.mem = MemoryStore(self.db, emb, fb, top_k=self._cfgi("memory_top_k", 6))
         self.kb = KnowledgeStore(self.db, emb, fb, top_k=3, max_items=self._cfgi("knowledge_base_max", 40))
@@ -99,6 +103,7 @@ class OcversePlugin(Star):
         self.avatars = AvatarStore(data_dir)
 
         self._task: asyncio.Task | None = None
+        self._admin: AdminPanel | None = None
         self._sem = asyncio.Semaphore(2)
         self._umo_map: dict[str, str] = {}      # gid -> unified_msg_origin(本会话内观察)
         self._pending: dict[str, list] = {}     # gid -> 主动卡片积压(无法主动发时)
@@ -364,6 +369,47 @@ class OcversePlugin(Star):
             chain.append(Plain(extra))
         return chain
 
+    def _chain_views(self, views: list[dict], extra: str = "") -> list:
+        """把 view 列表渲染成消息链。
+
+        事件卡在其图片后附上 №编号纯文本(与卡片底部标签一致):
+        群友引用(回复)事件卡时,QuotedMessageExtractor 能把这段文本原样带回,
+        指令层据此精确定位要结算的事件,多卡并存也不会结算错。"""
+        chain: list = []
+        for v in views:
+            eid = v.get("event_id") if v.get("type") == "event" else None
+            n_img = 0
+            for im in render_views([v], self._card_cfg()):
+                p = self._save_card(im)
+                if p:
+                    chain.append(Image.fromFileSystem(p))
+                    n_img += 1
+            tag = C.event_tag(eid) if (eid and n_img) else ""
+            if tag:
+                chain.append(Plain(tag))
+        if not chain:
+            return []
+        if extra:
+            chain.append(Plain(extra))
+        return chain
+
+    async def _quoted_event_id(self, event: AstrMessageEvent) -> int | None:
+        """从引用(回复)消息的文本中解析事件№编号。
+        (平台不会保留图片路径,纯文本标签是唯一可靠的识别通道)"""
+        try:
+            qe = QuotedMessageExtractor(event=event)
+        except Exception:
+            return None
+        try:
+            txt = await qe.text()
+        except Exception as e:
+            logger.debug(f"ocverse: 解析引用文本失败: {e}")
+            txt = None
+        eid = C.parse_event_tag(txt or "")
+        if eid:
+            return eid
+        return None
+
     # ── 主动发送 / 积压补发 ─────────────────────────────────────────
     async def _send_to(self, umo: str, chain: list) -> bool:
         fn = getattr(self.context, "send_message", None)
@@ -376,18 +422,41 @@ class OcversePlugin(Star):
             logger.debug(f"ocverse: 主动发送失败: {e}")
         return False
 
+    def _view_deliverable(self, v: dict) -> bool:
+        """事件卡仅在事件仍 pending 时投递;晨报/世界变动等无 event_id 的卡片恒投递。
+
+        同批生成时后一张事件可能已顶替前一张(事件串行化),失效卡发出只会让
+        群友对着死卡抉择,造成事件与后续结算割裂。"""
+        eid = v.get("event_id")
+        if not eid:
+            return True
+        ev = self.db.get_event(int(eid))
+        return bool(ev and ev.state == "pending")
+
+    def _mark_sent(self, v: dict):
+        """卡片真正送达后标记;只有「发送过」的事件才可被「选择」结算。"""
+        eid = v.get("event_id")
+        if eid:
+            try:
+                self.db.mark_event_sent(int(eid))
+            except Exception as e:
+                logger.warning(f"ocverse: 标记事件已发送失败: {e}")
+
     async def _broadcast(self, views: list[dict]):
-        cfg = self._card_cfg()
         by_gid: dict[str, list] = {}
         for v in views:
             by_gid.setdefault(v["gid"], []).append(v)
         for gid, gviews in by_gid.items():
-            umo = self._umo_map.get(gid) or (self.db.kv_get(gid, "umo") or "")
-            imgs = render_views(gviews, cfg)
-            chain = self._chain(imgs)
-            if umo and await self._send_to(umo, chain):
+            gviews = [v for v in gviews if self._view_deliverable(v)]
+            if not gviews:
                 continue
-            # 无法主动发送 → 积压,等群消息时补发
+            umo = self._umo_map.get(gid) or (self.db.kv_get(gid, "umo") or "")
+            chain = self._chain_views(gviews)
+            if umo and await self._send_to(umo, chain):
+                for v in gviews:
+                    self._mark_sent(v)  # 主动送达成功 → 事件可被抉择
+                continue
+            # 无法主动发送 → 积压,等群消息时补发(补发送达后同样标记,之后才可抉择)
             pend = self._pending.setdefault(gid, [])
             pend.extend(gviews)
             del pend[3:]
@@ -396,6 +465,51 @@ class OcversePlugin(Star):
     async def initialize(self):
         self._task = asyncio.create_task(self._loop())
         logger.info("ocverse: 后台调度已启动")
+        # 后台管理:注册进 Dashboard(admin_enable=false 时不注册)
+        try:
+            self._admin = AdminPanel(self.db, self.game, self._cfg, self._admin_ops(),
+                                     plugin_name=PLUGIN_NAME)
+            self._admin.register(self.context)
+            # 备用直接入口:/api/v1/plugins/extensions/<插件名>/admin/page(?key=Dashboard密钥)
+            self.context.register_web_api(
+                f"/{PLUGIN_NAME}/admin/page", page_html_handler(self._admin),
+                ["GET"], "管理页(直接入口)"
+            )
+        except Exception as e:
+            logger.warning(f"ocverse: 后台管理注册失败(不影响插件运行): {e}")
+
+    def _admin_ops(self):
+        """管理页的触发/删除操作:走主循环同一把群锁,结果照常广播到群里。"""
+        plugin = self
+
+        class _Ops:
+            async def trigger(self_, gid: str, kind: str) -> str:
+                async with plugin._glock(gid):
+                    if kind == "shift":
+                        v = await plugin.game.world_shift(gid, manual=True)
+                    elif kind == "morning":
+                        v = await plugin.game.fire_morning(gid)
+                    else:
+                        v = await plugin.game.fire_event(gid)
+                if v:
+                    await plugin._broadcast([v])
+                if not v:
+                    return "没有产出(可能无人创建分身,或世界变动冷却中)"
+                t, p = v.get("type"), v.get("payload") or {}
+                if t == "event":
+                    return f"事件已生成并推送:「{p.get('title', '')}」{str(p.get('scene', ''))[:60]}"
+                if t == "arrive":
+                    w = v.get("world")
+                    return f"世界变动完成 → 《{getattr(w, 'name', '?')}》"
+                if t == "morning":
+                    return "晨报已生成并推送"
+                return f"已完成({t})"
+
+            async def delete_char(self_, gid: str, uid: str) -> str:
+                async with plugin._glock(gid):
+                    return plugin.game.delete_char(gid, uid)
+
+        return _Ops()
 
     async def terminate(self):
         if self._task:
@@ -536,14 +650,20 @@ class OcversePlugin(Star):
         self._remember_umo(event)
         pend = self._pending.get(gid)
         if pend:
-            v = pend.pop(0)
-            try:
-                imgs = render_views([v], self._card_cfg())
-                chain = self._chain(imgs)
-                if chain:
-                    yield event.chain_result(chain)
-            except Exception as e:
-                logger.warning(f"ocverse: 补发卡片失败: {e}")
+            v = None
+            while pend:  # 跳过已失效的事件卡(被顶替/过期/结算),死卡补发只会误导抉择
+                cand = pend.pop(0)
+                if self._view_deliverable(cand):
+                    v = cand
+                    break
+            if v is not None:
+                try:
+                    chain = self._chain_views([v])
+                    if chain:
+                        self._mark_sent(v)  # 补发送出才算「发送过」,之后才可回落结算
+                        yield event.chain_result(chain)
+                except Exception as e:
+                    logger.warning(f"ocverse: 补发卡片失败: {e}")
             return
         # 被动事件:群里有动静,伏笔引爆(每次消息最多一个,自然限流)
         armed = self.game.armed_passives(gid)
@@ -563,12 +683,12 @@ class OcversePlugin(Star):
                 v = await self.game.fire_event(gid, char_uid=self._uid(event))
                 self.game.mark_done(gid, item)
             if v:
-                imgs = render_views([v], self._card_cfg())
-                chain = self._chain(imgs)
+                chain = self._chain_views([v])
                 if chain:
+                    self._mark_sent(v)  # 事件卡发出后才能被回落结算(引用识别不受此限)
                     yield event.chain_result(chain)
-            else:
-                yield event.plain_result("(雾气散去,似乎什么也没有发生…)")
+                else:
+                    yield event.plain_result("(雾气散去,似乎什么也没有发生…)")
         except GameError as e:
             self.game.mark_done(gid, item)  # 无法触发(如无人建角色)也收掉伏笔
             logger.warning(f"ocverse: 被动事件引爆失败: {e}")
@@ -938,6 +1058,13 @@ class OcversePlugin(Star):
         mems = await self.mem.related(gid, f"{ch.name} 最近 经历", uid=uid, k=3)
         badges = [C.FLAG_TITLES[k] for k in ("traveler", "socialite", "survivor")
                   if (ch.flags or {}).get(k)]
+        # 自定义搞怪关系(我是谁的X / 谁是我的X)
+        for bd in self.game.bonds_of(gid, uid)[:3]:
+            other = name_map.get(bd["target"] if bd["proposer"] == uid else bd["proposer"], "?")
+            if bd["proposer"] == uid:
+                badges.append(f"🤝 我是{other}的{bd['label']}")
+            else:
+                badges.append(f"🤝 {other}是我的{bd['label']}")
         return {"__profile__": True, "ch": ch, "world": world, "rels": rel_named,
                 "rel_labels": rel_labels,
                 "mems": mems, "badges": badges}
@@ -1167,15 +1294,45 @@ class OcversePlugin(Star):
     @oc.command("选择", alias={"choose"})
     @_guard
     async def cmd_choose(self, event: AstrMessageEvent, idx: str = ""):
-        """分身 选择 <编号> - 对遭遇做出抉择"""
+        """分身 选择 <编号> - 回复(引用)事件卡后,对 TA 的遭遇做出抉择"""
         gid = self._need_gid(event)
+        uid = self._uid(event)
         n = re.sub(r"\D", "", idx or self._rest(event, "选择", "choose"))
         if not n:
-            yield event.plain_result("格式:/分身 选择 <编号>(事件卡片里的 1/2/3)")
+            yield event.plain_result("格式:回复要抉择的事件卡,发送「/分身 选择 <编号>」(选项编号见卡片)")
             return
+        eid = await self._quoted_event_id(event)
         yield event.plain_result("⏳ 正在结算抉择,请稍候…")
         async with self._glock(gid):
-            v = await self.game.choose(gid, self._uid(event), int(n) - 1)
+            if eid is not None:
+                # 引用识别:精确结算被回复的那张事件卡
+                ev = self.db.get_event(eid)
+                if not ev or ev.gid != gid:
+                    yield event.plain_result("❌ 没识别到有效的事件卡:请回复(引用)要抉择的那张事件卡再发送选择")
+                    return
+                if ev.state != "pending":
+                    yield event.plain_result("❌ 这张事件卡已经结束了(可能已被结算或过期)")
+                    return
+                if ev.uid and ev.uid != uid:
+                    other = self.db.get_char(gid, ev.uid)
+                    yield event.plain_result(f"这次遭遇是冲「{other.name if other else '别人'}」来的,让 TA 来抉择吧")
+                    return
+                if ev.kind == "life_multi" and not self.game._multi_includes(ev, uid):
+                    names = "、".join(str(p.get("name", "")) for p in (ev.payload.get("participants") or []))
+                    yield event.plain_result(f"这场交集是「{names}」的,没带上你就不能替他们做主啦")
+                    return
+            else:
+                # 未引用:仅当恰好一张可结算事件时直接结算,多张则提示引用对应卡
+                mine = [e for e in self.db.pending_sent_events(gid, uid)
+                        if not self.game.choose_locked(e, uid)]
+                if not mine:
+                    yield event.plain_result("当前没有等待抉择的事件")
+                    return
+                if len(mine) > 1:
+                    yield event.plain_result("当前有多张事件卡等待抉择:请回复(引用)对应的事件卡,再发送「/分身 选择 编号」")
+                    return
+                ev = mine[0]
+            v = await self.game.choose(gid, uid, int(n) - 1, ev=ev)
         imgs = render_views([v], self._card_cfg())
         chain = self._chain(imgs)
         if chain:
@@ -1243,6 +1400,31 @@ class OcversePlugin(Star):
             v = await self.game.interact_life_char(gid, self._uid(event), name, mode, detail)
         views = [v] + (v.pop("extra_views", []) or [])
         imgs = render_views(views, self._card_cfg())
+        chain = self._chain(imgs)
+        if chain:
+            yield event.chain_result(chain)
+
+    @oc.command("关系", alias={"bond", "自定义关系"})
+    @_guard
+    async def cmd_bond(self, event: AstrMessageEvent):
+        """分身 关系 @群友 <称谓> - 提议自定义搞怪关系(如想当TA爸爸),AI 判断对方答不答应"""
+        gid = self._need_gid(event)
+        target = self._at_target(event)
+        if not target:
+            yield event.plain_result(
+                "格式:/分身 关系 @群友 <称谓>\n"
+                "例:/分身 关系 @老徐 爸爸(你想当 TA 的爸爸)/女仆/主人/师父/冤种弟弟…\n"
+                "AI 会以对方的性格与你们的交情判断答不答应;亲密关系(恋人/情侣/夫妻等)不可自定义"
+            )
+            return
+        label = re.sub(r"@\S+", "", self._rest(event, "关系", "bond", "自定义关系")).strip()
+        if not label:
+            yield event.plain_result("请写上想要的称谓,如:/分身 关系 @群友 爸爸")
+            return
+        yield event.plain_result("⏳ 对方正在认真考虑这个提案…")
+        async with self._glock(gid):
+            v = await self.game.propose_bond(gid, self._uid(event), target, label)
+        imgs = render_views([v], self._card_cfg())
         chain = self._chain(imgs)
         if chain:
             yield event.chain_result(chain)

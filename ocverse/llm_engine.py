@@ -34,8 +34,10 @@ def now_stamp() -> str:
 
 STYLE_BASE = (
     "你是一个群聊文字游戏的叙事引擎,以轻小说的手法叙事:画面感强、有心理与感官细节、"
-    "节奏明快、对话生动口语化、结尾留有余味或小小的转折;不水字数、不出戏、"
-    "不提及任何现实平台或AI身份。所有输出必须是严格的 JSON,不要 markdown 代码围栏,不要解释。"
+    "节奏明快、对话生动口语化、结尾留有余味或小小的转折;"
+    "严格贴合指令给定的行动/互动主题展开,不跑题、不擅改场景、不凭空插入无关事件或陌生人物;"
+    "文风克制不堆砌,不水字数、不出戏、不提及任何现实平台或AI身份。"
+    "所有输出必须是严格的 JSON,不要 markdown 代码围栏,不要解释。"
 )
 
 
@@ -164,7 +166,7 @@ class Brain:
         '"features":["独特之处1","独特之处2","独特之处3"],'
         '"npcs":[{"name":"","role":"身份","persona":"性格一句话","hook":"可交互的钩子一句话","daily":"这名NPC每天一般会去做什么/在哪里","quirk":"一个鲜活的小怪癖/口头禅"}],'
         '"event_ideas":["该世界独有事件灵感",4-6条],'
-        '"infra":[{"kind":"设施类型(店/馆/铺/工坊/祭坛/据点/地标…)","name":"设施名(2~6字)","desc":"功能/氛围一句话(≤20字)","work":"在这里能打工赚钱的职业(无则不填)"}],'
+        '"infra":[{"kind":"设施类型(店/馆/铺/坊/堂/楼/坛/站/所等,尽量不重复)","name":"设施名(2~6字)","desc":"功能/氛围一句话(≤20字)","work":"在这里能打工赚钱的职业(无则不填)"}],'
         '"mainline":[{"stage":"主线小节名(≤10字)","desc":"这一步要做什么/线索(≤30字)"}],'
         '"plots":[{"kind":"房|宅|小屋|公寓|铺面|庄园…","name":"可购住处名(2~6字)","desc":"一句话","price":整数金币价}]}'
     )
@@ -173,7 +175,7 @@ class Brain:
     def _norm_infra(d: dict) -> list:
         """规范化基础设施列表。"""
         out = []
-        for it in (d.get("infra") or [])[:8]:
+        for it in (d.get("infra") or [])[:12]:
             if not isinstance(it, dict) or not (it.get("name") or ""):
                 continue
             out.append({
@@ -230,12 +232,15 @@ class Brain:
         if avoid_names:
             user += "\n不要与这些已有世界重名:" + "、".join(avoid_names[:20])
         user += (
-            "\nNPC 5~8个(名字不超过6字,融入世界,不要套模板名)。每个NPC都要有自己的"
+            "\nNPC 8~14个(名字不超过6字,融入世界,不要套模板名;身份/职业尽量多样,"
+            "覆盖衣食住行玩各方面)。每个NPC都要有自己的"
             "日常行踪(daily:TA每天一般在哪/做什么)、鲜活小怪癖或口头禅(quirk),"
             "让这个世界住着活生生的人。\n"
             "然后为这个世界设计以下内容(必须全部给出,分别填入 infra / mainline / plots 三个数组):\n"
-            "- infra: 3~5个贴合该世界题材与时代的基础设施(商店/饭馆/工坊/祭坛/据点/驿站等),\n"
-            "  kind/name/desc/work 必填,其中至少 1 个能打工赚钱(填 work 职业);\n"
+            "- infra: 6~10个贴合该世界题材与时代的基础设施,种类尽量丰富不重复,"
+            "  可从这些类型里选或自创:商店/集市/饭馆/小吃摊/茶馆/酒馆/咖啡馆/旅店/澡堂/书店/当铺/"
+            "  花店/药铺/诊所/铁匠铺/工坊/裁缝铺/戏院/道场/学园/祭坛/神社/码头/驿站/车马行/据点/地标等,\n"
+            "  kind/name/desc/work 必填,其中至少 2 个能打工赚钱(填 work 职业,职业要多样);\n"
             "- mainline: 3~6 节世界主线(stage/desc),是一段能推动这个世界的故事;\n"
             "- plots: 3~5 处可供居民购置的住处(kind/name/desc/price),price 用整数金币。\n"
             "全部要贴合该世界的题材与时代,不要套用同一套现代模板。\n"
@@ -247,7 +252,7 @@ class Brain:
         if d and d.get("name"):
             # 校验:infra/mainline 必须至少各 1 条,否则带纠正提示重试一次
             if not (self._norm_infra(d) and self._norm_mainline(d)):
-                d2 = await self._ask_json(sys, user + "\n\n【纠正】你漏掉了基础设施或主线,请补全:infra 至少 3 个可去的场所(含至少1个能打工的 work),mainline 至少 3 节主线,plots 至少 3 处可购住处。不要省略这些数组。", use_tools=True)
+                d2 = await self._ask_json(sys, user + "\n\n【纠正】你漏掉了基础设施或主线,请补全:infra 至少 6 个可去的场所(种类尽量丰富,含至少2个能打工的 work),mainline 至少 3 节主线,plots 至少 3 处可购住处。不要省略这些数组。", use_tools=True)
                 if d2 and d2.get("name"):
                     d = {**d, "infra": d2.get("infra") or d.get("infra"),
                          "mainline": d2.get("mainline") or d.get("mainline"),
@@ -260,8 +265,9 @@ class Brain:
         sys = self.style
         user = (
             f"玩家自设了一个世界。名称:{name}\n描述:{desc}\n"
-            "请补全它的题材标签、氛围、规则、独特之处、4~5个NPC、独有事件灵感。"
-            "并设计基础设施、一段世界主线、可供购置的住处——贴合该世界设定,勿套模板。\n"
+            "请补全它的题材标签、氛围、规则、独特之处、6~10个NPC(身份多样,各有日常行踪与小怪癖)、"
+            "独有事件灵感。并设计 6~10 个种类丰富的贴合设定的基础设施(至少2个能打工)、"
+            "一段世界主线、可供购置的住处——贴合该世界设定,勿套模板。\n"
             f"严格输出 JSON,结构:{self._WORLD_SCHEMA}"
         )
         user = self._with_material(user, material)
@@ -274,7 +280,7 @@ class Brain:
 
     def _norm_world(self, d: dict, source: str, desc_hint: str = "") -> dict:
         npcs = []
-        for n in (d.get("npcs") or [])[:8]:
+        for n in (d.get("npcs") or [])[:16]:
             if isinstance(n, dict) and n.get("name"):
                 npcs.append(
                     {
@@ -493,6 +499,9 @@ class Brain:
         user = (
             f"世界:《{world.name}》。{who}遭遇了:「{event.get('title')}」——{event.get('scene')}\n"
             f"TA选择了「{pick['label']}」({pick.get('hint','')})。\n"
+            "【连贯性铁律】结算必须紧接上面这场遭遇续写:同一时间、同一地点、同一批在场人物,"
+            "从做出选择之后的下一秒写起。严禁跳跃到新的时间/地点,严禁引入遭遇场景里没有的新人物;"
+            "dialogues 的 speaker 必须使用遭遇中出现过的角色本名(禁止「少女」「神秘人」之类代称)。\n"
             "请结算:叙述结果(轻小说式,120~220字:画面感+心理细节+余味或小转折),并给出数值变化。"
             "属性键:" + attrs_names + "。\n"
             '"dialogues":事件中人物的多轮对话(2~5轮,IM聊天体,每条"speaker"≤8字、"text"≤60字,可含(动作)小注)。'
@@ -541,6 +550,8 @@ class Brain:
             f"世界:《{world.name}》[{world.genre}] {world.desc}\n{cast}{rel_line}\n"
             f"他们正在这场交集里:「{event.get('title')}」——{event.get('scene')}\n"
             f"大家共同选择了「{pick['label']}」({pick.get('hint','')})。\n"
+            "【连贯性铁律】结算必须紧接这场交集续写:同一时间、同一地点、同一批在场角色,"
+            "严禁跳到新的时间/地点或引入场景里没有的新人物;dialogues 的 speaker 用角色本名。\n"
             "请结算这段共同经历的结果:轻小说式叙述(110~200字:画面感+心理细节+余味),"
             "并分别给出各角色的效果与彼此羁绊的变化。\n"
             '"dialogues":这场交集里 2~5 轮的简短对话(IM聊天体,每条 speaker ≤8字、text ≤60字),需有至少 2 个不同说话人。\n'
@@ -597,6 +608,12 @@ class Brain:
             f"A:{a.persona_line()},背景:{a.backstory[:600] or '未详'},体力{a.stamina}/心情{a.mood}/金币{a.gold}"
             f"{b_ps}\n{rel_line}\n"
             f"互动:「{mode}」" + (f"({detail[:60]})" if detail else "") + state_line + "\n"
+            f"【切题铁律】这段叙述演的必须就是上面这场「{mode}」互动"
+            + (f"({detail[:60]})" if detail else "") + "。"
+            "A与B是仅有的主角,写两人相处的过程与氛围(如约会就是两人约会:地点/话题/氛围/情感流动);"
+            "严禁跑题:不得凭空插入与互动无关的遭遇/战斗/陌生人物/超展开;"
+            "知识库素材只作风味点缀,不得改变本次互动的主题、场景与人物关系。\n"
+            "dialogues 的 speaker 必须用 A/B 的本名,禁止「少女」「神秘人」之类代称。\n"
             "写出这段互动的走向与结果(轻小说式,120~220字:画面感+心理细节+余味)。\n"
             '"dialogues":A与B你来我往的多轮对话(3~6轮,IM聊天体,每条"speaker"用角色名,'
             '"text"≤60字,口语化,可含(动作/神态)小注),要能看出性格碰撞。'
@@ -630,6 +647,46 @@ class Brain:
                 },
             )
         return BrainResult(False, dict(FB_INTERACT))
+
+    async def propose_bond(self, *, world, a, b, label: str, rel_score: int,
+                           rel_stage: str = "", material: str = "") -> BrainResult:
+        """自定义关系提案:A 想成为 B 的「label」(如爸爸/主人/女仆),
+        由 B 的性格与两人关系判断是否同意。仅限搞怪/生活向称谓,亲密关系已在代码层拦截。"""
+        sys = self.style
+        user = (
+            f"世界:《{world.name}》[{world.genre}] {world.desc}\n"
+            f"A(提案人):{a.persona_line()},背景:{a.backstory[:400] or '未详'}\n"
+            f"B(被提案):{b.persona_line()},背景:{b.backstory[:400] or '未详'}\n"
+            f"两人当前关系:{rel_score}分({rel_stage})\n"
+            f"A 想成为 B 的「{label}」。\n"
+            "【判定要求】以 B 的视角与性格判断是否接受(agree true/false),并写出这段提案交锋的场景。"
+            "贴合两人亲疏:关系好或提案够好笑可以爽快答应,关系差或提案离谱就嫌弃地拒绝,理由要符合人设。"
+            "这是搞怪/生活向关系,严禁发展出恋人/情侣/夫妻等亲密内容。\n"
+            "【切题铁律】只写这场提案交锋,A与B是仅有主角;"
+            "严禁凭空插入无关事件/战斗/陌生人物;知识库素材只作风味点缀。\n"
+            "dialogues 的 speaker 必须用 A/B 的本名,禁止代称。\n"
+            "请输出提案经过与结果(120~200字:画面感+心理细节+余味)。\n"
+            '严格输出 JSON:{"agree":true,"narration":"经过与结果",'
+            '"dialogues":[{"speaker":"A名","text":""},{"speaker":"B名","text":""}],'
+            '"effects":{"mood":±,"exp":±},"memory":"第三人称一句话存档"}'
+            "dialogues 2~4轮;effects 数值克制(±3~10,只给 mood/exp)。"
+        )
+        user = self._with_material(user, material)
+        d = await self._ask_fixed_dialogues(sys, user, counterpart=b.name, limit=4)
+        if d and isinstance(d.get("agree"), bool) and d.get("narration"):
+            eff = d.get("effects") if isinstance(d.get("effects"), dict) else {}
+            eff.pop("gold", None)
+            return BrainResult(
+                True,
+                {
+                    "agree": bool(d["agree"]),
+                    "narration": str(d["narration"])[:300],
+                    "dialogues": self._norm_dialogues(d.get("dialogues"), 4),
+                    "effects": _clamp_effects(eff),
+                    "memory": str(d.get("memory", ""))[:120],
+                },
+            )
+        return BrainResult(False, dict(FB_BOND))
 
     # ════════════════ 主动行动(练习/健身/打怪/冒险)════════════════
     async def resolve_mainline(self, *, world, char, stage: dict,
@@ -734,6 +791,9 @@ class Brain:
             + (f";怪癖/口头禅:{npc.get('quirk','')}" if npc.get("quirk") else "")
             + f"\n角色:{char.persona_line()}\n角色行为:{action[:80]}\n"
             f"{chr(10).join(memories[:4]) if memories else ''}\n{state_line}\n"
+            f"【切题铁律】这段对话演的必须就是角色的「{action[:40]}」这个行为,只涉及角色与该NPC两人;"
+            "严禁跑题:不得凭空插入与行为无关的遭遇/战斗/陌生人物/超展开;"
+            "知识库素材只作风味点缀,不得改变本次互动的主题、场景与人物关系。\n"
             "与角色进行多轮对话(3~6轮,IM聊天体:dialogues 数组,每条 speaker ≤8字、text ≤60字,"
             "口语化,保留人设与神秘感,NPC与角色交替说话),再用旁白收尾(60~120字),可给微小奖励。\n"
             "让NPC像有自己生活的人:带上TA的行踪、习惯、语气与情绪,别念模板台词。\n"
@@ -1000,17 +1060,22 @@ class Brain:
 
     async def _ask_fixed_dialogues(self, system: str, user: str, counterpart: str = "",
                                    limit: int = 6) -> dict | None:
-        """带独角戏守卫的 JSON 请求:
-        若返回的 dialogues 是独角戏(只有一个说话人/对方没开口),带着纠正提示重试一次;
-        重试后仍是独角戏则丢弃对话(宁缺毋滥,由叙述承担表达)。返回解析后的 dict 或 None。"""
+        """带对话质量守卫的 JSON 请求:
+        若返回的 dialogues 是独角戏(只有一个说话人)或对方没开口,带着纠正提示重试一次;
+        重试后仍是真独角戏才丢弃对话(宁缺毋滥);仅「对方名字没对上」时保留对话 ——
+        叙述已交代在场关系,气泡照常渲染,否则互动卡经常一个气泡都不剩。"""
         d = await self._ask_json(system, user)
         dlg = self._norm_dialogues(d.get("dialogues"), limit) if isinstance(d, dict) else []
         if dlg and not self._dialogue_ok(dlg, counterpart=counterpart):
+            speakers = {str(x.get("speaker") or "").strip() for x in dlg}
+            speakers.discard("")
+            mono = len(speakers) < 2
             user2 = (
                 user
-                + "\n\n【重要纠正】你刚才的对话是独角戏(只有一个说话人),这不合要求。"
-                  "重写 dialogues:必须你来我往、至少 2 个不同的说话人"
-                + (f",且「{counterpart}」必须开口回应" if counterpart else "")
+                + "\n\n【重要纠正】你刚才的对话"
+                + ("是独角戏(只有一个说话人)" if mono else f"没有让「{counterpart}」开口")
+                + ",这不合要求。重写 dialogues:必须你来我往、至少 2 个不同的说话人"
+                + (f",且「{counterpart}」必须以本名开口回应" if counterpart else "")
                 + ";每条 speaker≤8字、text≤60字。"
             )
             d2 = await self._ask_json(system, user2)
@@ -1018,7 +1083,9 @@ class Brain:
                 dlg2 = self._norm_dialogues(d2.get("dialogues"), limit)
                 if dlg2 and self._dialogue_ok(dlg2, counterpart=counterpart):
                     return d2  # 纠正成功
-                d2["dialogues"] = []  # 仍独角戏 → 丢弃对话,不渲染独角戏
+                sp2 = {str(x.get("speaker") or "").strip() for x in (dlg2 or [])}
+                sp2.discard("")
+                d2["dialogues"] = dlg2 if len(sp2) >= 2 else []  # 双向对话保留,真独角戏丢弃
                 return d2
         return d
 
@@ -1095,6 +1162,15 @@ FB_RESOLVE = {
     ],
     "effects": {"exp": 6, "mood": 0},
     "memory": "经历了一场无名的街头遭遇。",
+}
+
+FB_BOND = {
+    "agree": True,
+    "narration": "提案荒唐又好笑,B愣了两秒,噗嗤笑出声,摆摆手应了下来——这关系认就认了,"
+                 "日子反正要热闹着过,多一个名头不多。",
+    "dialogues": [],
+    "effects": {"mood": 4},
+    "memory": "",
 }
 
 FB_INTERACT = {

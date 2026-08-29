@@ -447,7 +447,7 @@ class Game:
                                    f"《{w.name}》的「{mover.get('name')}」换了一份生计", w.name)
                 changed = True
         # 3) 小概率迎来一位新面孔(用模板,后续LLM互动时自然补全)
-        if random.random() < 0.10 and len(out) < self._cfgi("max_npcs_per_world", 20):
+        if random.random() < 0.10 and len(out) < self._cfgi("max_npcs_per_world", 32):
             names = {n.get("name") for n in out}
             nm = f"路过者{random.randint(10,99)}"
             while nm in names:
@@ -594,6 +594,7 @@ class Game:
                 "type": "event",
                 "gid": gid,
                 "uid": ev.uid,
+                "event_id": ev.id,
                 "char_name": "、".join(c.name for c in multi),
                 "world_name": world.name,
                 "payload": r.data,
@@ -617,6 +618,7 @@ class Game:
             "type": "event",
             "gid": gid,
             "uid": ev.uid,
+            "event_id": ev.id,
             "char_name": char.name if char else "",
             "world_name": world.name,
             "payload": r.data,
@@ -724,17 +726,43 @@ class Game:
                 self.db.append_log(ch.gid, ch.uid, "title", f"{ch.name} 获得称号「{t}」", "")
         return news
 
-    async def choose(self, gid: str, uid: str, idx: int) -> dict:
-        """结算某人「选择 idx」:找其最近的 pending 事件。"""
+    @staticmethod
+    def _multi_includes(ev, uid: str) -> bool:
+        """群像多人事件的参与者名单里是否有 uid。"""
+        parts = ev.payload.get("participants") or []
+        return any(isinstance(p, dict) and p.get("uid") == uid for p in parts)
+
+    def choose_locked(self, ev, uid: str) -> bool:
+        """该事件是否对 uid 锁定:别人的个人事件 / 没带上他的多人事件(非全群)。"""
+        if ev.uid:
+            return ev.uid != uid
+        if ev.kind == "life_multi":
+            return not self._multi_includes(ev, uid)
+        return False
+
+    async def choose(self, gid: str, uid: str, idx: int, ev=None) -> dict:
+        """结算某人「选择 idx」。
+
+        ev: 要结算的事件(指令层从引用(回复)的事件卡 №标签识别后传入);
+        不传则回落到最新一张「该用户可抉择」的已送达事件。"""
         ch = self.db.get_char(gid, uid)
         if not ch:
             raise GameError("你还没有创建分身,先「/分身 创建 名字」")
-        ev = self.db.latest_pending_event(gid, uid)
-        if not ev:
-            raise GameError("当前没有等待抉择的事件")
+        if ev is None:
+            for cand in self.db.pending_sent_events(gid, uid):
+                if not self.choose_locked(cand, uid):
+                    ev = cand
+                    break
+            if ev is None:
+                raise GameError("当前没有等待抉择的事件")
+        if ev.gid != gid:
+            raise GameError("这张事件卡不属于本群")
         if ev.uid and ev.uid != uid:
             other = self.db.get_char(gid, ev.uid)
             raise GameError(f"这次遭遇是冲「{other.name if other else '别人'}」来的,让 TA 来抉择吧")
+        if ev.kind == "life_multi" and not self._multi_includes(ev, uid):
+            names = "、".join(str(p.get("name", "")) for p in (ev.payload.get("participants") or []))
+            raise GameError(f"这场交集是「{names}」的,没带上你就不能替他们做主啦")
         opts = ev.payload.get("options") or []
         if not (0 <= idx < len(opts)):
             raise GameError(f"请选择 1~{len(opts)} 之间的编号")
@@ -1061,6 +1089,79 @@ class Game:
         # 复用完整互动链路(关系/告白/求婚都按 uid 走,生活角色有 uid 也能成婚)
         return await self.interact(gid, uid, b_uid, mode, detail)
 
+    # ══════════════ 自定义关系(搞怪称谓)══════════════
+    async def propose_bond(self, gid: str, uid: str, target_uid: str, label: str) -> dict:
+        """自定义关系提案:A 想成为 target 的「label」(爸爸/麻麻/主人/女仆…),
+        由 AI 以 target 的性格与双方关系判断是否同意。
+        亲密关系(恋人/情侣/夫妻等)在代码层直接拒绝,不走 LLM。"""
+        a = self.db.get_char(gid, uid)
+        if not a:
+            raise GameError("你还没有创建分身")
+        b = self.db.get_char(gid, target_uid)
+        if not b:
+            raise GameError("对方还没有创建分身")
+        if uid == target_uid:
+            raise GameError("不能和自己确立关系哦")
+        label = label.strip()[:12]
+        if not label:
+            raise GameError("请写上想要的称谓,如:/分身 关系 @群友 爸爸")
+        if C.is_intimate_bond(label):
+            raise GameError(
+                "亲密关系(恋人/情侣/夫妻等)没法自定义哦,那是互动里水到渠成的事～"
+                "试试爸爸/麻麻/主人/女仆/兄弟/师父这类搞怪称谓吧"
+            )
+        old = self.db.get_bond(gid, uid, target_uid)
+        if old and old.get("status") == "agreed" and old.get("label") == label:
+            raise GameError(f"你已经是「{b.name}」的{label}了,不用再提一遍～")
+        world = self.db.cur_world(gid)
+        if not world:
+            raise GameError("世界尚未初始化")
+        pre = self.db.get_rel_full(gid, uid, target_uid)
+        r = await self.brain.propose_bond(
+            world=world, a=a, b=b, label=label,
+            rel_score=pre["score"], rel_stage=C.rel_stage_label(pre["score"], pre["state"]),
+            material=await self._kb_ctx(gid, f"关系 提案 {label}"),
+        )
+        data = r.data
+        agree = bool(data.get("agree"))
+        if agree:
+            self.db.set_bond(gid, uid, target_uid, label, "agreed")
+        changes = []
+        if agree:
+            changes.append(f"🤝 关系成立:你是「{b.name}」的{label}!")
+        else:
+            changes.append("提案被嫌弃地拒绝了,关系如旧")
+        eff = dict(data.get("effects") or {})
+        changes += self._apply_effects(a, eff)
+        eff_b = {k: v for k, v in eff.items() if k != "gold"}
+        changes += [f"(对方){x}" for x in self._apply_effects(b, eff_b)]
+        mem_text = data.get("memory") or (
+            f"{a.name}向{b.name}提议当TA的{label}," + ("被接受了" if agree else "被拒绝了"))
+        await self.mem.remember(gid, uid, "char", mem_text, ref=f"bond:{target_uid}")
+        await self.mem.remember(gid, target_uid, "char", mem_text, ref=f"bond:{uid}")
+        self.db.append_log(gid, uid, "bond",
+                           f"{a.name} 向 {b.name} 提议当TA的「{label}」 —— " + ("成立" if agree else "被拒"),
+                           world.name)
+        return {
+            "type": "result",
+            "gid": gid,
+            "uid": uid,
+            "card_title": "🤝 自定义关系",
+            "char_name": a.name,
+            "world_name": world.name,
+            "event_title": f"关系提案 · {a.name} → {b.name}",
+            "chosen": f"「{label}」,TA 答应了!" if agree else f"「{label}」,被嫌弃地拒绝了",
+            "narration": data.get("narration", ""),
+            "dialogues": data.get("dialogues") or [],
+            "avatars": self._avatar_map(gid),
+            "changes": changes,
+            "ok_llm": r.ok,
+        }
+
+    def bonds_of(self, gid: str, uid: str) -> list[dict]:
+        """某人成立的全部自定义关系(供角色卡展示)。"""
+        return self.db.bonds_for(gid, uid)
+
     async def npc_interact(self, gid: str, uid: str, npc_name: str, action: str) -> dict:
         ch = self.db.get_char(gid, uid)
         if not ch:
@@ -1228,7 +1329,7 @@ class Game:
         npcs = list(w.npcs or [])
         if any((n.get("name") or "") == name for n in npcs if isinstance(n, dict)):
             raise GameError(f"《{w.name}》已有叫「{name}」的NPC")
-        if len(npcs) >= self._cfgi("max_npcs_per_world", 20):
+        if len(npcs) >= self._cfgi("max_npcs_per_world", 32):
             raise GameError("这个世界NPC太多了,给新面孔留点位置吧")
         npc = {
             "name": name[:12],

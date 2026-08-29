@@ -181,7 +181,8 @@ class KnowledgeStore:
             tag = f"{r['theme']}·《{r['source']}》" if r.get("source") else (r.get("theme") or "")
             head = f"- {tag}: " if tag else "- "
             lines.append(head + str(r.get("content"))[:260])
-        return ("\n\n【知识库素材】(可借鉴其氛围/手法/设定,但不要直接照搬人名或原剧情):\n"
+        return ("\n\n【知识库素材】(仅作风味与手法点缀,严禁喧宾夺主:不得改变当前任务的主题、"
+                "场景与人物,不要照搬人名或原剧情):\n"
                 + "\n".join(lines))
 
 

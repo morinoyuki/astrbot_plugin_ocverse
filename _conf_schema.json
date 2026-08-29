@@ -54,6 +54,12 @@
     "default": 40,
     "hint": "每天日切时全员回复的体力值(封顶 100,设为 0 当天不回)。主动行动耗 18~35/次,配合「每人每日行动上限」共同控制体力节奏"
   },
+  "admin_enable": {
+    "description": "启用后台管理页 (Dashboard 插件页面)",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后在 Dashboard「插件 → 分身的世界」里会出现「后台管理」页面:查看/编辑角色属性、世界NPC、事件、日志记忆、群参数,并可手动触发事件与世界变动。鉴权由 Dashboard 登录态统一管理;也可直接访问 /api/v1/plugins/extensions/astrbot_plugin_ocverse/admin/page?key=Dashboard密钥"
+  },
   "passive_event_share_percent": {
     "description": "被动事件比例 (%)",
     "type": "int",
@@ -185,7 +191,7 @@
   "max_npcs_per_world": {
     "description": "每个世界NPC数量上限",
     "type": "int",
-    "default": 20,
-    "hint": "玩家可为世界手动添加的NPC数上限,防止无限堆人。系统生成NPC与人口流动(搬家/换工作/迎新面孔)会围绕此上限运转;玩家自建的NPC永久保留、不被流动删掉"
+    "default": 32,
+    "hint": "玩家可为世界手动添加的NPC数上限,防止无限堆人。系统生成世界时自带 8~14 个NPC,人口流动(搬家/换工作/迎新面孔)会围绕此上限运转;玩家自建的NPC永久保留、不被流动删掉"
   }
 }

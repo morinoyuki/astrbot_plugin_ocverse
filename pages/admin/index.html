@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>分身的世界 · 后台管理</title>
+<style>
+:root{--bg:#12161d;--panel:#1a2029;--line:#2a323d;--tx:#dbe2ea;--mut:#8b96a5;--acc:#5b9cf5;--ok:#6fc9ae;--bad:#e06c55}
+body.light{--bg:#f4f6f9;--panel:#ffffff;--line:#e3e8ef;--tx:#26303c;--mut:#69758a;--acc:#2f6fd6}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.6 system-ui,"PingFang SC","Microsoft Yahei",sans-serif}
+header{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+header h1{font-size:16px;margin:0 12px 0 0;color:var(--tx)}
+input,select,textarea,button{background:var(--bg);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:6px 10px;font:inherit}
+input:focus,textarea:focus,select:focus{outline:1px solid var(--acc)}
+button{cursor:pointer}button:hover{border-color:var(--acc)}button.pri{background:var(--acc);border-color:var(--acc);color:#fff}
+button.danger{background:transparent;border-color:var(--bad);color:var(--bad)}
+nav{display:flex;gap:4px;padding:10px 16px 0;flex-wrap:wrap}
+nav button{border-radius:6px 6px 0 0;border-bottom:none;color:var(--mut)}
+nav button.on{color:var(--acc);background:var(--panel);border-color:var(--acc)}
+main{padding:16px;max-width:1200px;margin:0 auto}
+table{width:100%;border-collapse:collapse;background:var(--panel);border-radius:8px;overflow:hidden}
+th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;font-size:13px}
+th{color:var(--mut);font-weight:500;white-space:nowrap}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:14px}
+.card h3{margin:0 0 10px;font-size:14px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+label{display:block;color:var(--mut);font-size:12px;margin:8px 0 3px}
+input.w,textarea.w,select.w{width:100%}
+textarea.w{min-height:64px;resize:vertical}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}
+.pill{display:inline-block;background:var(--bg);border:1px solid var(--line);border-radius:20px;padding:2px 10px;font-size:12px;color:var(--mut);margin:2px}
+.mut{color:var(--mut)}.ok{color:var(--ok)}.bad{color:var(--bad)}
+#tip{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--panel);border:1px solid var(--line);padding:8px 18px;border-radius:8px;display:none;z-index:9}
+pre{white-space:pre-wrap;word-break:break-all;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px;font-size:12px}
+</style></head><body>
+<header>
+  <h1>分身的世界 · 后台管理</h1>
+  <select id="gid" onchange="switchGid()"><option value="">加载中…</option></select>
+  <span id="who" class="mut"></span>
+</header>
+<nav id="tabs"></nav>
+<main id="main"><p class="mut">加载中…</p></main>
+<div id="tip"></div>
+<script>
+const $=s=>document.querySelector(s);const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const PLUGIN="astrbot_plugin_ocverse";
+const BRIDGE=window.AstrBotPluginPage||null;
+const QKEY=new URLSearchParams(location.search).get("key")||"";
+let GID="",TABS=["总览","角色","世界","事件","日志","记忆","配置","操作"],CUR="总览";
+function tip(m,ok){const t=$("#tip");t.textContent=m;t.style.display="block";t.style.color=ok?"var(--ok)":"var(--bad)";setTimeout(()=>t.style.display="none",2600)}
+async function api(path,opt={}){
+  opt.method=opt.method||"GET";
+  if(BRIDGE){
+    await (BRIDGE.ready?BRIDGE.ready():null);
+    if(opt.method==="GET"){
+      const params={};if(opt.query)for(const[k,v]of Object.entries(opt.query))if(v!==""&&v!=null)params[k]=v;
+      return await BRIDGE.apiGet(path,params);
+    }
+    return await BRIDGE.apiPost(path,opt.body||{});
+  }
+  // 直连兜底:Dashboard API Key(?key=)
+  const sep=path.includes("?")?"&":"?";const url=`/api/v1/plugins/extensions/${encodeURIComponent(PLUGIN)}${path}${QKEY?sep+"key="+encodeURIComponent(QKEY):""}`;
+  const r=await fetch(url,{method:opt.method,headers:{"Content-Type":"application/json"},body:opt.method==="GET"?undefined:JSON.stringify(opt.body||{})});
+  const j=await r.json().catch(()=>({ok:false,error:"HTTP "+r.status}));
+  return j;
+}
+async function call(path,opt={}){const j=await api(path,opt);if(!j||j.ok!==true)throw new Error((j&&j.error)||"请求失败");return j.data}
+async function connect(){
+  try{
+    const d=await call("/admin/api/overview");
+    $("#gid").innerHTML=d.groups.map(g=>`<option value="${esc(g.gid)}">${esc(g.gid)} · ${esc(g.world?g.world.name:"未初始化")}</option>`).join("");
+    GID=$("#gid").value||"";
+    $("#who").textContent=(BRIDGE?"桥接模式":"直连模式")+(BRIDGE&&BRIDGE.getContext&&BRIDGE.getContext()?" · "+(BRIDGE.getContext().username||""):"")+` · ${d.groups.length} 个群`;
+    render();
+  }catch(e){$("#main").innerHTML=`<p class="bad">连接失败:${esc(e.message)}</p><p class="mut">请从 Dashboard「插件 → 分身的世界 → 页面」打开;或用 Dashboard API Key 以 ?key= 直连。</p>`}
+}
+function switchGid(){GID=$("#gid").value;render()}
+function nav(){$("#tabs").innerHTML=TABS.map(t=>`<button class="${t===CUR?"on":""}" onclick="CUR='${t}';nav();render()">${t}</button>`).join("")}
+function render(){nav();({总览:rgOverview,角色:rgChars,世界:rgWorld,事件:rgEvents,日志:rgLogs,记忆:rgMems,配置:rgConfig,操作:rgOps}[CUR]||rgOverview)().catch(e=>{$("#main").innerHTML=`<p class="bad">${esc(e.message)}</p>`})}
+function fld(label,id,val,type="text"){if(type==="textarea")return `<label>${label}</label><textarea class="w" id="${id}">${esc(val??"")}</textarea>`;
+ return `<label>${label}</label><input class="w" id="${id}" value="${esc(val??"")}" ${type==="num"?'type="number"':""}>`}
+function v(id){return $(id).value}
+function vn(id){return parseInt($(id).value||"0",10)||0}
+function ls(id){return v(id).split(/[\n,，、]/).map(s=>s.trim()).filter(Boolean)}
+
+/* ── 总览 ── */
+async function rgOverview(){const d=await call("/admin/api/overview?gid="+encodeURIComponent(GID));const g=d.groups.find(x=>x.gid===GID);
+ $("#main").innerHTML=`<div class="card"><h3>${esc(GID)}</h3>
+ <p class="mut">世界:${esc(g&&g.world?g.world.name+" ["+g.world.genre+"]":"未初始化")} · 成员 ${g?g.chars.length:0} 人 · 待抉择事件 ${g?g.pending_events:0} 张</p>
+ <div>${g?g.chars.map(c=>`<span class="pill">${esc(c.name)}</span>`).join(""):""}</div></div>
+ <div class="card"><h3>群参数</h3><pre>${esc(JSON.stringify(g?g.config:{},null,2))}</pre><p class="mut">在「配置」页修改。</p></div>`}
+
+/* ── 角色 ── */
+async function rgChars(){const d=await call("/admin/api/chars?gid="+encodeURIComponent(GID));
+ $("#main").innerHTML=`<table><tr><th>名字</th><th>uid</th><th>性别</th><th>Lv</th><th>金币</th><th>体力/心情</th><th>称号</th><th>操作</th></tr>
+ ${d.chars.map(c=>`<tr><td>${esc(c.name)}</td><td class="mut">${esc(c.uid)}</td><td>${esc(c.gender)}</td><td>${c.level}</td><td>${c.gold}</td><td>${c.stamina}/${c.mood}</td><td>${esc(c.title)}</td>
+ <td><button onclick="editChar('${esc(c.uid)}')">编辑</button></td></tr>`).join("")}</table><div id="cedit"></div>`}
+async function editChar(uid){const d=await call(`/admin/api/char?gid=${encodeURIComponent(GID)}&uid=${encodeURIComponent(uid)}`);const c=d.char;
+ $("#cedit").innerHTML=`<div class="card" style="margin-top:14px"><h3>编辑 · ${esc(c.name)}</h3>
+ <div class="grid">${fld("名字","ce_name",c.name)}${fld("性别","ce_gender",c.gender)}${fld("称号","ce_title",c.title)}${fld("性格标签(逗号分隔)","ce_tags",(c.tags||[]).join(", "))}</div>
+ <label>背景设定</label><textarea class="w" id="ce_back">${esc(c.backstory)}</textarea>
+ <div class="grid">${fld("等级","ce_level",c.level,"num")}${fld("经验","ce_exp",c.exp,"num")}${fld("金币","ce_gold",c.gold,"num")}${fld("体力","ce_stamina",c.stamina,"num")}${fld("心情","ce_mood",c.mood,"num")}</div>
+ <label>六维(力量/敏捷/智力/魅力/幸运/精神)</label>
+ <div class="row">${["force","agility","intellect","charm","luck","sanity"].map(k=>`<input type="number" style="width:90px" id="ce_${k}" value="${(c.attrs||{})[k]??0}" title="${k}">`).join("")}</div>
+ <label>flags(JSON)</label><textarea class="w" id="ce_flags">${esc(JSON.stringify(c.flags||{},null,1))}</textarea>
+ <div class="row"><button class="pri" onclick="saveChar('${esc(uid)}')">保存</button>
+ <button class="danger" onclick="delChar('${esc(uid)}','${esc(c.name)}')">删除角色</button>
+ <span class="mut">删除会连同日志/记忆/羁绊一并清空</span></div>
+ <h3 style="margin-top:16px">羁绊</h3>
+ <table>${d.rels.map(r=>`<tr><td>${esc(r.name)}</td><td class="mut">${esc(r.uid)}</td>
+ <td><input type="number" style="width:80px" id="rel_${esc(r.uid)}" value="${r.score}"></td><td>${esc(r.state||"-")}</td>
+ <td><button onclick="saveRel('${esc(uid)}','${esc(r.uid)}')">保存</button></td></tr>`).join("")||"<tr><td class='mut'>暂无</td></tr>"}</table>
+ <h3 style="margin-top:16px">最近日志</h3><pre>${esc(d.logs.map(l=>`[${new Date((l.ts||0)*1000).toLocaleString()}] ${l.text}`).join("\n")||"无")}</pre></div>`}
+async function saveChar(uid){const body={gid:GID,uid,name:v("#ce_name"),gender:v("#ce_gender"),title:v("#ce_title"),backstory:v("#ce_back"),
+ tags:ls("#ce_tags"),level:vn("#ce_level"),exp:vn("#ce_exp"),gold:vn("#ce_gold"),stamina:vn("#ce_stamina"),mood:vn("#ce_mood"),
+ attrs:{force:vn("#ce_force"),agility:vn("#ce_agility"),intellect:vn("#ce_intellect"),charm:vn("#ce_charm"),luck:vn("#ce_luck"),sanity:vn("#ce_sanity")}};
+ try{JSON.parse(v("#ce_flags")||"{}");body.flags=JSON.parse(v("#ce_flags")||"{}")}catch(e){return tip("flags 不是合法 JSON")}
+ try{await call("/admin/api/char",{method:"POST",body});tip("已保存",1);rgChars()}catch(e){tip(e.message)}}
+async function delChar(uid,name){if(!confirm(`确定删除「${name}」?日志/记忆/羁绊一并清空,不可恢复。`))return;
+ try{await call("/admin/api/char/delete",{method:"POST",body:{gid:GID,uid}});tip("已删除",1);rgChars()}catch(e){tip(e.message)}}
+async function saveRel(a,b){try{await call("/admin/api/rel",{method:"POST",body:{gid:GID,a,b,score:vn("#rel_"+b)}});tip("羁绊已保存",1)}catch(e){tip(e.message)}}
+
+/* ── 世界 ── */
+let NPCS=[];
+async function rgWorld(){const d=await call("/admin/api/world?gid="+encodeURIComponent(GID));
+ const cur=d.worlds.find(w=>w.visited)||d.worlds[0];
+ if(!cur){$("#main").innerHTML='<p class="mut">该群还没有世界。</p>';return}
+ NPCS=cur.npcs||[];
+ $("#main").innerHTML=`<div class="card"><h3>当前世界 · 《${esc(cur.name)}》${cur.visited?"":"(未降临)"}</h3>
+ <div class="grid">${fld("名字","w_name",cur.name)}${fld("题材","w_genre",cur.genre)}${fld("氛围","w_atmosphere",cur.atmosphere)}</div>
+ <label>描述</label><textarea class="w" id="w_desc">${esc(cur.desc)}</textarea>
+ <div class="grid">${fld("规则(每行一条)","w_rules",(cur.rules||[]).join("\n"),"textarea")}${fld("独特之处(每行一条)","w_features",(cur.features||[]).join("\n"),"textarea")}</div>
+ <div class="row"><button class="pri" onclick="saveWorld()">保存世界</button></div></div>
+ <div class="card"><h3>NPC(保存为整表替换)</h3>
+ <table id="npcT"><tr><th>名字</th><th>身份</th><th>人设</th><th>钩子</th><th>日常</th><th>怪癖</th><th></th></tr>
+ ${NPCS.map((n,i)=>npcRow(n,i)).join("")}</table>
+ <div class="row"><button onclick="addNpc()">+ 添加 NPC</button><button class="pri" onclick="saveNpcs()">保存全部 NPC</button></div></div>
+ <div class="card"><h3>全部世界</h3>${d.worlds.map(w=>`<span class="pill">${w.visited?"✅":"🔒"} ${esc(w.name)} [${esc(w.genre)}]</span>`).join("")}</div>`}
+function npcRow(n,i){return `<tr>
+ <td><input value="${esc(n.name)}" onchange="NPCS[${i}].name=this.value" style="width:90px"></td>
+ <td><input value="${esc(n.role)}" onchange="NPCS[${i}].role=this.value" style="width:110px"></td>
+ <td><input value="${esc(n.persona)}" onchange="NPCS[${i}].persona=this.value" style="width:180px"></td>
+ <td><input value="${esc(n.hook)}" onchange="NPCS[${i}].hook=this.value" style="width:140px"></td>
+ <td><input value="${esc(n.daily)}" onchange="NPCS[${i}].daily=this.value" style="width:120px"></td>
+ <td><input value="${esc(n.quirk)}" onchange="NPCS[${i}].quirk=this.value" style="width:110px"></td>
+ <td>${n.builtin?'<span class="pill">系统</span>':""}<button class="danger" onclick="NPCS.splice(${i},1);rgWorld()">删</button></td></tr>`}
+function addNpc(){NPCS.push({name:"新NPC",role:"居民",persona:"",hook:"",daily:"",quirk:"",builtin:0});rgWorld()}
+async function saveWorld(){try{await call("/admin/api/world",{method:"POST",body:{gid:GID,
+ name:v("#w_name"),genre:v("#w_genre"),atmosphere:v("#w_atmosphere"),desc:v("#w_desc"),rules:ls("#w_rules"),features:ls("#w_features")}});tip("世界已保存",1)}catch(e){tip(e.message)}}
+async function saveNpcs(){try{await call("/admin/api/world",{method:"POST",body:{gid:GID,npcs:NPCS}});tip("NPC 已保存",1)}catch(e){tip(e.message)}}
+
+/* ── 事件 ── */
+async function rgEvents(){const d=await call("/admin/api/events?gid="+encodeURIComponent(GID));
+ $("#main").innerHTML=`<div class="card"><h3>待抉择(${d.events.filter(e=>e.state==="pending").length})</h3>
+ ${d.events.filter(e=>e.state==="pending").map(e=>`<div style="border-bottom:1px solid var(--line);padding:8px 0">
+ <b>#${e.id} ${esc(e.title)}</b> <span class="pill">${esc(e.uid||"全员")}</span><button style="float:right" class="danger" onclick="expireEvent(${e.id})">平淡收场</button>
+ <div class="mut">${esc(e.scene)}</div></div>`).join("")||'<p class="mut">无</p>'}</div>
+ <div class="card"><h3>最近事件</h3><table><tr><th>#</th><th>标题</th><th>归属</th><th>状态</th><th>已选</th></tr>
+ ${d.events.map(e=>`<tr><td>${e.id}</td><td>${esc(e.title)}</td><td class="mut">${esc(e.uid||"全员")}</td>
+ <td>${e.state==="pending"?'<span class="ok">待抉择</span>':esc(e.state)}</td><td>${e.chosen>=0?esc((e.options[e.chosen]||{}).label||""):"-"}</td></tr>`).join("")}</table></div>`}
+async function expireEvent(id){try{await call("/admin/api/event/expire",{method:"POST",body:{gid:GID,id}});tip("已收场",1);rgEvents()}catch(e){tip(e.message)}}
+
+/* ── 日志 / 记忆 ── */
+let LOG_OFF=0,LOG_UID="",MEM_UID="";
+async function rgLogs(){const chars=await call("/admin/api/chars?gid="+encodeURIComponent(GID));
+ const q=`gid=${encodeURIComponent(GID)}&offset=${LOG_OFF}&limit=50`+(LOG_UID?`&uid=${encodeURIComponent(LOG_UID)}`:"");
+ const d=await call("/admin/api/logs?"+q);
+ $("#main").innerHTML=`<div class="row">角色筛选:<select onchange="LOG_UID=this.value;LOG_OFF=0;rgLogs()">
+ <option value="">全部</option>${chars.chars.map(c=>`<option value="${esc(c.uid)}" ${c.uid===LOG_UID?"selected":""}>${esc(c.name)}</option>`).join("")}</select>
+ <span class="mut">共 ${d.total} 条</span></div>
+ <table><tr><th>时间</th><th>角色</th><th>类型</th><th>内容</th></tr>
+ ${d.logs.map(l=>`<tr><td class="mut">${new Date((l.ts||0)*1000).toLocaleString()}</td><td class="mut">${esc(l.uid||"-")}</td><td>${esc(l.kind)}</td><td>${esc(l.text)}</td></tr>`).join("")}</table>
+ <div class="row"><button onclick="LOG_OFF=Math.max(0,LOG_OFF-50);rgLogs()">上一页</button><button onclick="LOG_OFF+=50;rgLogs()">下一页</button></div>`}
+async function rgMems(){const chars=await call("/admin/api/chars?gid="+encodeURIComponent(GID));
+ const d=await call("/admin/api/memories?gid="+encodeURIComponent(GID)+(MEM_UID?`&uid=${encodeURIComponent(MEM_UID)}`:""));
+ $("#main").innerHTML=`<div class="row">角色筛选:<select onchange="MEM_UID=this.value;rgMems()">
+ <option value="">全部</option>${chars.chars.map(c=>`<option value="${esc(c.uid)}" ${c.uid===MEM_UID?"selected":""}>${esc(c.name)}</option>`).join("")}</select>
+ <button class="danger" onclick="delMems()">删除选中</button><span class="mut">共 ${d.memories.length} 条</span></div>
+ <table><tr><th></th><th>id</th><th>角色</th><th>范围</th><th>内容</th></tr>
+ ${d.memories.map(m=>`<tr><td><input type="checkbox" class="mk" value="${m.id}"></td><td>${m.id}</td><td class="mut">${esc(m.uid||"-")}</td><td>${esc(m.scope)}</td><td>${esc(m.text)}</td></tr>`).join("")}</table>`}
+async function delMems(){const ids=[...document.querySelectorAll(".mk:checked")].map(x=>parseInt(x.value,10));
+ if(!ids.length)return tip("未勾选任何记忆");if(!confirm(`删除 ${ids.length} 条记忆?`))return;
+ try{await call("/admin/api/memory/delete",{method:"POST",body:{gid:GID,ids}});tip("已删除",1);rgMems()}catch(e){tip(e.message)}}
+
+/* ── 配置 ── */
+async function rgConfig(){const d=await call("/admin/api/config?gid="+encodeURIComponent(GID));
+ $("#main").innerHTML=`<div class="card"><h3>群参数(覆盖全局默认)</h3><div class="grid">
+ ${fld("每日事件数下限","cf_min",d.event_min,"num")}${fld("每日事件数上限","cf_max",d.event_max,"num")}
+ ${fld("世界变动概率 %","cf_shift",d.shift_percent,"num")}${fld("用户世界份额 %","cf_share",d.user_world_share,"num")}
+ ${fld("穿越冷却(小时)","cf_cd",d.travel_cooldown_h,"num")}</div>
+ <div class="row"><button class="pri" onclick="saveCfg()">保存</button></div></div>`}
+async function saveCfg(){try{await call("/admin/api/config",{method:"POST",body:{gid:GID,
+ event_min:vn("#cf_min"),event_max:vn("#cf_max"),shift_percent:vn("#cf_shift"),user_world_share:vn("#cf_share"),travel_cooldown_h:vn("#cf_cd")}});tip("已保存",1)}catch(e){tip(e.message)}}
+
+/* ── 操作 ── */
+async function rgOps(){$("#main").innerHTML=`<div class="card"><h3>手动触发(结果会照常推送到群里)</h3><div class="row">
+ <button onclick="doTrigger('event')">触发一次事件</button>
+ <button onclick="doTrigger('shift')">触发世界变动</button>
+ <button onclick="doTrigger('morning')">生成晨报</button></div><pre id="tres">等待操作…</pre></div>`}
+async function doTrigger(kind){$("#tres").textContent="执行中…";
+ try{const d=await call("/admin/api/trigger",{method:"POST",body:{gid:GID,kind}});$("#tres").textContent=d.message;tip("已完成",1)}catch(e){$("#tres").textContent="失败:"+e.message;tip(e.message)}}
+
+nav();connect();
+</script></body></html>

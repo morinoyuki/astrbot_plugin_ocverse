@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 # 六维属性: (key, 中文名)
 ATTRS = [
     ("force", "力量"),
@@ -13,6 +15,50 @@ ATTRS = [
 ]
 ATTR_KEYS = [k for k, _ in ATTRS]
 ATTR_NAMES = dict(ATTRS)
+
+# 自定义关系黑名单:亲密/恋爱向关系不允许自定义(走告白/求婚事件),只允许搞怪/生活向称谓
+INTIMATE_BOND_WORDS = (
+    "恋人", "情侣", "情人", "夫妻", "夫妇", "老婆", "老公", "妻子", "丈夫", "太太",
+    "媳妇", "对象", "女友", "男友", "女朋友", "男朋友", "爱人", "伴侣", "娘子", "相公",
+    "未婚夫", "未婚妻", "正宫", "心上人", "亲爱的", "宝贝", "亲亲", "约会", "恋爱",
+    "撩", "暧昧", "床", "吻",
+)
+
+
+def is_intimate_bond(label: str) -> bool:
+    """自定义关系称谓是否命中亲密关系黑名单(子串匹配)。"""
+    s = str(label or "")
+    return any(w in s for w in INTIMATE_BOND_WORDS)
+
+
+# ── 事件卡编号标签:渲染于卡片底部,并随消息附同号纯文本;群友引用(回复)
+# 事件卡后发送「选择」,指令层从引用文本/图片落盘名解析编号,精确定位事件 ──
+_TAG_RE = re.compile(r"№\s*([0-9a-zA-Z]{1,10})")
+
+
+def event_tag(eid: int) -> str:
+    """事件编号 → 「№+base36」短标签,如 12345 → №9ix。"""
+    n = int(eid)
+    if n <= 0:
+        return ""
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    s = ""
+    while n:
+        s = digits[n % 36] + s
+        n //= 36
+    return "№" + s
+
+
+def parse_event_tag(text: str) -> int | None:
+    """从文本中提取事件编号;无标签/非法返回 None。"""
+    m = _TAG_RE.search(text or "")
+    if not m:
+        return None
+    try:
+        return int(m.group(1), 36)
+    except ValueError:
+        return None
+
 
 # 资源
 RES_KEYS = {"stamina": "体力", "mood": "心情", "gold": "金币"}

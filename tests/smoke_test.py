@@ -152,9 +152,29 @@ def fake_llm(system: str, user: str) -> str:
     if "生成一次突发遭遇" in user:
         return json.dumps(EVENT_JSON, ensure_ascii=False)
     if "请结算" in user:
+        assert "连贯性铁律" in user, "结算 prompt 缺少连贯性约束(事件与后续割裂回归)"
         return json.dumps(RESOLVE_JSON, ensure_ascii=False)
     if "写出这段互动" in user:
+        assert "切题铁律" in user, "互动 prompt 缺少切题约束(跑题回归)"
         return json.dumps(INTERACT_JSON, ensure_ascii=False)
+    if "判断是否接受" in user:
+        # 自定义关系提案:必须携带切题约束
+        assert "切题铁律" in user, "关系提案 prompt 缺少切题约束"
+        assert "严禁发展出恋人/情侣/夫妻等亲密内容" in user
+        return json.dumps({
+            "agree": True,
+            "narration": "阿凛一本正经地想当他爹,老徐上下打量了她三秒,叹口气认了。",
+            "dialogues": [
+                {"speaker": "阿凛", "text": "从今天起,我就是你爸爸。"},
+                {"speaker": "老徐", "text": "……行吧,爸。"},
+            ],
+            "effects": {"mood": 6, "exp": 4},
+            "memory": "阿凛成了老徐的爸爸,老徐认了。",
+        }, ensure_ascii=False)
+    if "与角色进行多轮对话" in user:
+        # NPC 互动(resolve_npc):必须携带切题铁律
+        assert "切题铁律" in user, "NPC 互动 prompt 缺少切题约束(跑题回归)"
+        return json.dumps(NPC_JSON, ensure_ascii=False)
     if "以NPC的口吻" in user:
         return json.dumps(NPC_JSON, ensure_ascii=False)
     if "抵达播报" in user:
@@ -210,6 +230,14 @@ def fake_llm(system: str, user: str) -> str:
     if "执行行动" in user:
         return json.dumps(ACT_JSON, ensure_ascii=False)
     raise AssertionError("fake_llm 未覆盖的调用: " + user[:60])
+
+
+def _delivered(db, v: dict) -> dict:
+    """模拟卡片已真正送达(main 层发送成功时会调用 mark_event_sent);
+    只有发送过的事件才可被「选择」结算,故测试中 fire_event 后需补标记。"""
+    if isinstance(v, dict) and v.get("event_id"):
+        db.mark_event_sent(v["event_id"])
+    return v
 
 
 async def check_datetime_injection():
@@ -359,11 +387,12 @@ async def check_life_multi():
     game.create_char("g", "u1", "阿凛", "女", ["冷静"], "s")
     game.create_char("g", "u2", "老徐", "男", ["仗义"], "k")
     game.create_char("g", "u3", "森森", "男", ["天才"], "s2")
+    game.create_char("g", "u4", "十三", "女", ["神秘"], "s3")  # 保证存在未入局的局外人
     # 强制命中生活群像事件
     _orig = _gmod.random.random
     _gmod.random.random = lambda: 0.0
     try:
-        v = await game.fire_event("g")
+        v = _delivered(db, await game.fire_event("g"))
     finally:
         _gmod.random.random = _orig
     assert v and v["type"] == "event" and v["payload"].get("participants"), v
@@ -371,11 +400,393 @@ async def check_life_multi():
     assert 2 <= len(parts) <= 3, parts
     p0, p1 = parts[0]["uid"], parts[1]["uid"]
     r0 = db.get_rel("g", p0, p1)
+    multi = db.get_event(v["event_id"])
+    assert multi and multi.kind == "life_multi" and multi.state == "pending"
+    # 多人事件只有当事人能抉择:非参与者不能替他们做主
+    all_uids = {p["uid"] for p in parts}
+    outsider = next((c for c in ("u1", "u2", "u3", "u4") if c not in all_uids), None)
+    assert outsider, "4 人群像最多 3 人参与,必有局外人"
+    assert game.choose_locked(multi, outsider), "非参与者应被锁定"
+    assert not game.choose_locked(multi, p0), "参与者不应被锁定"
+    # 未引用回落时,锁定事件会被跳过:局外人视角下可结算列表不含这张多人卡
+    mine = [e for e in db.pending_sent_events("g", outsider) if not game.choose_locked(e, outsider)]
+    assert all(e.id != multi.id for e in mine), "回落列表不应包含局外人的多人事件"
     res = await game.choose("g", p0, 0)
     assert res["type"] == "result" and res["changes"], res
     assert db.get_rel("g", p0, p1) != r0, "羁绊应随生活交集变化"
-    print("✓ 群像生活事件:多人生成→多角色结算→羁绊变化")
+    try:
+        await game.choose("g", outsider, 0, ev=multi)
+        raise AssertionError("非参与者竟能抉择多人事件")
+    except GameError as e:
+        assert "没带上你" in str(e), e
+    # 未引用回落时,锁定事件会被跳过:局外人视角下最新可结算的不是这张多人卡
+    mine = [e for e in db.pending_sent_events("g", outsider) if not game.choose_locked(e, outsider)]
+    assert all(e.id != multi.id for e in mine), "回落列表不应包含局外人的多人事件"
+    print("✓ 群像生活事件:多人生成→多角色结算→羁绊变化→非参与者禁抉择")
     db.close()
+
+
+async def check_dialogue_guard():
+    """对话守卫:对方名字没对上但确为双向对话 → 保留气泡;真独角戏才丢弃。
+
+    回归背景:此前只要 counterpart 名字没在 speaker 里出现,重试一次失败后
+    就把整段对话丢弃,导致互动卡经常一个 IM 气泡都不剩。
+    """
+    from ocverse.llm_engine import Brain
+
+    # 1) 双向对话但说话人用了代称(counterpart 名字没对上)→ 纠正重试一次后保留
+    calls = {"n": 0}
+
+    def alias_llm(system, user):
+        calls["n"] += 1
+        return json.dumps({
+            "narration": "两人在雾里聊了起来。",
+            "dialogues": [
+                {"speaker": "阿凛", "text": "这雾真大。"},
+                {"speaker": "神秘少女", "text": "……嗯,大雾容易迷路。"},
+            ],
+            "effects": {},
+        }, ensure_ascii=False)
+
+    b = Brain(raw_call=alias_llm)
+    d = await b._ask_fixed_dialogues("sys", "user", counterpart="千都世", limit=6)
+    assert calls["n"] == 2, calls  # 对方名未对上 → 纠正重试一次
+    assert len(d.get("dialogues") or []) == 2, d  # 仍是双向对话 → 保留(不再整段丢弃)
+    print("✓ 对话守卫:代称说话人不再连坐丢弃,IM 气泡照常渲染")
+
+    # 2) 真独角戏 → 重试后仍独角戏 → 丢弃
+    calls2 = {"n": 0}
+
+    def mono_llm(system, user):
+        calls2["n"] += 1
+        return json.dumps({
+            "narration": "自言自语。",
+            "dialogues": [{"speaker": "阿凛", "text": "有人吗?"}],
+            "effects": {},
+        }, ensure_ascii=False)
+
+    b2 = Brain(raw_call=mono_llm)
+    d2 = await b2._ask_fixed_dialogues("sys", "user", counterpart="老铁", limit=6)
+    assert calls2["n"] == 2 and d2.get("dialogues") == []
+    print("✓ 对话守卫:真独角戏仍被丢弃(宁缺毋滥)")
+
+
+async def check_event_quote_binding():
+    """事件卡 №编号标签 + 引用识别:多张事件卡并存时,「选择」按引用精确结算对应事件。
+
+    事件卡图片底部渲染 №编号,消息链附同号纯文本;指令层从引用(回复)消息
+    解析编号定位事件 —— 无需串行化,也不会结算错卡。
+    """
+    import ocverse.config as C
+    from ocverse.game import Game, GameError
+
+    tmpd = tempfile.mkdtemp(prefix="ocverse_quote_")
+    db = Database(os.path.join(tmpd, "t.sqlite3"))
+    emb = HashEmbedder()
+    mem = MemoryStore(db, emb, emb, top_k=6)
+    brain = Brain(raw_call=fake_llm)
+    game = Game(db, brain, mem, lambda k, d=None: CFG.get(k, d))
+    await game.init_world("gq", "一座城市", "admin")
+    game.create_char("gq", "u1", "阿凛", "女", ["冷静"], "s")
+    game.create_char("gq", "u2", "老徐", "男", ["仗义"], "k")
+
+    # 1) №标签编解码往返(含夹在普通文本里)
+    for eid in (1, 35, 36, 12345, 999999):
+        assert C.parse_event_tag(C.event_tag(eid)) == eid
+        assert C.parse_event_tag(f"随便一句话 {C.event_tag(eid)} 回复本卡") == eid
+    assert C.parse_event_tag("没有标签的普通消息") is None
+    print("✓ 事件№标签:base36 编解码往返 + 文本提取")
+
+    # 2) 多张事件卡并存(不串行),引用识别精确结算指定那张
+    v1 = _delivered(db, await game.fire_event("gq", char_uid="u1"))
+    v2 = _delivered(db, await game.fire_event("gq", char_uid="u1"))
+    assert db.get_event(v1["event_id"]).state == "pending", "不再串行:两张卡应同时待抉择"
+    assert db.get_event(v2["event_id"]).state == "pending"
+    cands = db.pending_sent_events("gq", "u1")
+    assert [e.id for e in cands] == [v2["event_id"], v1["event_id"]], "可结算列表应新→旧"
+    # 模拟引用旧卡:№标签识别出 v1 → 精确结算旧事件
+    quoted_tag = C.event_tag(v1["event_id"])
+    assert C.parse_event_tag(quoted_tag) == v1["event_id"]
+    res1 = await game.choose("gq", "u1", 0, ev=db.get_event(v1["event_id"]))
+    assert res1["type"] == "result" and res1["event_title"] == v1["payload"]["title"], res1
+    assert db.get_event(v1["event_id"]).state == "resolved"
+    # 未引用 → 回落到最新一张已送达事件
+    res2 = await game.choose("gq", "u1", 0)
+    assert res2["event_title"] == v2["payload"]["title"], res2
+    print("✓ 引用识别:多卡并存按№标签精确结算对应事件,未引用回落最新一张")
+
+    # 3) 未发送的事件不进入可回落结算列表(sent 过滤)
+    vu = await game.fire_event("gq", char_uid="u1")  # 不标记送达(模拟未投递)
+    assert vu and vu["type"] == "event"
+    assert all(e.id != vu["event_id"] for e in db.pending_sent_events("gq", "u1"))
+    print("✓ 未发送事件不可回落结算(引用不受限,但兜底只认已送达卡)")
+
+    # 4) 归属守卫:别人的个人事件不可代为抉择
+    v3 = _delivered(db, await game.fire_event("gq", char_uid="u1"))
+    try:
+        await game.choose("gq", "u2", 0, ev=db.get_event(v3["event_id"]))
+        raise AssertionError("他人事件未被拦截")
+    except GameError as e:
+        assert "让 TA 来抉择" in str(e), e
+    print("✓ 引用结算归属守卫:个人事件仅本人可抉择(群事件除外)")
+
+    db.close()
+
+
+class _FakeURL:
+    def __init__(self, path):
+        self.path = path
+
+
+class _FakeClient:
+    host = "127.0.0.1"
+
+
+class _FakeQuery:
+    def __init__(self, items):
+        self._items = list(items)
+
+    def multi_items(self):
+        return list(self._items)
+
+
+class _FakeForm:
+    def multi_items(self):
+        return []
+
+
+class _FakeReq:
+    """最小仿 Dashboard 请求对象,供 PluginRequest 包装。"""
+
+    def __init__(self, method="GET", query=None, body=None):
+        self.method = method
+        self.url = _FakeURL("/test")
+        self.headers = {}
+        self.cookies = {}
+        self.client = _FakeClient()
+        self.content_type = "application/json"
+        self.query_params = _FakeQuery((query or {}).items())
+        self._body = json.dumps(body or {}).encode()
+
+    async def body(self):
+        return self._body
+
+    async def json(self):
+        try:
+            return json.loads(self._body)
+        except Exception:
+            return {}
+
+    async def form(self):
+        return _FakeForm()
+
+
+async def check_admin_server():
+    """后台管理(Dashboard 集成):注册路由 + 处理器全链路(鉴权由 Dashboard 负责)。
+
+    直接用 astrbot.api.web.bind_request_context 绑定假请求驱动处理器,
+    同时验证 register_web_api 的真实注册。"""
+    from astrbot.api.web import PluginRequest, bind_request_context
+
+    from ocverse.admin import AdminPanel
+    from ocverse.game import Game
+
+    tmpd = tempfile.mkdtemp(prefix="ocverse_admin_")
+    db = Database(os.path.join(tmpd, "t.sqlite3"))
+    emb = HashEmbedder()
+    mem = MemoryStore(db, emb, emb, top_k=6)
+    brain = Brain(raw_call=fake_llm)
+    game = Game(db, brain, mem, lambda k, d=None: CFG.get(k, d))
+    await game.init_world("ga", "一座城市", "admin")
+    game.create_char("ga", "u1", "阿凛", "女", ["冷静"], "s")
+    game.create_char("ga", "u2", "老徐", "男", ["仗义"], "k")
+
+    class _Ops:
+        async def trigger(self_, gid, kind):
+            v = await game.fire_event(gid)
+            return f"已触发 {kind}:#" + str(v["event_id"])
+
+        async def delete_char(self_, gid, uid):
+            return game.delete_char(gid, uid)
+
+    # 1) 真实注册:register_web_api 收到带插件名前缀的路由
+    registered = []
+
+    class _Ctx:
+        def register_web_api(self_, route, handler, methods, desc):
+            registered.append((route, methods))
+
+    panel = AdminPanel(db, game, lambda k, d=None: CFG.get(k, d), _Ops(),
+                       plugin_name="astrbot_plugin_ocverse")
+    panel.register(_Ctx())
+    assert any(r == "/astrbot_plugin_ocverse/admin/api/overview" for r, _ in registered), registered
+    assert all(m == ["GET"] or m == ["POST"] for _, m in registered)
+
+    async def call(handler, method="GET", query=None, body=None):
+        req = PluginRequest(_FakeReq(method, query, body),
+                            path_params={}, plugin_name="astrbot_plugin_ocverse", username="admin")
+        with bind_request_context(req):
+            resp = await handler()
+        # 生产环境由 Dashboard 把 dict 转 JSONResponse;测试直接兼容两种形态
+        return json.loads(resp.body) if hasattr(resp, "body") else resp
+
+    # 2) 总览
+    j = await call(panel.api_overview, query={"gid": "ga"})
+    assert j["ok"] and j["data"]["groups"][0]["gid"] == "ga" and j["data"]["groups"][0]["config"]
+    # 3) 角色详情 + 编辑(标量/标签/六维)
+    j = await call(panel.api_char_detail, query={"gid": "ga", "uid": "u1"})
+    assert j["ok"] and j["data"]["char"]["name"] == "阿凛" and isinstance(j["data"]["logs"], list)
+    body = {"name": "阿凛改", "gold": 777, "mood": 88, "tags": ["冷静", "改"],
+            "attrs": {"force": 11, "agility": 22, "intellect": 33, "charm": 44, "luck": 55, "sanity": 66}}
+    j = await call(panel.api_char_edit, method="POST", query={"gid": "ga", "uid": "u1"}, body=body)
+    assert j["ok"] and j["data"]["gold"] == 777 and j["data"]["name"] == "阿凛改" and j["data"]["attrs"]["charm"] == 44
+    c = db.get_char("ga", "u1")
+    assert c.gold == 777 and c.attrs["force"] == 11
+    # 4) 世界 + NPC 整表替换
+    j = await call(panel.api_world, query={"gid": "ga"})
+    assert j["ok"] and j["data"]["worlds"]
+    npcs = [{"name": "管理新NPC", "role": "铁匠", "persona": "沉默寡言", "builtin": 0}]
+    j = await call(panel.api_world_edit, method="POST", query={"gid": "ga"},
+                   body={"npcs": npcs, "desc": "新描述"})
+    assert j["ok"] and j["data"]["npcs"][0]["name"] == "管理新NPC"
+    assert db.cur_world("ga").desc == "新描述"
+    # 5) 事件列表 + 强制收场
+    _delivered(db, await game.fire_event("ga", char_uid="u1"))
+    j = await call(panel.api_events, query={"gid": "ga"})
+    ev = next(e for e in j["data"]["events"] if e["state"] == "pending")
+    j = await call(panel.api_event_expire, method="POST", body={"gid": "ga", "id": ev["id"]})
+    assert j["ok"] and j["data"]["expired"]
+    # 6) 日志 / 记忆 / 羁绊
+    j = await call(panel.api_logs, query={"gid": "ga"})
+    assert j["ok"] and j["data"]["total"] > 0
+    await mem.remember("ga", "u1", "char", "一条管理测试记忆")
+    j = await call(panel.api_memories, query={"gid": "ga"})
+    mid = j["data"]["memories"][0]["id"]
+    j = await call(panel.api_mem_delete, method="POST", body={"gid": "ga", "ids": [mid]})
+    assert j["ok"] and j["data"]["deleted"] == 1
+    j = await call(panel.api_rel, method="POST", query={"gid": "ga"}, body={"a": "u1", "b": "u2", "score": 55})
+    assert j["ok"] and j["data"]["score"] == 55
+    # 7) 群配置编辑 + 非法校验
+    j = await call(panel.api_config_edit, method="POST", query={"gid": "ga"},
+                   body={"event_min": 2, "event_max": 5, "shift_percent": 10})
+    assert j["ok"] and j["data"]["event_max"] == 5
+    j = await call(panel.api_config_edit, method="POST", query={"gid": "ga"},
+                   body={"event_min": 9, "event_max": 3})
+    assert not j["ok"] and "下限" in j["error"]
+    # 8) 触发(走注入的 ops)+ 删除角色
+    j = await call(panel.api_trigger, method="POST", body={"gid": "ga", "kind": "event"})
+    assert j["ok"] and "已触发" in j["data"]["message"]
+    j = await call(panel.api_char_delete, method="POST", body={"gid": "ga", "uid": "u2"})
+    assert j["ok"] and j["data"]["deleted"] == "老徐" and db.get_char("ga", "u2") is None
+    # 9) 管理页 HTML 可构建(含 tabs 与 bridge 兑底)
+    html = __import__("ocverse.admin", fromlist=["build_page_html"]).build_page_html()
+    assert "后台管理" in html and "AstrBotPluginPage" in html
+    print("✓ 后台管理(Dashboard集成):注册/总览/角色/世界NPC/事件/日志记忆/配置/触发/删除 全链路")
+    db.close()
+
+
+async def check_bond_flow():
+    """自定义搞怪关系:提议→AI判定;亲密黑名单;重复拦截;反向独立;被拒不覆盖;删除清理。"""
+    from ocverse.game import Game, GameError
+    from ocverse.llm_engine import Brain
+
+    tmpd = tempfile.mkdtemp(prefix="ocverse_bond_")
+    db = Database(os.path.join(tmpd, "t.sqlite3"))
+    emb = HashEmbedder()
+    mem = MemoryStore(db, emb, emb, top_k=6)
+    cfg = lambda k, d=None: CFG.get(k, d)
+    game = Game(db, Brain(raw_call=fake_llm), mem, cfg)
+    await game.init_world("gb", "一座城市", "admin")
+    game.create_char("gb", "u1", "阿凛", "女", ["冷静"], "s")
+    game.create_char("gb", "u2", "老徐", "男", ["仗义"], "k")
+
+    # 1) 提议被 AI 判定接受
+    v = await game.propose_bond("gb", "u1", "u2", "爸爸")
+    assert v["type"] == "result" and "答应" in v["chosen"], v
+    assert v["dialogues"] and any(d["speaker"] == "老徐" for d in v["dialogues"])
+    bond = db.get_bond("gb", "u1", "u2")
+    assert bond and bond["status"] == "agreed" and bond["label"] == "爸爸"
+    # 2) 同向重复提议被拦
+    try:
+        await game.propose_bond("gb", "u1", "u2", "爸爸")
+        raise AssertionError("重复提议未被拦截")
+    except GameError as e:
+        assert "不用再提" in str(e), e
+    # 3) 亲密关系黑名单:代码层直接拒绝,不走 LLM
+    for w in ("恋人", "情侣", "老婆", "对象", "小情人", "夫妻"):
+        try:
+            await game.propose_bond("gb", "u1", "u2", w)
+            raise AssertionError(f"亲密关系 {w} 未被拦截")
+        except GameError as e:
+            assert "亲密" in str(e) or "自定义" in str(e), e
+    # 4) 反向关系独立成立(u2 是 u1 的女仆)
+    v2 = await game.propose_bond("gb", "u2", "u1", "女仆")
+    assert "答应" in v2["chosen"] and db.get_bond("gb", "u2", "u1")["label"] == "女仆"
+    assert any(b["label"] == "爸爸" for b in game.bonds_of("gb", "u1"))
+    assert any(b["label"] == "女仆" for b in game.bonds_of("gb", "u1"))
+    print("✓ 自定义关系:AI判定成立/黑名单拦截/重复拦截/双向独立")
+
+    # 5) 被拒路径:不覆盖已成立的关系
+    def rej_llm(system, user):
+        return json.dumps({
+            "agree": False,
+            "narration": "老徐斜眼看了看,扭头就走,留下一句不认识。",
+            "dialogues": [{"speaker": "老徐", "text": "不认识,告辞。"},
+                           {"speaker": "阿凛", "text": "(伸手)别跑!"}],
+            "effects": {"mood": -2},
+            "memory": "提案被拒。",
+        }, ensure_ascii=False)
+
+    game2 = Game(db, Brain(raw_call=rej_llm), mem, cfg)
+    v3 = await game2.propose_bond("gb", "u1", "u2", "主人")
+    assert "拒绝" in v3["chosen"], v3
+    assert db.get_bond("gb", "u1", "u2")["label"] == "爸爸", "被拒不应覆盖已成立关系"
+    # 6) 自己对自己 / 对方无分身
+    for args in (("gb", "u1", "u1", "爸爸"), ("gb", "u1", "u_nope", "爸爸")):
+        try:
+            await game.propose_bond(*args)
+            raise AssertionError("非法提议未被拦截")
+        except GameError:
+            pass
+    # 7) 删除角色连带清理
+    game.delete_char("gb", "u1")
+    assert db.bonds_for("gb", "u2") == []
+    print("✓ 自定义关系:被拒不覆盖/非法拦截/删除角色连带清理")
+    db.close()
+
+
+async def check_migrations():
+    """迁移集中管理(migrations.py):旧库(无 sent/bonds)打开自动升级,新库直接最新。"""
+    import sqlite3
+
+    from ocverse.db import Database
+
+    p = os.path.join(tempfile.mkdtemp(prefix="ocverse_mig_"), "old.sqlite3")
+    raw = sqlite3.connect(p)
+    # 造一个 v0 旧库:events 无 sent 列、无 bonds 表(其余表由 BASE_SCHEMA 幂等补齐)
+    raw.executescript("""
+    CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, gid TEXT, uid TEXT, world_id INTEGER,
+      kind TEXT, state TEXT DEFAULT 'pending', payload TEXT, chosen INTEGER DEFAULT -1,
+      result TEXT DEFAULT '', effects TEXT DEFAULT '{}', created_at REAL, expires_at REAL);
+    INSERT INTO events (gid,uid,kind,state) VALUES ('g','u','solo','pending');
+    """)
+    raw.commit()
+    assert raw.execute("PRAGMA user_version").fetchone()[0] == 0
+    raw.close()
+
+    db = Database(p)
+    assert db.migrations, "旧库应产生迁移记录"
+    assert int(db.conn.execute("PRAGMA user_version").fetchone()[0]) >= 4
+    db.mark_event_sent(1)  # events.sent 已补列
+    assert db.latest_pending_event("g", "u") is not None
+    db.set_bond("g", "a", "b", "爸爸")  # bonds 表已建
+    assert db.get_bond("g", "a", "b")["label"] == "爸爸"
+    # 幂等:再开一次不再产生迁移
+    db2 = Database(p)
+    assert db2.migrations == []
+    print("✓ 迁移集中管理:旧库自动升级(sent列/bonds表/user_version),重复打开幂等")
+    db.close()
+    db2.close()
 
 
 async def check_world_life():
@@ -761,7 +1172,13 @@ async def main():
     ok += 1; print("✓ 被动事件兜底:无人引爆→活跃时段结束转主动")
 
     # 4. 事件 → 抉择(事件可能是别人的或全员事件,由归属者抉择)
-    v = await game.fire_event("g1")
+    import ocverse.game as _gmod
+    _orig_r = _gmod.random.random
+    _gmod.random.random = lambda: 0.5  # 跳过群像/群事件分支,得到个人事件
+    try:
+        v = _delivered(db, await game.fire_event("g1"))
+    finally:
+        _gmod.random.random = _orig_r
     assert v["type"] == "event" and len(v["payload"]["options"]) == 3
     ev_uid = v["uid"] or "u1"
     ev_before = db.get_char("g1", ev_uid)
@@ -1013,7 +1430,12 @@ async def main():
         rels=[("老徐", db.get_rel("g1", "u1", "u2"))],
         memories=["在雾里收到过一张暖船票", "和老铁换过一盏旧灯"],
         cfg=CFG, extra_badges=["次元旅者"])
-    ev_view = await game.fire_event("g1")
+    _orig_r2 = _gmod.random.random
+    _gmod.random.random = lambda: 0.5  # 同上:得到个人事件卡用于渲染
+    try:
+        ev_view = _delivered(db, await game.fire_event("g1"))
+    finally:
+        _gmod.random.random = _orig_r2
     cards["event"] = render_views([ev_view], CFG)
     res_view = await game.choose("g1", ev_view["uid"] or "u1", 1)
     cards["result"] = render_views([res_view], CFG)
@@ -1055,6 +1477,11 @@ if __name__ == "__main__":
     asyncio.run(check_datetime_injection())
     asyncio.run(check_special_state())
     asyncio.run(check_life_multi())
+    asyncio.run(check_event_quote_binding())
+    asyncio.run(check_dialogue_guard())
+    asyncio.run(check_admin_server())
+    asyncio.run(check_bond_flow())
+    asyncio.run(check_migrations())
     asyncio.run(check_world_life())
     asyncio.run(check_life_char())
     asyncio.run(check_npc_turnover())

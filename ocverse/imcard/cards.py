@@ -161,19 +161,19 @@ def event_card(view: dict, cfg: dict) -> list[Image.Image]:
     rows = []
     lead = view.get("char_name") or ""
     if lead:
-        rows.append(PillRow(r, f"◈ {view.get('world_name', '')} · 落在了 {lead} 头上"))
+        rows.append(PillRow(r, f"◈ {view.get('world_name', '')} · {lead} 的遭遇"))
     else:
-        rows.append(PillRow(r, f"◈ {view.get('world_name', '')} · 全员事件"))
+        rows.append(PillRow(r, f"◈ {view.get('world_name', '')} · 全员共同遭遇"))
     rows.append(_para(r, str(p.get("scene", "")), color=r.t.text, margin=(6, 6, 0, 6)))
     npc = p.get("npc")
     if npc:
         rows.append(EmptyRow(r, 4))
-        rows.append(DialogueRow(r, speaker=str(npc), spans=[md.Span("(有了动静)")]))
+        rows.append(DialogueRow(r, speaker=str(npc), spans=[md.Span("(就在旁边)")]))
     rows.append(EmptyRow(r, 6))
     for i, opt in enumerate(p.get("options") or [], 1):
         rows.append(ChoiceRow(r, i, str(opt.get("label", "?")), str(opt.get("hint", ""))))
     rows.append(EmptyRow(r, 4))
-    rows.append(_para(r, f"回复「/分身 选择 编号」做出抉择 · {view.get('expires_min', 45)} 分钟内有效",
+    rows.append(_para(r, f"回复本卡 +「/分身 选择 编号」做出抉择 · {view.get('expires_min', 45)} 分钟内有效",
                       size=int(r.font_size * 0.72), color=r.t.text_muted))
     return r.render_rows(rows, title=f"遭遇 · {p.get('title', '突发状况')}")
 
@@ -191,7 +191,7 @@ def result_card(view: dict, cfg: dict) -> list[Image.Image]:
     if changes:
         rows.append(EmptyRow(r, 4))
         rows.append(TagRow(r, changes))
-    return r.render_rows(rows, title="抉择 · 结算")
+    return r.render_rows(rows, title=view.get("card_title") or "抉择 · 结算")
 
 
 # ══════════════════════════ 世界卡 ══════════════════════════

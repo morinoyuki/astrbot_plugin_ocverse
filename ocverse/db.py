@@ -3,6 +3,7 @@
 - WAL 模式,NAS 友好(读写并行不阻塞)
 - 单连接 + RLock(插件全部运行在同一事件循环,低频写,足够)
 - 内存不缓存业务数据,查库即得,避免多处状态不一致
+- 表结构与版本化迁移统一在 migrations.py 管理(本文件只做数据读写)
 """
 
 from __future__ import annotations
@@ -13,132 +14,8 @@ import sqlite3
 import threading
 import time
 
+from .migrations import apply_migrations
 from .models import Char, EventRow, World
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS groups (
-  gid TEXT PRIMARY KEY,
-  cur_world_id INTEGER,
-  init_done INTEGER DEFAULT 0,
-  event_min INTEGER DEFAULT 0,
-  event_max INTEGER DEFAULT 0,
-  shift_percent INTEGER DEFAULT 0,
-  user_world_share INTEGER DEFAULT 0,
-  travel_cooldown_h INTEGER DEFAULT 6,
-  last_shift_at REAL DEFAULT 0,
-  last_travel_at REAL DEFAULT 0,
-  day_key TEXT DEFAULT '',
-  created_at REAL
-);
-CREATE TABLE IF NOT EXISTS worlds (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  gid TEXT NOT NULL,
-  name TEXT, genre TEXT, desc TEXT, atmosphere TEXT,
-  rules TEXT, features TEXT, npcs TEXT, event_ideas TEXT,
-  infra TEXT DEFAULT '[]', mainline TEXT DEFAULT '[]',
-  source TEXT DEFAULT 'llm',
-  visited INTEGER DEFAULT 0,
-  created_by TEXT DEFAULT '',
-  created_at REAL
-);
-CREATE TABLE IF NOT EXISTS chars (
-  gid TEXT NOT NULL,
-  uid TEXT NOT NULL,
-  name TEXT, gender TEXT, tags TEXT, backstory TEXT, avatar TEXT,
-  attrs TEXT, level INTEGER DEFAULT 1, exp INTEGER DEFAULT 0,
-  gold INTEGER DEFAULT 100, mood INTEGER DEFAULT 70, stamina INTEGER DEFAULT 90,
-  title TEXT DEFAULT '无名之辈', flags TEXT DEFAULT '{}',
-  created_at REAL, updated_at REAL,
-  PRIMARY KEY (gid, uid)
-);
-CREATE TABLE IF NOT EXISTS rels (
-  gid TEXT NOT NULL,
-  a TEXT NOT NULL,
-  b TEXT NOT NULL,
-  score INTEGER DEFAULT 0,
-  note TEXT DEFAULT '',
-  PRIMARY KEY (gid, a, b)
-);
-CREATE TABLE IF NOT EXISTS plans (
-  gid TEXT NOT NULL,
-  day TEXT NOT NULL,
-  items TEXT DEFAULT '[]',
-  PRIMARY KEY (gid, day)
-);
-CREATE TABLE IF NOT EXISTS events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  gid TEXT, uid TEXT, world_id INTEGER, kind TEXT,
-  state TEXT DEFAULT 'pending',
-  payload TEXT, chosen INTEGER DEFAULT -1, result TEXT DEFAULT '',
-  effects TEXT DEFAULT '{}',
-  created_at REAL, expires_at REAL
-);
-CREATE TABLE IF NOT EXISTS interactions (
-  gid TEXT NOT NULL,
-  name TEXT NOT NULL,
-  descr TEXT DEFAULT '',
-  by TEXT DEFAULT '',
-  created_at REAL,
-  PRIMARY KEY (gid, name)
-);
-CREATE TABLE IF NOT EXISTS timeline (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  gid TEXT, uid TEXT, ts REAL, kind TEXT, text TEXT, world_name TEXT DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS idx_timeline_gu ON timeline (gid, uid, id);
-CREATE TABLE IF NOT EXISTS memories (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  gid TEXT, uid TEXT DEFAULT '', scope TEXT DEFAULT 'char',
-  text TEXT, vec BLOB, ref TEXT DEFAULT '',
-  created_at REAL
-);
-CREATE INDEX IF NOT EXISTS idx_mem_g ON memories (gid, scope);
-CREATE TABLE IF NOT EXISTS kv (
-  gid TEXT NOT NULL,
-  key TEXT NOT NULL,
-  value TEXT DEFAULT '',
-  PRIMARY KEY (gid, key)
-);
-CREATE TABLE IF NOT EXISTS quests (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  gid TEXT NOT NULL,
-  uid TEXT NOT NULL,
-  day TEXT NOT NULL,
-  text TEXT,
-  hint TEXT DEFAULT '',
-  state TEXT DEFAULT 'open',
-  created_at REAL
-);
-CREATE INDEX IF NOT EXISTS idx_quests_gud ON quests (gid, uid, day);
-CREATE TABLE IF NOT EXISTS kb (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  gid TEXT NOT NULL,
-  source TEXT DEFAULT '',
-  theme TEXT DEFAULT '',
-  kind TEXT DEFAULT 'work',
-  content TEXT,
-  vec BLOB,
-  created_at REAL
-);
-CREATE INDEX IF NOT EXISTS idx_kb_gid ON kb (gid);
-CREATE TABLE IF NOT EXISTS plots (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  gid TEXT NOT NULL,
-  world_id INTEGER NOT NULL,
-  bid INTEGER NOT NULL,           -- 地块编号
-  kind TEXT DEFAULT '房',         -- 房/公寓/小屋/宅/铺
-  name TEXT DEFAULT '',
-  desc TEXT DEFAULT '',
-  owner_uid TEXT DEFAULT '',      -- 空 = 待售
-  price INTEGER DEFAULT 0,
-  level INTEGER DEFAULT 0,        -- 建筑等级
-  amenities TEXT DEFAULT '{}',
-  built_at REAL,
-  created_at REAL
-);
-CREATE INDEX IF NOT EXISTS idx_plots_w ON plots (gid, world_id);
-"""
-
 
 def _pack(vec: list[float]) -> bytes:
     import struct
@@ -176,22 +53,8 @@ class Database:
             c = self.conn.cursor()
             c.execute("PRAGMA journal_mode=WAL")
             c.execute("PRAGMA synchronous=NORMAL")
-            c.executescript(SCHEMA)
-            # 迁移:关系阶段列(crush/lovers/couple/married + 单恋方向)
-            for stmt in ("ALTER TABLE rels ADD COLUMN state TEXT DEFAULT ''",
-                         "ALTER TABLE rels ADD COLUMN crush_by TEXT DEFAULT ''"):
-                try:
-                    c.execute(stmt)
-                except sqlite3.OperationalError:
-                    pass  # 已存在
-            # 迁移:世界基础设施 / 主线
-            for stmt in ("ALTER TABLE worlds ADD COLUMN infra TEXT DEFAULT '[]'",
-                         "ALTER TABLE worlds ADD COLUMN mainline TEXT DEFAULT '[]'"):
-                try:
-                    c.execute(stmt)
-                except sqlite3.OperationalError:
-                    pass  # 已存在
-            self.conn.commit()
+            # 表结构与版本化迁移统一在 migrations.py 维护
+            self.migrations = apply_migrations(self.conn)
 
     def close(self):
         with self._lock:
@@ -479,13 +342,33 @@ class Database:
         self._ex(f"UPDATE events SET {cols} WHERE id=?", (*fields.values(), eid))
 
     def latest_pending_event(self, gid: str, uid: str) -> EventRow | None:
-        """某人最近的 pending 事件(自己的优先,群事件其次)。"""
+        """某人视角下最新的 pending 事件。
+        个人事件与群事件混排、纯粹按 id 倒序(= 用户眼前最新展示的那张事件卡);
+        只取 sent=1(卡片真正送达过)的事件 —— 从未展示过的卡不可被抉择,
+        避免「对着没见过的遭遇做选择」的割裂感。
+        同一作用域同时至多一张由 game 层的串行化(新事件顶替旧事件)保证。"""
         row = self._ex(
-            "SELECT * FROM events WHERE gid=? AND state='pending' AND (uid=? OR uid='') "
-            "ORDER BY (uid='') ASC, id DESC LIMIT 1",
+            "SELECT * FROM events WHERE gid=? AND state='pending' AND sent=1 AND (uid=? OR uid='') "
+            "ORDER BY id DESC LIMIT 1",
             (gid, uid), "one",
         )
         return EventRow.from_row(row) if row else None
+
+    def mark_event_sent(self, eid: int) -> bool:
+        """标记事件卡片已真正送达群里;只有发送过的事件才可被回落结算。"""
+        cur = self._ex("UPDATE events SET sent=1 WHERE id=? AND state='pending'", (eid,))
+        return cur.rowcount > 0
+
+    def pending_sent_events(self, gid: str, uid: str) -> list[EventRow]:
+        """某人视角下可回落结算的 pending 事件(卡片已送达:个人 + 本群群事件),新→旧。
+
+        引用识别失败/未引用时的兑底候选:仅一张时直接结算,多张则提示引用对应卡。"""
+        rows = self._ex(
+            "SELECT * FROM events WHERE gid=? AND state='pending' AND sent=1 AND (uid=? OR uid='') "
+            "ORDER BY id DESC",
+            (gid, uid), "all",
+        )
+        return [EventRow.from_row(r) for r in rows]
 
     def get_event(self, eid: int) -> EventRow | None:
         row = self._ex("SELECT * FROM events WHERE id=?", (eid,), "one")
@@ -497,6 +380,20 @@ class Database:
             (time.time(),), "all",
         )
         return [EventRow.from_row(r) for r in rows]
+
+    def list_events(self, gid: str, limit: int = 50) -> list[EventRow]:
+        """某群最近的事件(新→旧,含 pending/resolved/expired),供后台管理查看。"""
+        rows = self._ex(
+            "SELECT * FROM events WHERE gid=? ORDER BY id DESC LIMIT ?",
+            (gid, max(1, int(limit))), "all",
+        )
+        return [EventRow.from_row(r) for r in rows]
+
+    def count_pending_events(self, gid: str) -> int:
+        r = self._ex(
+            "SELECT COUNT(*) AS n FROM events WHERE gid=? AND state='pending'", (gid,), "one"
+        )
+        return int(r["n"]) if r else 0
 
     def expire_event(self, eid: int) -> bool:
         """仅当事件仍处于 pending 时标记过期,返回是否成功(防与结算竞态)。"""
@@ -525,6 +422,32 @@ class Database:
     def del_interaction(self, gid: str, name: str) -> bool:
         cur = self._ex("DELETE FROM interactions WHERE gid=? AND name=?", (gid, name))
         return cur.rowcount > 0
+
+    # ── 自定义关系(搞怪称谓:爸爸/麻麻/主人/女仆…,亲密关系在代码层拒绝) ──
+    def set_bond(self, gid: str, proposer: str, target: str, label: str, status: str = "agreed"):
+        """记录/替换某个方向的自定义关系(proposer 是 target 的 label)。"""
+        self._ex(
+            "INSERT INTO bonds (gid,proposer,target,label,status,created_at) VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(gid,proposer,target) DO UPDATE SET label=excluded.label, "
+            "status=excluded.status, created_at=excluded.created_at",
+            (gid, proposer, target, label[:24], status, time.time()),
+        )
+
+    def get_bond(self, gid: str, proposer: str, target: str) -> dict | None:
+        row = self._ex(
+            "SELECT * FROM bonds WHERE gid=? AND proposer=? AND target=?",
+            (gid, proposer, target), "one",
+        )
+        return dict(row) if row else None
+
+    def bonds_for(self, gid: str, uid: str) -> list[dict]:
+        """某人全部成立的自定义关系(含我是谁的X/谁是我的X)。"""
+        rows = self._ex(
+            "SELECT * FROM bonds WHERE gid=? AND status='agreed' AND (proposer=? OR target=?) "
+            "ORDER BY created_at DESC",
+            (gid, uid, uid), "all",
+        )
+        return [dict(r) for r in rows]
 
     def list_interactions(self, gid: str) -> list[dict]:
         rows = self._ex(
@@ -663,12 +586,13 @@ class Database:
             self._ex("UPDATE quests SET state='expired' WHERE gid=? AND state='open'", (gid,))
 
     def purge_char_data(self, gid: str, uid: str):
-        """删除角色的所有伴生数据:日志/记忆/羁绊/待决事件/任务。"""
+        """删除角色的所有伴生数据:日志/记忆/羁绊/待决事件/任务/自定义关系。"""
         self._ex("DELETE FROM timeline WHERE gid=? AND uid=?", (gid, uid))
         self._ex("DELETE FROM memories WHERE gid=? AND uid=?", (gid, uid))
         self._ex("DELETE FROM rels WHERE gid=? AND (a=? OR b=?)", (gid, uid, uid))
         self._ex("DELETE FROM events WHERE gid=? AND uid=? AND state='pending'", (gid, uid))
         self._ex("DELETE FROM quests WHERE gid=? AND uid=?", (gid, uid))
+        self._ex("DELETE FROM bonds WHERE gid=? AND (proposer=? OR target=?)", (gid, uid, uid))
 
     # ── 知识库(素材库:联网采集的著作/轻小说等,供所有生成功能注入) ──
     def kb_add(self, gid: str, source: str, theme: str, kind: str, content: str,
