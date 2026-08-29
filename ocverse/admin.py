@@ -157,7 +157,9 @@ class AdminPanel:
         mems = [m for m in self.db.mem_rows(gid) if m.get("uid") == uid][-30:][::-1]
         for m in mems:
             m.pop("vec", None)
-        return {"char": self._char_json(c), "rels": rels, "logs": logs, "memories": mems}
+        items = self.db.items_list(gid, uid)
+        return {"char": self._char_json(c), "rels": rels, "logs": logs,
+                "memories": mems, "items": items}
 
     async def api_char_edit(self):
         gid, uid = self._gid(), str(web_req.query.get("uid") or "")

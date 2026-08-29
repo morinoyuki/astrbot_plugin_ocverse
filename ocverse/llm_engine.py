@@ -166,16 +166,17 @@ class Brain:
         '"features":["独特之处1","独特之处2","独特之处3"],'
         '"npcs":[{"name":"","role":"身份","persona":"性格一句话","hook":"可交互的钩子一句话","daily":"这名NPC每天一般会去做什么/在哪里","quirk":"一个鲜活的小怪癖/口头禅"}],'
         '"event_ideas":["该世界独有事件灵感",4-6条],'
-        '"infra":[{"kind":"设施类型(店/馆/铺/坊/堂/楼/坛/站/所等,尽量不重复)","name":"设施名(2~6字)","desc":"功能/氛围一句话(≤20字)","work":"在这里能打工赚钱的职业(无则不填)"}],'
+        '"infra":[{"kind":"设施类型(店/馆/铺/坊/堂/楼/坛/站/所/市集/乐园/酒吧/剧场/温泉/观景等,尽量不重复)","name":"设施名(2~6字)","desc":"功能/氛围一句话(≤20字)","work":"在这里能打工赚钱的职业(无则不填)"}],'
         '"mainline":[{"stage":"主线小节名(≤10字)","desc":"这一步要做什么/线索(≤30字)"}],'
-        '"plots":[{"kind":"房|宅|小屋|公寓|铺面|庄园…","name":"可购住处名(2~6字)","desc":"一句话","price":整数金币价}]}'
+        '"plots":[{"kind":"房|宅|小屋|公寓|铺面|庄园…","name":"可购住处名(2~6字)","desc":"一句话","price":按物价设定的金币价,600~8000区间}]}'
     )
 
     @staticmethod
     def _norm_infra(d: dict) -> list:
-        """规范化基础设施列表。"""
+        """规范化基础设施列表(上限 INFRA_MAX)。"""
+        from . import config as C
         out = []
-        for it in (d.get("infra") or [])[:12]:
+        for it in (d.get("infra") or [])[:C.INFRA_MAX]:
             if not isinstance(it, dict) or not (it.get("name") or ""):
                 continue
             out.append({
@@ -206,9 +207,9 @@ class Brain:
             if not isinstance(p, dict) or not (p.get("name") or ""):
                 continue
             try:
-                price = max(0, int(float(p.get("price") or 0)))
+                price = max(30, int(float(p.get("price") or 0)))
             except (TypeError, ValueError):
-                price = 200
+                price = 800
             out.append({
                 "kind": str(p.get("kind") or "房")[:10],
                 "name": str(p.get("name") or "")[:16],
@@ -237,10 +238,14 @@ class Brain:
             "日常行踪(daily:TA每天一般在哪/做什么)、鲜活小怪癖或口头禅(quirk),"
             "让这个世界住着活生生的人。\n"
             "然后为这个世界设计以下内容(必须全部给出,分别填入 infra / mainline / plots 三个数组):\n"
-            "- infra: 6~10个贴合该世界题材与时代的基础设施,种类尽量丰富不重复,"
+            "- infra: 20~28个贴合该世界题材与时代的基础设施,种类尽量丰富不重复,"
+            "必须覆盖生存必要(补给/住宿/餐饮/医疗/据点),还要有不少社交娱乐约会场所"
+            "(茶馆酒馆/戏台剧场/温泉澡堂/公园花园/观景看台/夜市市集/约会胜地等,越丰富越热闹),"
+            "(茶馆酒馆/戏台剧场/温泉澡堂/公园花园/观景看台/夜市市集/约会胜地等,越丰富越热闹),"
+            "其中至少 2 个能打工赚钱(填 work 职业,符合世界观);\n"
             "  可从这些类型里选或自创:商店/集市/饭馆/小吃摊/茶馆/酒馆/咖啡馆/旅店/澡堂/书店/当铺/"
             "  花店/药铺/诊所/铁匠铺/工坊/裁缝铺/戏院/道场/学园/祭坛/神社/码头/驿站/车马行/据点/地标等,\n"
-            "  kind/name/desc/work 必填,其中至少 2 个能打工赚钱(填 work 职业,职业要多样);\n"
+            "  kind/name/desc/work 必填;\n"
             "- mainline: 3~6 节世界主线(stage/desc),是一段能推动这个世界的故事;\n"
             "- plots: 3~5 处可供居民购置的住处(kind/name/desc/price),price 用整数金币。\n"
             "全部要贴合该世界的题材与时代,不要套用同一套现代模板。\n"
@@ -252,7 +257,7 @@ class Brain:
         if d and d.get("name"):
             # 校验:infra/mainline 必须至少各 1 条,否则带纠正提示重试一次
             if not (self._norm_infra(d) and self._norm_mainline(d)):
-                d2 = await self._ask_json(sys, user + "\n\n【纠正】你漏掉了基础设施或主线,请补全:infra 至少 6 个可去的场所(种类尽量丰富,含至少2个能打工的 work),mainline 至少 3 节主线,plots 至少 3 处可购住处。不要省略这些数组。", use_tools=True)
+                d2 = await self._ask_json(sys, user + "\n\n【纠正】你漏掉了基础设施或主线,请补全:infra 至少 20 个可去的场所(种类尽量丰富:含生存必要与社交娱乐约会场所、至少2个能打工的 work),mainline 至少 3 节主线,plots 至少 3 处可购住处。不要省略这些数组。", use_tools=True)
                 if d2 and d2.get("name"):
                     d = {**d, "infra": d2.get("infra") or d.get("infra"),
                          "mainline": d2.get("mainline") or d.get("mainline"),
@@ -262,7 +267,7 @@ class Brain:
 
     async def regen_infra(self, *, world, material: str = "") -> BrainResult:
         """管理员:重新规划世界基础设施。必须贴合世界观与时代,
-        6~10 个、覆盖生存必要类型(补给/住宿/餐饮/医疗/据点)、至少 2 个可打工。"""
+        20~28 个、覆盖生存必要类型(补给/住宿/餐饮/医疗/据点)、包含社交娱乐约会场所、至少 2 个可打工。"""
         sys = self.style
         existing = "、".join(
             str(i.get("name", "")) for i in (world.infra or []) if isinstance(i, dict) and i.get("name"))
@@ -272,11 +277,13 @@ class Brain:
             f"现有设施(重新规划,不要照抄这些名字):{existing or '无'}\n\n"
             "请以世界规划者的身份,重新设计这个世界的基础设施。\n"
             "【硬性要求】\n"
-            "1. 6~10 个,种类丰富不重复,全部必须贴合该世界的题材、时代与科技水平;\n"
+            "1. 20~28 个,种类丰富不重复,全部必须贴合该世界的题材、时代与科技水平;\n"
             "2. 必须覆盖生存必要类型:补给(店铺/集市)、住宿(旅馆/酒店)、餐饮(饭馆/食堂)、"
             "医疗(医院/诊所)、据点(聚居/集会之所),缺一不可;\n"
-            "3. 其中至少 2 个能打工赚钱(填 work 职业,职业符合世界观);\n"
-            "4. 名字 2~6 字,融入世界观,不要套用现代模板。\n"
+            "3. 还要包含不少社交/娱乐/约会场所(茶馆酒馆、戏台剧场、温泉澡堂、公园花园、"
+            "观景看台、夜市市集、约会胜地等),让世界热闹有烟火气;\n"
+            "4. 其中至少 2 个能打工赚钱(填 work 职业,职业符合世界观);\n"
+            "5. 名字 2~6 字,融入世界观,不要套用现代模板。\n"
             '严格输出 JSON:{"infra":[{"kind":"类型","name":"设施名",'
             '"desc":"功能/氛围一句话(≤20字)","work":"打工职业(无则不填)"}]}'
         )
@@ -289,8 +296,8 @@ class Brain:
             # 数量不足:带纠正提示重试一次
             d2 = await self._ask_json(
                 sys,
-                user + "\n\n【纠正】设施太少或不合规,请补全:至少 6 个、种类丰富,"
-                       "覆盖补给/住宿/餐饮/医疗/据点五类,至少 2 个可打工。",
+                user + "\n\n【纠正】设施太少或不合规,请补全:至少 20 个、种类丰富,"
+                       "覆盖补给/住宿/餐饮/医疗/据点五类并含社交娱乐约会场所,至少 2 个可打工。",
                 use_tools=True)
             if d2 and self._norm_infra(d2):
                 return BrainResult(True, {"infra": self._norm_infra(d2)})
@@ -302,7 +309,7 @@ class Brain:
         user = (
             f"玩家自设了一个世界。名称:{name}\n描述:{desc}\n"
             "请补全它的题材标签、氛围、规则、独特之处、6~10个NPC(身份多样,各有日常行踪与小怪癖)、"
-            "独有事件灵感。并设计 6~10 个种类丰富的贴合设定的基础设施(至少2个能打工)、"
+            "独有事件灵感。并设计 20~28 个种类丰富的贴合设定的基础设施(含社交娱乐约会场所、至少2个能打工)、"
             "一段世界主线、可供购置的住处——贴合该世界设定,勿套模板。\n"
             f"严格输出 JSON,结构:{self._WORLD_SCHEMA}"
         )
@@ -543,7 +550,9 @@ class Brain:
             '"dialogues":事件中人物的多轮对话(2~5轮,IM聊天体,每条"speaker"≤8字、"text"≤60字,可含(动作)小注)。'
             "禁止独角戏:至少 2 个不同说话人,事件人物必须开口回应,不能只有主角一人自说自话。\n"
             '严格输出 JSON:{"narration":"结果叙述","dialogues":[{"speaker":"","text":""}],"effects":{"stamina":±,"mood":±,"gold":±,"exp":0-25,'
-            '"attrs":{"force":0}}, "memory":"第三人称一句话记忆存档", "state":{"type":"囚禁|束缚|被困...","reason":"一句原因"}, "state_lift":true}\n'
+            '"attrs":{"force":0}}, "memory":"第三人称一句话记忆存档", "state":{"type":"囚禁|束缚|被困...","reason":"一句原因"}, "state_lift":true, '
+            '"items_gain":[{"name":"获得物品≤12字","note":"来历≤20字"}],"items_lose":["失去/消耗的物品名"]}\n'
+            "items_gain/items_lose 只在剧情自然涉及物品得失时输出(拾获/受赠/被掳/消耗),通常为空数组;物品名要贴合世界观。\n"
             "数值克制:大部分±5~15,exp 5~20;负反馈不要毁灭性。memory 一句话,30字内。"
             "state 与 state_lift 只在处境发生变化时才输出(见上),否则两字段都不要出现。"
         )
@@ -567,6 +576,8 @@ class Brain:
                     "memory": str(d.get("memory", ""))[:120],
                     "state": d.get("state") if isinstance(d.get("state"), dict) else {},
                     "state_lift": bool(d.get("state_lift")),
+                    "items_gain": self._norm_items(d)[0],
+                    "items_lose": self._norm_items(d)[1],
                 },
             )
         return BrainResult(False, dict(FB_RESOLVE))
@@ -753,6 +764,104 @@ class Brain:
             "dialogues": [], "effects": {"exp": 5, "mood": 2},
         })
 
+    async def facility_event(self, *, world, char, facility: dict, action: str,
+                             memories: list[str] | None = None, material: str = "") -> BrainResult:
+        """造访一处可交互设施(社交/娱乐/约会等),生成一段小事件剧情。
+        数值克制,偶尔带点好处/小纠纷,营造烟火气。"""
+        mem = "\n".join(memories[:3]) if memories else ""
+        fac_name = str(facility.get("name") or "某处")
+        fac_kind = str(facility.get("kind") or "设施")
+        fac_desc = str(facility.get("desc") or "")
+        sys = self.style
+        user = (
+            f"世界:《{world.name}》[{world.genre}] {world.desc}\n"
+            f"角色:{char.persona_line()},背景:{char.backstory[:600] or '未详'},体力{char.stamina}/心情{char.mood}/金币{char.gold}\n"
+            f"角色去《{world.name}》的「{fac_name}」({fac_kind}——{fac_desc})"
+            f"[想做的事:{action[:60]}],想在这里打发时光。\n{mem}\n"
+            "写一段在这家场所里的经历(轻小说式,100~200字:环境氛围+与场内人物的互动+一件小事或小插曲+余味)。\n"
+            '"dialogues":场内与人的简短对话(2~4轮,IM聊天体,每条"speaker"≤8字、"text"≤60字)。'
+            "禁止独角戏:至少 2 个不同说话人,不能只有角色自说自话。\n"
+            "属性键:" + "、".join(f"{k}={v}" for k, v in ATTR_NAMES.items()) + "。\n"
+            '严格输出 JSON:{"narration":"经历叙述","effects":{"mood":±,"gold":±,"exp":0-10,"attrs":{"force":0}},"memory":"一句话存档", "items_gain":[{"name":"可选≤12字","note":"≤20字"}]}\n'
+            "数值克制(大部分±3~12);items_gain 只在自然得到时才给(如买到的纪念品),通常为空;不要输出体力。"
+        )
+        user = self._with_material(user, material)
+        d = await self._ask_fixed_dialogues(sys, user, limit=4)
+        if d and d.get("narration"):
+            gains, _l = self._norm_items(d)
+            return BrainResult(True, {
+                "narration": str(d["narration"])[:300],
+                "dialogues": self._norm_dialogues(d.get("dialogues"), 4),
+                "effects": _clamp_effects(d.get("effects") or {}),
+                "memory": str(d.get("memory", ""))[:120],
+                "items_gain": gains,
+            })
+        return BrainResult(False, dict(FB_ACT))
+
+    async def home_event(self, *, world, char, plot: dict,
+                         memories: list[str] | None = None, material: str = "") -> BrainResult:
+        """回宅时小概率触发的家居事件剧情(日常温馨或一件小意外)。"""
+        mem = "\n".join(memories[:3]) if memories else ""
+        pname = str(plot.get("name") or "家里")
+        sys = self.style
+        user = (
+            f"世界:《{world.name}》[{world.genre}] {world.desc}\n"
+            f"角色:{char.persona_line()}\n"
+            f"角色回到《{world.name}》的「{pname}」家中,打算歇一歇。\n{mem}\n"
+            "写一段回到家里的小剧情(轻小说式,80~150字:归家的画面感+一件温馨的小事或小插曲+余味)。\n"
+            '"dialogues":到家后与家人/邻居/生活角色的简短对话(1~3轮,IM聊天体,每条"speaker"≤8字、"text"≤40字)。'
+            "禁止独角戏:至少 2 个不同说话人。\n"
+            '严格输出 JSON:{"narration":"家居剧情","dialogues":[{"speaker":"","text":""}],"effects":{"mood":±,"exp":0~6},"memory":"一句话"}\n'
+            "数值克制(mood/exp ±0~6),不要输出金币和体力。"
+        )
+        user = self._with_material(user, material)
+        d = await self._ask_fixed_dialogues(sys, user, limit=3)
+        if d and d.get("narration"):
+            return BrainResult(True, {
+                "narration": str(d["narration"])[:220],
+                "dialogues": self._norm_dialogues(d.get("dialogues"), 3),
+                "effects": d.get("effects") if isinstance(d.get("effects"), dict) else {},
+                "memory": str(d.get("memory", ""))[:120],
+            })
+        return BrainResult(False, dict(FB_ARRIVE))
+
+    async def settle_work(self, *, world, char, spot: str, job: str, hours: float,
+                          colleague: str | None, material: str = "") -> BrainResult:
+        """结算到点的兼职:下班收工叙述 + 与NPC同事的道别互动(数值克制,工钱另算)。"""
+        colleague_line = (
+            f"今天的同班同事是「{colleague}」,收工时TA与角色有一段自然的道别/闲聊。"
+            if colleague else "收工时独自一人,把工具归位后离开。")
+        sys = self.style
+        user = (
+            f"世界:《{world.name}》[{world.genre}] {world.desc}\n"
+            f"角色:{char.persona_line()}\n"
+            f"角色刚结束了在「{spot}」的兼职(职业:{job}),干了约 {hours} 小时。\n"
+            f"{colleague_line}\n"
+            "写一段下班收工的叙述(轻小说式,100~180字:劳动的画面感+一段小插曲或同事互动+下班时的余味)。\n"
+            '"dialogues":在场者与角色的道别对话'
+            "(1~3轮,IM聊天体,每条 speaker≤8字、text≤40字),至少 2 个不同说话人。\n"
+            '严格输出 JSON:{"narration":"下班叙述","dialogues":[{"speaker":"","text":""}],'
+            '"effects":{"mood":±,"exp":0~8,"attrs":{}},'
+            '"items_gain":[{"name":"可选:雇主塞的小谢礼≤12字","note":"≤20字"}]}'
+            "数值克制(mood/exp ±0~8);items_gain 只在剧情自然时给一件,通常为空;不要输出金币(工钱另算)。"
+        )
+        user = self._with_material(user, material)
+        d = await self._ask_fixed_dialogues(sys, user, counterpart=colleague or "", limit=3)
+        if d and d.get("narration"):
+            effects = d.get("effects") if isinstance(d.get("effects"), dict) else {}
+            effects.pop("gold", None)
+            gains, _loses = self._norm_items(d)
+            return BrainResult(True, {
+                "narration": str(d["narration"])[:280],
+                "dialogues": self._norm_dialogues(d.get("dialogues"), 3),
+                "effects": effects,
+                "items_gain": gains,
+            })
+        return BrainResult(False, {
+            "narration": f"{char.name}在「{spot}」忙了约 {hours} 小时,收工时腰酸背痛,揣着工钱走进暮色里。",
+            "dialogues": [], "effects": {"mood": 3, "exp": 4}, "items_gain": [],
+        })
+
     async def resolve_action(self, *, world, char, action_name: str, detail: str,
                              kind: str = "safe", memories: list[str] | None = None,
                              state_note: str = "", material: str = "") -> BrainResult:
@@ -784,7 +893,9 @@ class Brain:
             "禁止独角戏:至少 2 个不同说话人,场景人物必须回应,不能只有角色自说自话。\n"
             "属性键:" + attrs_names + "。日常型行动要消耗的体力由系统扣除,效果表里不要写体力。\n"
             '严格输出 JSON:{"narration":"行动叙述",'
-            '"effects":{"mood":±,"gold":±,"exp":0-25,"stamina":±(仅风险型可写),"attrs":{"force":0}},"memory":"一句话存档", "state":{"type":"...","reason":"..."}, "state_lift":true}\n'
+            '"effects":{"mood":±,"gold":±,"exp":0-25,"stamina":±(仅风险型可写),"attrs":{"force":0}},"memory":"一句话存档", "state":{"type":"...","reason":"..."}, "state_lift":true, '
+            '"items_gain":[{"name":"获得物品≤12字","note":"来历≤20字"}],"items_lose":["失去/消耗的物品名"]}\n'
+            "items_gain/items_lose 只在行动自然涉及物品得失时输出(拾获/缴获/受赠/消耗/损坏),通常为空数组;物品名要贴合世界观。"
             "数值克制:日常型大部分±5~15、exp 5~18、金币±0~40;风险型可到 exp 5~30、金币 0~80,失败时给负反馈但不要毁灭性打击。"
             "state 与 state_lift 只在处境变化时输出(见规则说明),否则两字段都不要出现。"
         )
@@ -792,6 +903,7 @@ class Brain:
         user = self._with_material(user, material)
         d = await self._ask_fixed_dialogues(sys, user, limit=4)
         if d and d.get("narration"):
+            gains, loses = self._norm_items(d)
             return BrainResult(
                 True,
                 {
@@ -801,6 +913,8 @@ class Brain:
                     "memory": str(d.get("memory", ""))[:120],
                     "state": d.get("state") if isinstance(d.get("state"), dict) else {},
                     "state_lift": bool(d.get("state_lift")),
+                    "items_gain": gains,
+                    "items_lose": loses,
                 },
             )
         return BrainResult(False, dict(FB_ACT))
@@ -1009,47 +1123,153 @@ class Brain:
 
 
     # ════════════════ 每日小任务(简单、轻松、按世界生成)════════════════
-    async def gen_quests(self, *, world, char, memories: list[str] | None = None,
-                        material: str = "") -> BrainResult:
-        """按世界观/角色/记忆生成 3 个日常小任务,目标不要太难。"""
+    @staticmethod
+    def _norm_items(d: dict) -> tuple[list[dict], list[str]]:
+        """规范化 LLM 输出的物品变化:items_gain(获得)/items_lose(失去)。"""
+        gains, loses = [], []
+        for g in (d.get("items_gain") or [])[:2]:
+            if isinstance(g, dict) and str(g.get("name", "")).strip():
+                gains.append({"name": str(g["name"]).strip()[:12],
+                              "note": str(g.get("note", "")).strip()[:20]})
+        for name in (d.get("items_lose") or [])[:2]:
+            if str(name).strip():
+                loses.append(str(name).strip()[:12])
+        return gains, loses
+
+    @staticmethod
+    def _norm_quest_steps(steps, npc_names: list[str], life_names: list[str]) -> list[dict]:
+        """规范化任务步骤:类型限 act/npc/life/social/work/item,npc/life 校验名单。"""
+        out = []
+        for s in (steps or [])[:3]:
+            if not isinstance(s, dict):
+                continue
+            t = str(s.get("type", "")).strip()
+            desc = str(s.get("desc", "")).strip()[:30]
+            if t == "act":
+                kws = [str(k).strip()[:6] for k in (s.get("keywords") or [])[:4] if str(k).strip()]
+                if not kws:
+                    continue
+                out.append({"type": "act", "desc": desc or "完成一次主动行动", "keywords": kws, "done": False})
+            elif t == "npc":
+                npc = str(s.get("npc", "")).strip()[:10]
+                if not npc:
+                    continue
+                out.append({"type": "npc", "desc": desc or f"找{npc}互动", "npc": npc, "done": False})
+            elif t == "life":
+                npc = str(s.get("npc", "")).strip()[:10]
+                if not npc:
+                    continue
+                out.append({"type": "life", "desc": desc or f"找{npc}互动", "npc": npc, "done": False})
+            elif t == "social":
+                out.append({"type": "social", "desc": desc or "与一位群友互动", "done": False})
+            elif t == "work":
+                out.append({"type": "work", "desc": desc or "完成一次兼职打工", "done": False})
+            elif t == "item":
+                item = str(s.get("item", "")).strip()[:12]
+                if not item:
+                    continue
+                out.append({"type": "item", "desc": desc or f"取得{item}", "item": item, "done": False})
+        # npc/life 目标尽量贴合名单(双向包含容错)
+        known = list(npc_names) + list(life_names)
+        for s in out:
+            if s["type"] in ("npc", "life") and known:
+                if not any(s["npc"] in nm or nm in s["npc"] for nm in known):
+                    near = next((nm for nm in known if s["npc"][0] == nm[0]), None)
+                    if near:
+                        s["npc"] = near
+        return out
+
+    async def gen_quests(self, *, world, char, npc_names: list[str] | None = None,
+                         life_names: list[str] | None = None,
+                         facilities: list[dict] | None = None,
+                         memories: list[str] | None = None,
+                         material: str = "") -> BrainResult:
+        """生成 3 个由设施/委托人驱动的任务:每个任务有委托人、发布设施与
+        1~3 个可验证步骤(主动行动/找NPC/找生活角色/群友互动/兼职/取得物品)。"""
         mem = "\n".join(memories[:4]) if memories else ""
+        npc_line = "、".join((npc_names or [])[:10]) or "暂无"
+        life_line = "、".join((life_names or [])[:8]) or "暂无"
+        facs = (facilities or [])[:10]
+        fac_line = "\n".join(f"- {f.get('name')}({f.get('kind','')}){'·可打工:'+f['work'] if f.get('work') else ''}"
+                             for f in facs) or "- 暂无"
         user = (
             f"世界:《{world.name}》[{world.genre}] {world.desc}\n"
             f"氛围:{world.atmosphere};世界规则:{';'.join(world.rules or [])}\n"
             f"角色:{char.persona_line()},背景:{char.backstory[:600] or '未详'}\n"
+            f"世界知名NPC:{npc_line}\n生活角色:{life_line}\n"
+            f"世界设施(任务的发布地点从这里选):\n{fac_line}\n"
             f"{mem}\n"
-            "请给这个角色生成今天要做的 3 个简单小任务:日常小事、无危险、单人容易完成(如吃一顿当地早餐、"
-            "向某位NPC打听一件小事、帮别人一个小忙、找一样有趣的小东西),结合世界设定,充满生活气息。\n"
-            '严格输出 JSON:{"quests":[{"text":"任务描述≤16字","hint":"完成提示≤20字"}]}\n'
-            "恰好 3 个。"
+            "请给这个角色生成今天的 3 个委托任务,由设施的委托板/当值者发布。每个任务包含:\n"
+            '1) "giver":委托人(2~6字)——优先用设施相关的组织(如冒险者公会/商会/茶馆掌柜)或上面的NPC,也可临时虚构一个贴合世界观的普通委托人;'
+            '严禁把其他玩家/群友写成委托人\n'
+            '2) "place":发布设施名(必须从上面设施清单里选)\n'
+            '3) "text":任务名≤16字,"hint":完成提示≤20字\n'
+            '4) "steps":1~3 个可验证步骤,type 只能从以下选:\n'
+            '   {"type":"act","desc":"≤20字","keywords":["关键词2~4个"]} —— 需要玩家用「冒险/打怪」完成,keywords 要能出现在玩家的行动描述里\n'
+            '   {"type":"npc","desc":"≤20字","npc":"NPC名"} —— 与某位世界NPC互动;npc 必须用名单本名\n'
+            '   {"type":"life","desc":"≤20字","npc":"生活角色名"} —— 与某位生活角色互动;必须用名单本名\n'
+            '   {"type":"social","desc":"≤20字"} —— 与任意群友互动一次(不指定具体人)\n'
+            '   {"type":"work","desc":"≤20字"} —— 完成一次兼职打工\n'
+            '   {"type":"item","desc":"≤20字","item":"物品名≤12字"} —— 取得某件物品(通过冒险/事件获得)\n'
+            "要求:3 个任务难度递进(至少1个单步日常,最多1个三步任务);步骤必须与任务文本逻辑一致;"
+            "结合世界观,生活气息或小冒险皆可。严禁把其他玩家/群友写成任务目标或委托人。\n"
+            '严格输出 JSON:{"quests":[{"text":"","giver":"","place":"","hint":"",'
+            '"steps":[{"type":"","desc":"","keywords":[],"npc":"","item":""}]}]}\n恰好 3 个。'
         )
         user = self._with_material(user, material)
         d = await self._ask_json(self.style, user)
         if d and d.get("quests"):
-            quests = [{"text": str(q.get("text", "")).strip()[:24],
-                       "hint": str(q.get("hint", "")).strip()[:30]}
-                      for q in d["quests"][:3] if isinstance(q, dict) and str(q.get("text", "")).strip()]
+            quests = []
+            for q in d["quests"][:3]:
+                if not (isinstance(q, dict) and str(q.get("text", "")).strip()):
+                    continue
+                steps = self._norm_quest_steps(q.get("steps"), npc_names or [], life_names or [])
+                if not steps:
+                    continue
+                fac_names = [f.get("name", "") for f in facs]
+                place = str(q.get("place", "")).strip()[:12]
+                if fac_names and not any(place in fn or fn in place for fn in fac_names):
+                    place = fac_names[0]  # 发布设施必须是清单里的
+                quests.append({
+                    "text": str(q["text"]).strip()[:24],
+                    "hint": str(q.get("hint", "")).strip()[:30],
+                    "giver": str(q.get("giver", "")).strip()[:10] or place,
+                    "place": place,
+                    "steps": steps,
+                })
             if quests:
                 return BrainResult(True, {"quests": quests})
-        return BrainResult(False, dict(FB_QUESTS))
+        return BrainResult(False, {"quests": []})
 
-    async def finish_quest(self, *, world, char, quest: str,
+    async def finish_quest(self, *, world, char, quest: str, giver: str = "", place: str = "",
+                           steps_desc: list[str] | None = None,
                            memories: list[str] | None = None,
                         material: str = "") -> BrainResult:
-        """结算一个小任务:轻松日常的完成叙述 + 很小的奖励(数值克制)。"""
+        """向委托人交付任务:交付场景 + 委托人的反应 + 很小的奖励(数值克制)。
+        出场人物锁死:只允许角色与委托人(组织则由当值代理人出面),严禁他人乱入。"""
         mem = "\n".join(memories[:3]) if memories else ""
+        giver = (giver or "委托人").strip()
+        place = (place or "").strip()
+        steps_line = "".join(f"\n- ✅ {s}" for s in (steps_desc or [])) or "\n- ✅(单步任务)"
         user = (
             f"世界:《{world.name}》[{world.genre}] {world.desc}\n"
             f"角色:{char.persona_line()},背景:{char.backstory[:600] or '未详'}\n"
-            f"角色完成了今日小任务:「{quest[:30]}」\n"
+            f"角色完成了委托任务:「{quest[:30]}」\n"
+            f"委托人:{giver}(发布地点:{place or '不祥'})"
+            "——若委托人是组织/设施,由当值代理人出面交付;若是个人委托人则以本名出场\n"
+            f"已完成的步骤:{steps_line}\n"
             f"{mem}\n"
-            "写一段简短的完成叙述(轻小说式,60~120字,轻松日常,有画面感,有余味),并给一点小奖励。\n"
-            '"dialogues":完成过程中的一小段对话(1~3轮,IM聊天体,每条"speaker"≤8字、"text"≤40字)。'
+            "【出场铁律】这是交付场景:只允许角色与委托人两方出场,"
+            "严禁出现其他群友/生活角色/无关NPC/凭空新人物,严禁把交付成果交给或送给别人。\n"
+            "写一段交付场景(轻小说式,80~150字:委托人的验收反应+简短交代+余味),并给一点委托酬劳。\n"
+            f'"dialogues":角色与「{giver}」的交割对话(1~3轮,IM聊天体,每条"speaker"≤8字、"text"≤40字)。'
             "禁止独角戏:至少 2 个不同说话人,不能只有角色一人说话。\n"
-            '严格输出 JSON:{"narration":"完成叙述","effects":{"exp":5~12,"gold":0~20,"mood":0~3}}'
+            '严格输出 JSON:{"narration":"交付叙述","effects":{"exp":5~12,"gold":0~25,"mood":0~3},'
+            '"items_gain":[{"name":"可选:委托人额外送的谢礼≤12字","note":"≤20字"}]}'
+            "items_gain 只在委托人明确会给实物谢礼时才输出,通常为空。"
         )
         user = self._with_material(user, material)
-        d = await self._ask_fixed_dialogues(self.style, user, limit=3)
+        d = await self._ask_fixed_dialogues(self.style, user, counterpart=giver, limit=3)
         if d and d.get("narration"):
             eff_in = d.get("effects") if isinstance(d.get("effects"), dict) else {}
             eff = {}
@@ -1058,9 +1278,10 @@ class Brain:
                     eff[k] = max(lo, min(hi, int(round(float(eff_in.get(k) or 0)))))
                 except (TypeError, ValueError):
                     pass
+            gains, _loses = self._norm_items(d)
             return BrainResult(True, {"narration": str(d["narration"])[:250],
                                      "dialogues": self._norm_dialogues(d.get("dialogues"), 3),
-                                     "effects": eff})
+                                     "effects": eff, "items_gain": gains})
         return BrainResult(False, dict(FB_QUEST_DONE))
 
     @staticmethod

@@ -33,6 +33,33 @@ class MemoryStore:
             vec = await self.embedder.embed(text)
         except Exception:
             vec = self.fallback.embed_sync(text)
+        await self._remember_inner(gid, uid, scope, text, vec, ref)
+
+    async def _remember_inner(self, gid, uid, scope, text, vec, ref):
+        """写入记忆(带近重复去重)。"""
+        # 近重复去重
+        try:
+            rows = self.db.mem_rows(gid, scopes=[scope])
+            for r in rows:
+                if r.get("uid") == uid or not uid:
+                    if cosine(vec, r["vec"]) > 0.965:
+                        return
+        except Exception:
+            pass
+        self.db.mem_add(gid, uid, scope, text, vec, ref)
+
+    def remember_sync(self, gid: str, uid: str, scope: str, text: str, ref: str = ""):
+        """同步记一条记忆(同步嵌入器可用时),供每日流转等同步路径写入世界记忆。"""
+        text = (text or "").strip()
+        if not text:
+            return
+        vec = None
+        try:
+            vec = self.fallback.embed_sync(text)
+        except Exception:
+            vec = None
+        if vec is None:
+            return
         # 近重复去重
         try:
             rows = self.db.mem_rows(gid, scopes=[scope])

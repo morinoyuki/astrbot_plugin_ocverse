@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -133,13 +134,14 @@ MORNING_JSON = {
 }
 
 ACT_JSON = {
-    "narration": "你咬着牙把这一套练完,酸痛里透着踏实。邻摊的学徒擎着扳手冲你咦了一声。临下工,在旧排气管里摸出一枚发锈的齿轮币,权当彩头。",
+    "narration": "你咬着牙把这一套练完,酸痛里透着踏实。邻摊的学徒擎着扳手冲你咦了一声。临下工,在旧排气管里摸出一枚发锈的齿轮,权当彩头。",
     "dialogues": [
         {"speaker": "学徒", "text": "嚯,又练到这么晚?铁皮都要被你敲醒了。"},
         {"speaker": "阿凛", "text": "(甩着手腕)不练完,睡不着。"},
     ],
     "effects": {"mood": 4, "exp": 12, "gold": 20, "attrs": {"force": 2}},
     "memory": "在齿轮区认真训练了一天,还顺手捞到一枚旧齿轮。",
+    "items_gain": [{"name": "旧齿轮", "note": "坟场边的排气管里摸到的"}],
 }
 
 
@@ -226,18 +228,66 @@ def fake_llm(system: str, user: str) -> str:
                 {"speaker": "老徐", "text": "(哽咽)……好。"},
             ],
         }, ensure_ascii=False)
-    if "简单小任务" in user:
-        return json.dumps({"quests": [
-            {"text": "在雾码头吃一顿海鲜早市", "hint": "挑人最多的摊子准没错"},
-            {"text": "向老铁打听齿轮区的传闻", "hint": "聊上两句就算数"},
-            {"text": "拾荒时捡一样小东西", "hint": "跟着十三走准有收获"},
-        ]}, ensure_ascii=False)
-    if "今日小任务" in user:
+    if "【出场铁律】" in user:
+        # 委托交付:必须是委托场景,且带委托人
+        assert "委托" in user and "交付" in user, "finish_quest prompt 未带委托/交付约束"
+        assert "严禁出现其他群友/生活角色" in user, "finish_quest prompt 未锁死交付场景出场人物(乱入回归)"
         return json.dumps({
-            "narration": "你在雾码头的小摊前坐下,一碗热汤下肚,连风都变得温柔起来。",
+            "narration": "你在锻坊找到老铁,把那枚还带着海锈的齿轮放进他掌心。他掂了掂,难得地咧开嘴,从柜台下摸出一把零钱推过来。",
+            "dialogues": [
+                {"speaker": "老铁", "text": "这对得上——谢了,工钱拿着。"},
+                {"speaker": "阿凛", "text": "下次有好活儿记得叫我。"},
+            ],
             "effects": {"exp": 10, "gold": 15, "mood": 3},
+            "items_gain": [],
         }, ensure_ascii=False)
-    if "执行行动" in user:
+    if "生成今天的 3 个委托任务" in user:
+        # 设施/委托人驱动的多步骤任务
+        assert "设施清单" in user and "委托人" in user, "gen_quests prompt 未带发布设施/委托人约束"
+        return json.dumps({"quests": [
+            {"text": "替老铁找回一枚旧齿轮", "giver": "老铁", "place": "老铁的锻坊",
+             "hint": "去旧舰队坟场,用「/分身 冒险」", "steps": [
+                {"type": "act", "desc": "去旧舰队坟场找回齿轮", "keywords": ["齿轮", "坟场"]},
+                {"type": "item", "desc": "拿到旧齿轮", "item": "旧齿轮"},
+                {"type": "work", "desc": "打一次工", "keywords": []}]},
+            {"text": "向老铁打听传闻", "giver": "老铁", "place": "老铁的锻坊",
+             "hint": "找老铁聊几句", "steps": [{"type": "npc", "desc": "找老铁互动", "npc": "老铁"}]},
+            {"text": "给账房打下手", "giver": "账房掌柜", "place": "季小姐的账房",
+             "hint": "「/分身 兼职」上一班", "steps": [{"type": "work", "desc": "完成一次兼职打工"}]},
+        ]}, ensure_ascii=False)
+    if "下班收工" in user:
+        # 到点自动结算:下班叙述 + 同事道别
+        return json.dumps({
+            "narration": "最后一锤落了,炉火暗下去。你把围裙挂回钩上,兜里多了这一天的工钱,穿过亮灯的街往码头走。",
+            "dialogues": [
+                {"speaker": "老铁", "text": "明天还来?"},
+                {"speaker": "阿凛", "text": "看今天给多少。"},
+            ],
+            "effects": {"mood": 5, "exp": 4},
+            "items_gain": [],
+        }, ensure_ascii=False)
+    if "想在这里打发时光" in user:
+        # 设施光顾(社交/娱乐):一段小事件剧情
+        return json.dumps({
+            "narration": "你一进门,暖意与嘈杂扑面而来。角落里有人冲你抬眼,移了个空位。一杯热的东西递到眼前,交换了一点点彼此的消息。",
+            "dialogues": [
+                {"speaker": "掌柜", "text": "老位置?还是新面孔?"},
+                {"speaker": "阿凛", "text": "新面孔,但听说了你这儿的传闻。"},
+            ],
+            "effects": {"mood": 6, "exp": 3},
+            "memory": "在城里一处热闹的场所消磨了半日。",
+            "items_gain": [],
+        }, ensure_ascii=False)
+    if "打算歇一歇" in user:
+        # 回宅家居事件
+        return json.dumps({
+            "narration": "推开家门,灯自己亮起来,桌上还温着一碗汤。陌生却有人替你留了门。",
+            "dialogues": [{"speaker": "邻居婆婆", "text": "回来啦?给你留了热汤。"},
+                           {"speaker": "阿凛", "text": "(捧起碗)……谢啦,婆婆。"}],
+            "effects": {"mood": 4, "exp": 2},
+            "memory": "回到家里,有人留了一碗热汤。",
+        }, ensure_ascii=False)
+    if "exec_action".strip() and "执行行动" in user:
         return json.dumps(ACT_JSON, ensure_ascii=False)
     raise AssertionError("fake_llm 未覆盖的调用: " + user[:60])
 
@@ -874,15 +924,25 @@ async def check_migrations():
 
     db = Database(p)
     assert db.migrations, "旧库应产生迁移记录"
-    assert int(db.conn.execute("PRAGMA user_version").fetchone()[0]) >= 4
+    assert int(db.conn.execute("PRAGMA user_version").fetchone()[0]) >= 5
     db.mark_event_sent(1)  # events.sent 已补列
     assert db.latest_pending_event("g", "u") is not None
     db.set_bond("g", "a", "b", "爸爸")  # bonds 表已建
     assert db.get_bond("g", "a", "b")["label"] == "爸爸"
+    # v5:任务三列 + 背包表
+    db.add_quest("g", "u", "2024-01-01", "跑腿", "早点去",
+                 steps=[{"type": "work", "desc": "打一次工", "done": False}],
+                 giver="老铁", place="老铁的锻坊")
+    row = db.list_quests("g", "u", "2024-01-01")[0]
+    assert row["giver"] == "老铁" and row["place"] == "老铁的锻坊" and "work" in row["steps"]
+    assert db.item_add("g", "u", "旧齿轮", 1, "坟场捡的") == 1
+    assert db.item_add("g", "u", "旧齿轮", 1) == 2  # 叠加
+    assert db.item_remove("g", "u", "旧齿轮", 2) is True
+    assert db.items_list("g", "u") == []
     # 幂等:再开一次不再产生迁移
     db2 = Database(p)
     assert db2.migrations == []
-    print("✓ 迁移集中管理:旧库自动升级(sent列/bonds表/user_version),重复打开幂等")
+    print("✓ 迁移集中管理:旧库自动升级(sent列/bonds表/quests三列/背包表/user_version),重复打开幂等")
     db.close()
     db2.close()
 
@@ -907,8 +967,16 @@ async def check_world_life():
                                {"speaker": "阿凛", "text": "我记下了。"}],
                 "effects": {"exp": 12, "mood": 5}, "memory": "查到了沉船的一条线索。",
             }, ensure_ascii=False)
-        if "简单小任务" in user or "晨报" in user:
-            return json.dumps({"quests": [{"text": "吃一碗面", "hint": "面馆"}]}, ensure_ascii=False)
+        if "生成今天的 3 个委托任务" in user or "晨报" in user:
+            return json.dumps({"quests": [{"text": "吃一碗面", "hint": "面馆",
+                                          "giver": "面馆掌柜", "place": "雾码头面馆",
+                                          "steps": [{"type": "act", "desc": "吃一碗面",
+                                                      "keywords": ["面", "吃"]}]}]},
+                              ensure_ascii=False)
+        if "下班收工" in user:
+            return json.dumps({"narration": "收工的晚风很凉。", "dialogues": [],
+                               "effects": {"mood": 3, "exp": 2}, "items_gain": []},
+                              ensure_ascii=False)
         return json.dumps({"narration": "ok", "effects": {}}, ensure_ascii=False)
 
     brain = Brain(raw_call=wlife_llm)
@@ -923,12 +991,28 @@ async def check_world_life():
     assert plots and plots[0]["price"] > 0, plots
     ok_ct = 0
     ok_ct += 1; print("✓ 世界生成:LLM产出基础设施/主线/地块(非模板)")
-    # 打工(世界基建提供工作)
+    # 打工(时段工:上工 → 到点自动下班结算,期间禁止自由行动)
     v = game.work_today("g", "u1")
-    assert v["type"] == "work" and v["earn"] > 0 and v["spot"], v
+    assert v["type"] == "work" and v["phase"] == "start" and v["spot"] and v["colleague"], v
+    ok_ct += 1; print("✓ 世界基础设施时段工:上工并记录班次")
+    # 上工中无法主动行动
+    try:
+        await game.act("g", "u1", "冒险", "趁上班溜号去逛")
+        raise AssertionError("上工期间仍可主动行动")
+    except GameError:
+        pass
+    ok_ct += 1; print("✓ 上工期间拦截自由行动")
+    # 回拨到点 → 自动结算(工钱+NPC同事互动+班次清除)
+    _fl = dict(db.get_char("g", "u1").flags)
+    _fl["_work"]["until"] = time.time() - 1
+    db.update_char("g", "u1", flags=_fl)
     gold0 = db.get_char("g", "u1").gold
-    assert db.get_char("g", "u1").gold > gold0 - 0 or True
-    ok_ct += 1; print("✓ 世界基础设施打工赚钱")
+    wv = await game.settle_work("g", "u1")
+    assert wv["phase"] == "done" and wv["earn"] > 0 and wv["hours"] >= 0.1
+    assert db.get_char("g", "u1").gold == gold0 + wv["earn"], "工钱应入账"
+    assert "_work" not in (db.get_char("g", "u1").flags or {}), "班次标记应清除"
+    assert db.item_get("g", "u1", "旧齿轮") is None, "工作不应凭空给物品"
+    ok_ct += 1; print("✓ 时段工到点自动结算(工钱/NPC同事/班次清除)")
     # 推进主线
     r = await game.mainline_progress("g", "u1")
     assert r["type"] == "mainline" and r["ok_llm"] and r["narration"]
@@ -941,10 +1025,17 @@ async def check_world_life():
     wx, p, chg = game.buy_plot("g", "u1", 0)
     assert chg and db.plot_get(p["id"])["owner_uid"] == "u1"
     ok_ct += 1; print("✓ 购置房产(扣款+占有)")
-    # 回宅休息
+    before_home_st = db.get_char("g", "u1").stamina
+    # 回宅休息(按房价分档恢复 + 每天一次;房价已按攒钱难度上调)
     hv = await game.my_home("g", "u1")
-    assert hv["type"] == "home" and db.get_char("g", "u1").mood >= 70
-    ok_ct += 1; print("✓ 回自宅休息恢复")
+    assert hv["type"] == "home" and hv["stamina_gain"] > 0 and hv["mood_gain"] > 0
+    assert db.get_char("g", "u1").stamina > before_home_st  # 回到自宅确实补了体力
+    try:
+        await game.my_home("g", "u1")   # 每天一次
+        raise AssertionError("回宅补给应每天一次")
+    except GameError:
+        pass
+    ok_ct += 1; print("✓ 回自宅休息(分档恢复+每天一次)")
     # 已购地块不可再购
     try:
         game.buy_plot("g", "u1", 0)
@@ -1005,6 +1096,121 @@ async def check_life_char():
                          {"card_width": 1024, "card_font_size": 34, "card_theme": "dark"})
     assert _imgs and len(_imgs) >= 1, "生活角色角色卡应能渲染"
     print("✓ 持久生活角色:定义/互动建立羁绊/世界变动卷入/可查看角色卡")
+    db.close()
+
+
+async def check_facility_home():
+    """设施20~28个/社交娱乐约会可交互光顾(每天每家1次)+ 房价上调 + 回宅分档恢复/每天一次/家居事件。"""
+    from ocverse import config as C
+    from ocverse.game import Game
+
+    tmpd = tempfile.mkdtemp(prefix="ocverse_fachome_")
+    db = Database(os.path.join(tmpd, "t.sqlite3"))
+    emb = HashEmbedder()
+    mem = MemoryStore(db, emb, emb, top_k=6)
+    FAC_JSON = {"infra": [
+        {"kind": "补给站", "name": "环形补给站", "desc": "合成食物与氧气", "work": "配给员"},
+        {"kind": "胶囊旅馆", "name": "蜂巢旅馆", "desc": "一格一梦", "work": "值守员"},
+        {"kind": "食堂", "name": "蛋白食堂", "desc": "今日特餐:未知蛋白", "work": "打饭员"},
+        {"kind": "医疗舱", "name": "义体诊所", "desc": "续命圣地", "work": "技师"},
+        {"kind": "安全屋", "name": "中立安全屋", "desc": "灰色地带", "work": "门禁员"},
+        {"kind": "改造店", "name": "铁臂改造店", "desc": "义体改造", "work": "助理"},
+        {"kind": "数据馆", "name": "暗网数据馆", "desc": "信息即货币", "work": "掮客"},
+        {"kind": "机库", "name": "废土机库", "desc": "旧机甲翻新", "work": "机师"},
+        {"kind": "酒吧", "name": "霓虹全息吧", "desc": "酒精与光影", "work": "调酒师"},
+        {"kind": "舞厅", "name": "零重力舞厅", "desc": "失重里跳舞", "work": "DJ"},
+        {"kind": "观景台", "name": "星港观景台", "desc": "看流星", "work": ""},
+        {"kind": "影院", "name": "赛博光影厅", "desc": "老片新片", "work": "检票员"},
+        {"kind": "约会", "name": "轨道花园", "desc": "专属星空花园", "work": ""},
+        {"kind": "饭馆", "name": "雾滩食堂", "desc": "味道不错", "work": "服务员"},
+        {"kind": "茶馆", "name": "清风茶楼", "desc": "一盏清茶", "work": "茶博士"},
+        {"kind": "书店", "name": "旧书阁", "desc": "泛黄书页", "work": "管理员"},
+        {"kind": "赌坊", "name": "运河赌场", "desc": "运气与欲念", "work": "荷官"},
+        {"kind": "公园", "name": "中央绿廊", "desc": "散步的好去处", "work": "园丁"},
+        {"kind": "剧场", "name": "星尘剧场", "desc": "全息话剧", "work": "掌幕"},
+        {"kind": "温泉", "name": "雪滴温泉", "desc": "泡去一身尘劳", "work": "侍汤"},
+        {"kind": "菜场", "name": "天光菜场", "desc": "清晨最新鲜", "work": "摊主"},
+        {"kind": "码头", "name": "旧港码头", "desc": "南来北往", "work": ""},
+        {"kind": "擂台", "name": "黑厂角斗台", "desc": "胜负说话", "work": ""},
+        {"kind": "歌厅", "name": "金属歌厅", "desc": "吼到天亮", "work": "接待"},
+    ]}
+
+    def fh_llm(system, user):
+        if "重新设计这个世界的基础设施" in user:
+            return json.dumps(FAC_JSON, ensure_ascii=False)
+        if "想在这里打发时光" in user:
+            return json.dumps({
+                "narration": "你在里头落了座,没一会儿就跟人搭上了话,还听来一桩陈年秘闻。",
+                "dialogues": [{"speaker": "掌柜", "text": "这儿的消息,管够。"},
+                               {"speaker": "阿凛", "text": "(举杯)那我先买你一句话。"}],
+                "effects": {"mood": 6, "exp": 3}, "memory": "在某家店里听到一桩秘闻。",
+                "items_gain": [], "items_lose": [],
+            }, ensure_ascii=False)
+        if "打算歇一歇" in user:
+            return json.dumps({
+                "narration": "推开门,有一盏灯为你留着。", "dialogues": [],
+                "effects": {"mood": 3}, "memory": "回到了家里。",
+            }, ensure_ascii=False)
+        return json.dumps({"narration": "ok", "effects": {}, "items_gain": [], "items_lose": []},
+                          ensure_ascii=False)
+
+    brain = Brain(raw_call=fh_llm)
+    game = Game(db, brain, mem, lambda k, d=None: CFG.get(k, d))
+    await game.init_world("g", "一座浮动海城", "admin")
+    game.create_char("g", "u1", "阿凛", "女", ["冷静"], "s")
+    db.update_char("g", "u1", stamina=90, gold=12000)
+    _rl = dict(db.get_char("g", "u1").flags)
+    [ _rl.pop(k) for k in list(_rl) if k.startswith(("_acts:", "_inters:", "_fac:", "_work", "_home")) ]
+    db.update_char("g", "u1", flags=_rl)
+    # 1) AI 重设计设施:数量到 20~28,含社交/娱乐/约会,且基线保底
+    msg, infra = await game.regen_infra("g")
+    assert 20 <= len(infra) <= 28, len(infra)
+    assert sum(1 for i in infra if i.get("work")) >= 2, "打工位保底"
+    assert any(i.get("name") == "清风茶楼" for i in infra), "社交设施应在"
+    assert any(C.infra_interactable(i) for i in infra), "至少应有一个可交互设施"
+    ok_ct = 0
+    ok_ct += 1; print("✓ 设施重设计 20~28 个(含社交/娱乐/约会,打工保底)")
+    # 2) 去可交互设施产生剧情;非交互设施拒绝;每天每家限1次
+    v = await game.visit_facility("g", "u1", "清风茶楼", "喝茶听消息")
+    assert v["type"] == "facility" and v["narration"] and v["ok_llm"] and v["changes"]
+    try:
+        await game.visit_facility("g", "u1", "环形补给站", "看看补给")
+        raise AssertionError("非交互设施不应光顾出事件")
+    except GameError:
+        pass
+    try:
+        await game.visit_facility("g", "u1", "清风茶楼", "再去一次")
+        raise AssertionError("同一天同一设施应限1次")
+    except GameError:
+        pass
+    ok_ct += 1; print("✓ 设施光顾:社交可交互出剧情/普通设施拒绝/每天每家1次")
+    # 3) 房产价格上调 + 回宅分档恢复 + 每天一次 + (小概率)家居事件
+    plots = game.list_plots("g")
+    assert plots and all(p["price"] >= 600 for p in plots), [p["price"] for p in plots]
+    def _home_recovery_for(price):
+        if price >= 8000: return 70
+        if price >= 5000: return 55
+        if price >= 3200: return 42
+        if price >= 2000: return 32
+        if price >= 1000: return 24
+        return 15
+    game.buy_plot("g", "u1", 0)
+    pid = (db.get_char("g", "u1").flags or {}).get("home_plot")
+    _hp = db.plot_get(pid)
+    price = _hp["price"]
+    st0 = _home_recovery_for(price)
+    base = db.get_char("g", "u1").stamina
+    hv = await game.my_home("g", "u1")
+    assert hv["type"] == "home" and hv["stamina_gain"] == st0, (hv["stamina_gain"], st0)
+    assert db.get_char("g", "u1").stamina > base
+    try:
+        await game.my_home("g", "u1")
+        raise AssertionError("回宅应每天一次")
+    except GameError:
+        pass
+    if hv.get("narration"):
+        assert hv["ok_llm"]
+    ok_ct += 1; print("✓ 房产价格上调 + 回宅分档恢复 + 每天一次")
     db.close()
 
 
@@ -1441,16 +1647,52 @@ async def main():
     assert rm == "豆包" and not any(n["name"] == "豆包" for n in next(x for x in db.list_worlds("g1") if x.id == uw.id).npcs)
     ok += 1; print("✓ 世界NPC:用户自设世界内 列表/删除")
 
-    # 5.5 每日小任务:按世界生成 → 轻松结算 → 小奖励 → 防重复
+    # 5.5 委托任务:设施/委托人驱动 · 多步骤(冒险+NPC+兼职+物品)→ 向委托人交付 → 防重复
+    db.update_char("g1", "u1", stamina=90, gold=500)  # 前面测试耗了不少体力,先回满
+    _rfl = dict(db.get_char("g1", "u1").flags)
+    for k in list(_rfl):
+        if k.startswith("_acts:") or k.startswith("_inters:") or k.startswith("_work"):
+            _rfl.pop(k, None)
+    db.update_char("g1", "u1", flags=_rfl)  # 清掉前面测试消耗的行动/互动/班次计数
     qs = await game.ensure_quests("g1", "u1")
     assert len(qs) == 3 and all(q["state"] == "open" for q in qs)
+    q0 = next(q for q in qs if q["text"].startswith("替老铁"))
+    assert q0["giver"] == "老铁" and q0["place"], (q0.get("giver"), q0.get("place"))
+    # 步骤未完成 → 交付被拦
+    try:
+        await game.complete_quest("g1", "u1", 0)
+        raise AssertionError("未完成步骤的委托不应可交付")
+    except GameError:
+        pass
+    # 冒险:推进 act(+item)步骤,并真的获得物品
+    va = await game.act("g1", "u1", "冒险", "去旧舰队坟场找回齿轮")
+    assert any("🎒" in c for c in va["changes"]), va["changes"]
+    assert db.item_get("g1", "u1", "旧齿轮"), "冒险应获得物品进背包"
+    # NPC 互动:推进 npc 步骤
+    await game.npc_interact("g1", "u1", "老铁", "打听墓场外的传闻")
+    qs1 = await game.ensure_quests("g1", "u1")
+    qi0 = next(i for i, q in enumerate(qs1) if q["id"] == q0["id"])
+    st0 = json.loads(qs1[qi0]["steps"])
+    assert st0[0]["done"] and st0[1]["done"] and not st0[2]["done"], st0
+    qi_npc = next(i for i, q in enumerate(qs1) if "打听传闻" in q["text"])
+    assert json.loads(qs1[qi_npc]["steps"])[0]["done"]
+    # 兼职:work 步骤需到点结算才推进
+    wv = game.work_today("g1", "u1")
+    assert wv["phase"] == "start"
+    _fl = dict(db.get_char("g1", "u1").flags)
+    _fl["_work"]["until"] = time.time() - 1
+    db.update_char("g1", "u1", flags=_fl)
+    wd = await game.settle_work("g1", "u1")
+    assert wd["phase"] == "done" and wd["earn"] > 0
+    assert "_work" not in (db.get_char("g1", "u1").flags or {})
+    # 全部步骤完成 → 交付成功
     qv = await game.complete_quest("g1", "u1", 0)
     assert qv["type"] == "result" and qv["changes"] and qv["narration"]
     assert db.get_char("g1", "u1").exp >= 5  # 奖励到账
-    # 防重复守卫:同一任务重复结算会被拒(拿刚完成的任务 id 直接验证)
+    # 防重复守卫:同一委托重复结算会被拒
     done_id = next(q["id"] for q in db.list_quests("g1", "u1", game._day_key()) if q["state"] == "done")
     assert not db.resolve_quest_if_open(done_id), "重复结算未被拦截"
-    ok += 1; print("✓ 每日小任务:AI 按世界生成 → 结算 → 小奖励 → 防重复")
+    ok += 1; print("✓ 委托任务:委托人/发布设施/多步骤(冒险+物品+NPC+兼职)→交付→防重复")
 
     # 6. NPC 互动
     v = await game.npc_interact("g1", "u2", "老铁", "想打听雾码头的规矩")
@@ -1583,4 +1825,5 @@ if __name__ == "__main__":
     asyncio.run(check_world_life())
     asyncio.run(check_life_char())
     asyncio.run(check_npc_turnover())
+    asyncio.run(check_facility_home())
     asyncio.run(main())

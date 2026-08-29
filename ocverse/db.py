@@ -559,12 +559,66 @@ class Database:
         return row["value"] if row else None
 
     # ── quests (每日小任务) ────────────────────────────────────
-    def add_quest(self, gid: str, uid: str, day: str, text: str, hint: str = "") -> int:
+    def add_quest(self, gid: str, uid: str, day: str, text: str, hint: str = "",
+                  steps: list | None = None, giver: str = "", place: str = "") -> int:
         cur = self._ex(
-            "INSERT INTO quests (gid,uid,day,text,hint,created_at) VALUES (?,?,?,?,?,?)",
-            (gid, uid, day, text[:48], hint[:60], time.time()),
+            "INSERT INTO quests (gid,uid,day,text,hint,steps,giver,place,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (gid, uid, day, text[:48], hint[:60],
+             json.dumps(steps or [], ensure_ascii=False),
+             (giver or "")[:24], (place or "")[:24], time.time()),
         )
         return int(cur.lastrowid)
+
+    def update_quest_steps(self, qid: int, steps: list):
+        """同步任务步骤进度(done 标记)。"""
+        self._ex("UPDATE quests SET steps=? WHERE id=?",
+                 (json.dumps(steps, ensure_ascii=False), qid))
+
+    # ── 背包(角色物品) ────────────────────────────────────
+    def item_add(self, gid: str, uid: str, name: str, count: int = 1, note: str = "") -> int:
+        """获得物品:存在则叠加数量并刷新备注,不存在则新建。返回当前数量。"""
+        name = (name or "").strip()[:16]
+        if not name:
+            return 0
+        self._ex(
+            "INSERT INTO items (gid,uid,name,count,note,created_at,updated_at) VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(gid,uid,name) DO UPDATE SET "
+            "count = count + excluded.count, "
+            "note = CASE WHEN excluded.note != '' THEN excluded.note ELSE items.note END, "
+            "updated_at = excluded.updated_at",
+            (gid, uid, name, max(1, int(count)), (note or "")[:40], time.time(), time.time()),
+        )
+        row = self._ex("SELECT count FROM items WHERE gid=? AND uid=? AND name=?",
+                       (gid, uid, name), "one")
+        return int(row["count"]) if row else 0
+
+    def item_remove(self, gid: str, uid: str, name: str, count: int = 1) -> bool:
+        """失去/消耗物品:数量不足则整体移除。返回是否确实减少。"""
+        name = (name or "").strip()[:16]
+        row = self._ex("SELECT id,count FROM items WHERE gid=? AND uid=? AND name=?",
+                       (gid, uid, name), "one")
+        if not row:
+            return False
+        left = int(row["count"]) - max(1, int(count))
+        if left > 0:
+            self._ex("UPDATE items SET count=?, updated_at=? WHERE id=?",
+                     (left, time.time(), row["id"]))
+        else:
+            self._ex("DELETE FROM items WHERE id=?", (row["id"],))
+        return True
+
+    def items_list(self, gid: str, uid: str) -> list[dict]:
+        rows = self._ex(
+            "SELECT id,name,count,note,updated_at FROM items "
+            "WHERE gid=? AND uid=? ORDER BY updated_at DESC",
+            (gid, uid), "all",
+        )
+        return [dict(r) for r in rows]
+
+    def item_get(self, gid: str, uid: str, name: str) -> dict | None:
+        row = self._ex("SELECT * FROM items WHERE gid=? AND uid=? AND name=?",
+                       (gid, uid, (name or "").strip()[:16]), "one")
+        return dict(row) if row else None
 
     def list_quests(self, gid: str, uid: str, day: str) -> list[dict]:
         rows = self._ex(
@@ -592,6 +646,7 @@ class Database:
         self._ex("DELETE FROM rels WHERE gid=? AND (a=? OR b=?)", (gid, uid, uid))
         self._ex("DELETE FROM events WHERE gid=? AND uid=? AND state='pending'", (gid, uid))
         self._ex("DELETE FROM quests WHERE gid=? AND uid=?", (gid, uid))
+        self._ex("DELETE FROM items WHERE gid=? AND uid=?", (gid, uid))
         self._ex("DELETE FROM bonds WHERE gid=? AND (proposer=? OR target=?)", (gid, uid, uid))
 
     # ── 知识库(素材库:联网采集的著作/轻小说等,供所有生成功能注入) ──

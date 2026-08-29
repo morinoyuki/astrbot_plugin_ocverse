@@ -11,6 +11,7 @@ from __future__ import annotations
 import random
 import time
 import zlib
+import json
 from datetime import datetime, timedelta
 
 from . import config as C
@@ -23,6 +24,14 @@ EVENT_PICK_GROUP_PROB = 0.15   # 主动事件是全员群事件的概率
 EVENT_NPC_PROB = 0.3           # 事件涉及 NPC 的概率
 LIFE_MULTI_PROB = 0.4          # 主动/定时事件是多人生活群像的概率(2~3名玩家角色偶遇/结伴)
 LIFE_MULTI_MAX = 3             # 群像生活事件最多参与角色数
+
+
+def _fire_remember(mem: MemoryStore, gid: str, uid: str, scope: str, text: str, ref: str = ""):
+    """同步路径记世界记忆:直接用同步嵌入写入,避免为异步任务埋雷(仍写日志备份)。"""
+    try:
+        mem.remember_sync(gid, uid, scope, text, ref=ref)
+    except Exception:
+        pass
 
 
 def is_npc_uid(uid: str) -> bool:
@@ -103,6 +112,26 @@ class Game:
 
     def _is_locked(self, ch: Char) -> bool:
         return bool(self._state(ch))
+
+    # ── 兼职时段制(上工 → 到点自动下班结算) ────────────────
+    WORK_SHIFT_H = 2.0  # 一个班次的现实时长(小时),同班同事随机
+
+    def _work(self, ch: Char) -> dict | None:
+        """读取当前兼职班次(未开始返回 None)。"""
+        f = (ch.flags or {}).get("_work")
+        if not isinstance(f, dict) or not f.get("until"):
+            return None
+        return f
+
+    def _work_note(self, ch: Char) -> str:
+        """兼职中的提示语(未在班次返回空串)。"""
+        f = self._work(ch)
+        if not f:
+            return ""
+        left = max(0, int((float(f["until"]) - _now()) / 60)) + 1
+        job = str(f.get("job") or "打零工")
+        spot = str(f.get("infra") or "某处")
+        return f"在「{spot}」当{job}(约{left}分钟后下班)"
 
     def _state_note(self, ch: Char) -> str:
         """状态的一句话描述(供注入 LLM),无状态返回空串。"""
@@ -253,19 +282,30 @@ class Game:
         self.db.append_log(gid, "", "misc", f"一位生活角色「{ch.name}」加入了群世界")
         return ch
 
+    _PLOT_TIERS = [
+        ("转角小屋", 700), ("街边平房", 1400), ("老宅", 2400),
+        ("临街铺面", 3600), ("花园洋房", 5200), ("湖畔庄园", 8200),
+    ]
+
     def _seed_plots(self, gid: str, w: World, plots: list):
-        """把世界生成里 LLM 设计的入手住处建成地块记录。"""
+        """把世界生成里 LLM 设计的入手住处建成地块记录(价格弱拍进分档区间)。"""
         if self.db.plots(gid, w.id):
             return  # 已种过(重建世界刷新区块时可能残留则跳过旧世界)
+        tiers = [p for p in self._PLOT_TIERS if p[1] >= 1000]
+        k = 0
         for i, p in enumerate(plots, 1):
             if not isinstance(p, dict) or not (p.get("name") or ""):
                 continue
+            price = int(p.get("price") or 0) or 0
+            if price < 600:
+                # 太便宜就提升到分档档位,保证房产是攒钱目标
+                _, price = tiers[k % len(tiers)]; k += 1
             self.db.plot_add(gid, w.id, i, p.get("kind") or "房", p.get("name") or "住处",
-                             p.get("desc") or "", p.get("price") or 200)
+                             p.get("desc") or "", price)
         if not self.db.plots(gid, w.id):
             # 完全没设计出住处时给默认地块,保证可买
-            for i, nm in enumerate(["转角小屋", "街边平房", "老宅"], 1):
-                self.db.plot_add(gid, w.id, i, "房", nm, f"《{w.name}》的一处落脚处", 200 * i)
+            for i, (nm, pr) in enumerate(self._PLOT_TIERS, 1):
+                self.db.plot_add(gid, w.id, i, "房", nm, f"《{w.name}》的一处落脚处", pr)
 
     async def init_world(self, gid: str, desc: str | None, by: str) -> dict:
         """管理员初始化/重建群世界。返回抵达 view。"""
@@ -421,6 +461,7 @@ class Game:
 
     # ══════════════ 世界设施:基线保底 / 每日流转 / AI 重新规划 ══════════════
     INFRA_WORK_MIN = 2      # 每个世界至少 2 处可打工的设施
+    HOME_EVENT_P = 0.30     # 回宅时小概率触发家居事件剧情(每天一次)
     INFRA_OPEN_P = 0.06     # 每日「新开/建成」一家设施的概率
     INFRA_CLOSE_P = 0.04    # 每日「倒闭」一家设施的概率
 
@@ -494,9 +535,12 @@ class Game:
                                    f"《{w.name}》的「{victim.get('name')}」(「{victim.get('kind', '')}」)"
                                    "经营不善,倒闭了",
                                    w.name)
+                _fire_remember(self.mem, gid, "", "world",
+                                f"《{w.name}》的「{victim.get('name')}」经营不善倒闭了",
+                                ref=f"infra:{_now():.0f}")
                 changed = True
         # 新开/建成:从同风格模板池里挑一家(名字避重)
-        if random.random() < self.INFRA_OPEN_P and len(infra) < 12:
+        if random.random() < self.INFRA_OPEN_P and len(infra) < C.INFRA_MAX:
             used = {i.get("name") for i in infra}
             pool = [dict(t) for t in pack if t["name"] not in used] or [dict(t) for t in pack]
             tpl = random.choice(pool)
@@ -505,6 +549,8 @@ class Game:
             self.db.append_log(gid, "", "misc",
                                f"《{w.name}》的「{tpl['name']}」({tpl.get('kind', '')}){flavor}",
                                w.name)
+            _fire_remember(self.mem, gid, "", "world",
+                                             f"《{w.name}》的「{tpl['name']}」{flavor}", ref=f"infra:{_now():.0f}")
             changed = True
         # 生存基线保底
         infra, notes = self._ensure_infra_baseline(w, infra)
@@ -560,6 +606,8 @@ class Game:
             out = [n for n in out if n is not victim]
             self.db.append_log(gid, "", "misc",
                                f"《{w.name}》的「{victim.get('name')}」收拾行囊搬去了别处", w.name)
+            _fire_remember(self.mem, gid, "", "world",
+                                             f"《{w.name}》的「{victim.get('name')}」搬去了别处", ref=f"npc:{_now():.0f}")
             changed = True
         # 2) 小概率一位系统NPC换工作(角色/行踪变化)
         if random.random() < 0.06 and out:
@@ -572,6 +620,8 @@ class Game:
                 out[mover_idx] = mover
                 self.db.append_log(gid, "", "misc",
                                    f"《{w.name}》的「{mover.get('name')}」换了一份生计", w.name)
+                _fire_remember(self.mem, gid, "", "world",
+                                                 f"《{w.name}》的「{mover.get('name')}」换了营生", ref=f"npc:{_now():.0f}")
                 changed = True
         # 3) 小概率迎来一位新面孔(用模板,后续LLM互动时自然补全)
         if random.random() < 0.10 and len(out) < self._cfgi("max_npcs_per_world", 32):
@@ -922,6 +972,8 @@ class Game:
             changes = self._apply_effects(target_char, data.get("effects") or {})
             if state_note:  # 事件可脱困/加深/换困境(仅个人事件;群事件不动状态)
                 changes += self._apply_state_result(target_char, data)
+            # 事件中的物品得失(拾获/受赠/被掳/消耗)
+            changes += self._apply_items(gid, target_char.uid, data.get("items_gain"), data.get("items_lose"))
         else:
             # 全员事件:同样效果落到每个角色(金币不重复发放,避免通胀)
             ge = dict(data.get("effects") or {})
@@ -1073,6 +1125,10 @@ class Game:
         if not world:
             raise GameError("世界尚未初始化")
         self._interaction_limit_hit(a)
+        # 兼职时段:上工中无法互动
+        a_wn = self._work_note(a)
+        if a_wn:
+            raise GameError(f"⚒ 你正{a_wn},上班摸鱼被老板盯上可就不好啦——下班再找「{b.name}」吧。")
         # 特殊状态:被困者不能主动与群友互动(等别人来救/脱困后再说)
         a_state = self._state_note(a)
         if a_state:
@@ -1191,6 +1247,11 @@ class Game:
         self.db.append_log(gid, uid_a, "interaction",
                            f"{a.name} 对 {b.name}「{mode}」:{(data.get('narration') or '')[:90]}(羁绊{rel})",
                            world.name)
+        # 任务进度:群友互动(social)/生活角色互动(life)
+        if is_npc_uid(uid_b):
+            self._quest_progress(gid, uid_a, "life", name=b.name)
+        else:
+            self._quest_progress(gid, uid_a, "social")
         return {
             "type": "interact",
             "gid": gid,
@@ -1300,6 +1361,9 @@ class Game:
         world = self.db.cur_world(gid)
         if not world:
             raise GameError("世界尚未初始化")
+        wn = self._work_note(ch)
+        if wn:
+            raise GameError(f"⚒ 你正{wn},上班时间还是先把活干完吧——下班再来找「{npc_name}」。")
         npc = None
         for n in world.npcs:
             if n.get("name") == npc_name:
@@ -1325,6 +1389,8 @@ class Game:
                                 data.get("memory") or f"{ch.name}找{npc_name}:{action[:30]}")
         self.db.append_log(gid, uid, "npc",
                            f"{ch.name} 与 {npc_name}:{(data.get('reply') or '')[:60]}…", world.name)
+        # 任务进度:世界NPC互动
+        self._quest_progress(gid, uid, "npc", name=npc_name)
         return {
             "type": "npc",
             "gid": gid,
@@ -1350,6 +1416,10 @@ class Game:
             raise GameError("世界尚未初始化,管理员:「/分身 初始化世界」")
         preset = C.ACTIONS.get(act_key) or C.ACTIONS["冒险"]
         name = preset["name"]
+        # 兼职时段:上工中无法主动行动
+        wn = self._work_note(ch)
+        if wn:
+            raise GameError(f"⚒ 你正{wn},下班前没法自由行动。先专心把班上完吧。")
         # 特殊状态:被困时只能靠『冒险』拼脱困,预设施名(练习/健身/打怪)一律禁止
         state_note = self._state_note(ch)
         if state_note and name != "冒险":
@@ -1397,6 +1467,11 @@ class Game:
         if state_note:  # 冒险脱困:在 flags 复位后施加/解除状态,避免被覆盖
             state_changes = self._apply_state_result(ch, r.data)
         changes += state_changes
+        # 物品得失(冒险捡到/缴获/消耗)
+        changes += self._apply_items(gid, uid, r.data.get("items_gain"), r.data.get("items_lose"))
+        # 任务进度:冒险/打怪 行动
+        if name in ("冒险", "打怪"):
+            self._quest_progress(gid, uid, "act", name=name, text=f"{ch.name} {detail[:60]}")
         mem_text = r.data.get("memory") or f"{ch.name}在《{world.name}》「{name}」:{detail[:30]}"
         await self.mem.remember(gid, uid, "char", mem_text, ref=f"act:{_now():.0f}")
         await self.mem.remember(gid, "", "world",
@@ -1649,6 +1724,10 @@ class Game:
                                 f"《{w.name}》主线进展:「{cur['stage']}」——{result_text[:80]}")
         self.db.append_log(gid, uid, "event",
                            f"{ch.name} 推进主线「{cur['stage']}」:{result_text[:80]}", w.name)
+        # 主线阶段结束 → 记一段到世界记忆
+        if not [m for m in ml if not m.get("done")] and len(list(w.mainline or [])):
+            await self.mem.remember(gid, "", "world",
+                                    f"《{w.name}》主线的「{cur['stage']}」这一小节落幕了", ref=f"mainline:{w.id}")
         remaining = [m for m in ml if not m.get("done")]
         return {
             "type": "mainline",
@@ -1667,11 +1746,16 @@ class Game:
             raise GameError("你还没有创建分身")
         if self._is_locked(ch):
             raise GameError(f"⛓ 你正被「{self._state_note(ch)}」困住,无法{what}。")
+        wn = self._work_note(ch)
+        if wn:
+            raise GameError(f"⚒ 你正{wn},下班前没法{what}。先专心把班上完吧。")
         return ch
 
     def work_today(self, gid: str, uid: str) -> dict | None:
-        """在世界基础设施里找一份工作干一天(赚金币)。返回 view 或 None(无法工作)。"""
-        ch = self._require_free(gid, uid, "去工作")
+        """上工:在世界基础设施里找一份班(约 WORK_SHIFT_H 小时后自动下班结算)。
+        上工期间无法主动行动/互动/再兼职,到点由主循环 _sweep_work 统一结算。
+        返回 view(phase=start)或 None(没有可打工的地方)。"""
+        ch = self._require_free(gid, uid, "去上工")
         w = self.db.cur_world(gid)
         if not w:
             raise GameError("世界尚未初始化")
@@ -1679,33 +1763,257 @@ class Game:
         if not infra:
             raise GameError(f"《{w.name}》里暂时没有能打工的地方(试试冒险、打工指令,或重新生成世界)。")
         spot = random.choice(infra)
-        day = self._day_key()
-        flags = dict(ch.flags or {})
-        fk = f"_work:{day}"
-        n = int(flags.get(fk, 0))
-        if n >= 2:
-            raise GameError("今天的工作份额已经满了(每天最多2次),明天再来吧。")
-        flags[fk] = n + 1
         cost = 25
         if ch.stamina < cost:
             raise GameError(f"体力不足({ch.stamina}/{cost}),先去歇歇。")
+        flags = dict(ch.flags or {})
+        if flags.get("_work"):
+            raise GameError("你正在上一班里,等下班再说。")
+        # 世界 NPC 名字池里挑一位同班同事
+        colleague = ""
+        npcs = [n.get("name") for n in (w.npcs or []) if str(n.get("name", "")).strip()]
+        if npcs:
+            colleague = random.choice(npcs)
+        until = _now() + self.WORK_SHIFT_H * 3600
+        flags["_work"] = {
+            "until": until,
+            "started": _now(),
+            "infra": str(spot.get("name") or "某处"),
+            "job": str(spot.get("work") or "打零工"),
+            "colleague": colleague,
+        }
         ch.stamina = max(0, ch.stamina - cost)
-        earn = random.randint(25, 55)
-        ch.gold += earn
         ch.flags = flags
         self.db.upsert_char(ch)
-        self.db.append_log(gid, uid, "act",
-                           f"{ch.name} 在《{w.name}》的「{spot['name']}」({spot.get('work')})打了半天工,赚了{earn}金币", w.name)
+        self.db.append_log(gid, uid, "act", f"{ch.name} 在《{w.name}》的「{spot['name']}」({spot.get('work')})上工了", w.name)
+        left_min = int(self.WORK_SHIFT_H * 60)
         return {
             "type": "work",
+            "phase": "start",
             "gid": gid,
             "char_name": ch.name,
             "world_name": w.name,
             "spot": str(spot.get("name") or "某处"),
             "occupation": str(spot.get("work") or "打零工"),
-            "earn": earn,
+            "colleague": colleague,
+            "until_min": left_min,
+            "hours": self.WORK_SHIFT_H,
             "cost": cost,
-            "changes": [f"体力-{cost}", f"金币+{earn}"],
+            "changes": [f"体力-{cost}"],
+        }
+
+    async def settle_work(self, gid: str, uid: str) -> dict:
+        """到点自动结算兼职:摘除班次标记 → 本地计算工钱 → LLM 写下班叙述+同事道别。
+        从 flags 摘掉 _work 后再结算,避免并发重复结算。"""
+        ch = self.db.get_char(gid, uid)
+        if not ch:
+            raise GameError("你还没有创建分身")
+        f = self._work(ch)
+        if not f:
+            raise GameError("你现在没有在班的兼职。")
+        flags = dict(ch.flags or {})
+        flags.pop("_work", None)
+        ch.flags = flags
+        self.db.upsert_char(ch)  # 先摘标记,防并发
+        w = self.db.cur_world(gid)
+        world_name = w.name if w else ""
+        spot = str(f.get("infra") or "某处")
+        job = str(f.get("job") or "打零工")
+        colleague = str(f.get("colleague") or "") or None
+        started = float(f.get("started") or _now())
+        hours = max(0.1, round((_now() - started) / 3600, 1))
+        earn = random.randint(25, 55) + (getattr(ch, "level", 1) or 1) * 3
+        ch.gold += earn
+        self.db.upsert_char(ch)
+        # LLM 下班叙述(可选:world 不在/失败时用兜底叙述)
+        if w is not None:
+            try:
+                r = await self.brain.settle_work(
+                    world=w, char=ch, spot=spot, job=job, hours=hours,
+                    colleague=colleague, material=await self._kb_ctx(gid, "下班 收工 兼职"))
+            except Exception:
+                r = None
+        else:
+            r = None
+        changes = []
+        if r and r.ok:
+            eff = dict(r.data.get("effects") or {})
+            eff.pop("gold", None)  # 工钱本地入账,防双重
+            changes += self._apply_effects(ch, eff)
+            narration = str(r.data.get("narration") or "")[:300]
+            dialogues = self._norm_r_dialogues(r.data)
+            gains, loses = r.data.get("items_gain") or [], r.data.get("items_lose") or []
+            changes += self._apply_items(gid, uid, gains, loses)
+            ok_llm = True
+        else:
+            narration = (f"{ch.name}在「{spot}」忙了约 {hours} 小时,收工时腰酸背痛,"
+                         f"揣着 {earn} 金币的工钱走进暮色里。")
+            dialogues = []
+            changes += self._apply_effects(ch, {"mood": 3, "exp": 4})
+            ok_llm = False
+        changes.append(f"金币+{earn}")
+        await self.mem.remember(gid, uid, "char", f"在「{spot}」做{job}下班,赚了{earn}金币", ref=f"work:{_now():.0f}")
+        if world_name:
+            await self.mem.remember(gid, "", "world", f"《{world_name}》{ch.name}在「{spot}」下班收工", ref=f"work:{_now():.0f}")
+        self.db.append_log(gid, uid, "act",
+                           f"{ch.name} 在《{world_name}》的「{spot}」({job})下班,赚了{earn}金币 ", world_name)
+        self._quest_progress(gid, uid, "work")
+        return {
+            "type": "work",
+            "phase": "done",
+            "gid": gid,
+            "uid": uid,
+            "char_name": ch.name,
+            "world_name": world_name,
+            "spot": spot,
+            "occupation": job,
+            "colleague": colleague or "",
+            "hours": hours,
+            "earn": earn,
+            "narration": narration,
+            "dialogues": dialogues,
+            "changes": changes,
+            "ok_llm": ok_llm,
+        }
+
+    async def _sweep_work(self, gid: str) -> list[dict]:
+        """主循环扫描:把到点下班的班次全部自动结算(一次广播)。"""
+        now = _now()
+        views = []
+        for ch in self.db.list_chars(gid):
+            f = self._work(ch)
+            if not f or now < float(f.get("until") or 0):
+                continue
+            try:
+                views.append(await self.settle_work(gid, ch.uid))
+            except GameError:
+                continue
+            except Exception:
+                # 摘标记失败/其他异常:清掉班次,避免永久卡住
+                flags = dict(ch.flags or {}); flags.pop("_work", None)
+                ch.flags = flags; self.db.upsert_char(ch)
+        return views
+
+    @staticmethod
+    def _norm_r_dialogues(r_data: dict) -> list:
+        """兼容:LLM 返回的对话可能有嵌套 structures;统一为 [{speaker,text}]。"""
+        dlg = r_data.get("dialogues")
+        if isinstance(dlg, list):
+            out = []
+            for x in dlg[:6]:
+                if isinstance(x, dict):
+                    out.append({"speaker": str(x.get("speaker", "")).strip()[:8],
+                                "text": str(x.get("text", "")).strip()[:60]})
+            return out
+        return []
+
+    def _apply_items(self, gid: str, uid: str, gains: list | None, loses: list | None) -> list[str]:
+        """应用 LLM/事件给出的物品变化,并推进相关任务步骤(item 类)。"""
+        tags = []
+        for g in (gains or [])[:2]:
+            if not (isinstance(g, dict) and str(g.get("name", "")).strip()):
+                continue
+            name = str(g["name"]).strip()[:12]
+            self.db.item_add(gid, uid, name, 1, str(g.get("note", "")).strip()[:20])
+            tags.append(f"🎒 获得「{name}」")
+            self._quest_progress(gid, uid, "item", item=name)
+        for name in (loses or [])[:2]:
+            name = str(name).strip()[:12]
+            if name and self.db.item_remove(gid, uid, name, 1):
+                tags.append(f"🎒 失去「{name}」")
+        return tags
+
+    def _quest_progress(self, gid: str, uid: str, kind: str, name: str = "", text: str = "", item: str = ""):
+        """推进今日开放任务的步骤进度(act/npc/life/social/work/item),持久化 done 标记。"""
+        if kind not in ("act", "npc", "life", "social", "work", "item"):
+            return
+        day = self._day_key()
+        qs = self.db.list_quests(gid, uid, day)
+        for q in qs:
+            if q["state"] != "open":
+                continue
+            steps = json.loads(q.get("steps") or "[]") if isinstance(q.get("steps"), str) else (q.get("steps") or [])
+            changed = False
+            for s in steps:
+                if not isinstance(s, dict) or s.get("done"):
+                    continue
+                t = str(s.get("type") or "")
+                if t == "act" and kind == "act" and name in ("冒险", "打怪") and text:
+                    kws = [str(k).strip() for k in (s.get("keywords") or []) if str(k).strip()]
+                    if kws and any(k in text for k in kws):
+                        s["done"] = True; changed = True
+                elif t == "npc" and kind == "npc" and name:
+                    target = str((s.get("npc") or "")).strip()
+                    if target and (target in name or name in target):
+                        s["done"] = True; changed = True
+                elif t == "life" and kind == "life" and name:
+                    target = str((s.get("npc") or "")).strip()
+                    if target and (target in name or name in target):
+                        s["done"] = True; changed = True
+                elif t == "social" and kind == "social":
+                    s["done"] = True; changed = True
+                elif t == "work" and kind == "work":
+                    s["done"] = True; changed = True
+                elif t == "item" and kind == "item" and item:
+                    target = str((s.get("item") or "")).strip()
+                    if target and (target in item or item in target):
+                        s["done"] = True; changed = True
+            if changed:
+                self.db.update_quest_steps(q["id"], steps)
+
+    async def visit_facility(self, gid: str, uid: str, name: str, action: str = "") -> dict:
+        """去一家可交互设施(社交/娱乐/约会等)消磨时光,产生一段事件剧情。
+        每个设施每天限 1 次;打工中/被困不可前往。"""
+        ch = self._require_free(gid, uid, "去光顾")
+        w = self.db.cur_world(gid)
+        if not w:
+            raise GameError("世界尚未初始化")
+        facs = [i for i in (w.infra or []) if isinstance(i, dict) and str(i.get("name", "")).strip()]
+        it = next((i for i in facs if name == i["name"] or name in i["name"] or i["name"] in name), None)
+        if it is None:
+            names = "、".join(f"{i.get('name')}" for i in facs[:20]) or "无"
+            raise GameError(f"《{w.name}》没有「{name}」这处地方。现有设施:{names}")
+        if not C.infra_interactable(it):
+            raise GameError(
+                f"「{it.get('name')}」只是一处普通设施(去「{it.get('kind','')}」最好用「/分身 兼职」打工、"
+                "或「/分身 npc」拜访;社交/娱乐/约会类场所才可光顾消遣)。")
+        day = self._day_key()
+        flags = dict(ch.flags or {})
+        fk = f"_fac:{it['name']}:{day}"
+        if int(flags.get(fk, 0)) >= 1:
+            raise GameError(f"「{it['name']}」今天你已经去过了,明天再来逛逛吧。")
+        flags[fk] = int(flags.get(fk, 0)) + 1
+        ch.flags = flags
+        self.db.upsert_char(ch)
+        mems = await self.mem.related(gid, f"{ch.name} 去 {it['name']} {action}", uid=uid, k=3)
+        r = await self.brain.facility_event(
+            world=w, char=ch, facility=it, action=action, memories=mems,
+            material=await self._kb_ctx(gid, f"设施 社交 娱乐 {it['name']}"))
+        data = r.data
+        changes = self._apply_effects(ch, data.get("effects") or {})
+        changes += self._apply_items(gid, uid, data.get("items_gain"), data.get("items_lose"))
+        self.db.upsert_char(ch)
+        await self.mem.remember(gid, uid, "char",
+                                data.get("memory") or f"{ch.name}去{it['name']}消磨了时光",
+                                ref=f"fac:{_now():.0f}")
+        await self.mem.remember(gid, "", "world",
+                                f"《{w.name}》{ch.name}光顾「{it['name']}」:{(data.get('narration') or '')[:40]}",
+                                ref=f"fac:{_now():.0f}")
+        self.db.append_log(gid, uid, "act",
+                           f"{ch.name} 光顾「{it['name']}」:{(data.get('narration') or '')[:80]}", w.name)
+        return {
+            "type": "facility",
+            "gid": gid,
+            "char_name": ch.name,
+            "world_name": w.name,
+            "facility": it,
+            "action": action,
+            "narration": data.get("narration", ""),
+            "dialogues": data.get("dialogues") or [],
+            "avatars": self._avatar_map(gid),
+            "title": f"🏮 {it['name']} · {it.get('kind','')}",
+            "changes": changes,
+            "ok_llm": r.ok,
         }
 
     def list_plots(self, gid: str, world_ref: str = "") -> list[dict]:
@@ -1734,8 +2042,23 @@ class Game:
         self.db.update_char(gid, uid, flags={**ch.flags, "home_plot": p["id"]})
         return w, p, [f"金币-{price}", f"🏠 已购入「{p['name']}」"]
 
+    @staticmethod
+    def _home_recovery(price: int) -> tuple[int, int]:
+        """按房价分档的回家恢复:越贵回得越多(体力, 心情)。"""
+        if price >= 8000:
+            return 70, 25
+        if price >= 5000:
+            return 55, 20
+        if price >= 3200:
+            return 42, 15
+        if price >= 2000:
+            return 32, 12
+        if price >= 1000:
+            return 24, 9
+        return 15, 6
+
     async def my_home(self, gid: str, uid: str) -> dict:
-        """造访/查看自宅:有房则给一段休息恢复。"""
+        """回宅休整:每天一次;按房价分档回体力/心情;小概率触发家居事件剧情。"""
         ch = self._require_free(gid, uid, "回宅休息")
         w = self.db.cur_world(gid)
         pid = (ch.flags or {}).get("home_plot")
@@ -1744,23 +2067,55 @@ class Game:
         p = self.db.plot_get(int(pid))
         if not p or str(p.get("world_id")) != str(w.id if w else -1):
             raise GameError("你的房产不在这里(穿越后到了另一个世界)。")
-        gain = min(C.MOOD_MAX, ch.mood + 8)
-        ch.mood = gain
-        ch.stamina = min(C.STAMINA_MAX, ch.stamina + 15)
+        day = self._day_key()
+        flags = dict(ch.flags or {})
+        if flags.get("_home_day") == day:
+            raise GameError("今天已经回过宅补充过体力了,明天再回来歇歇吧。")
+        st_gain, mo_gain = self._home_recovery(int(p.get("price") or 1000))
+        ch.mood = min(C.MOOD_MAX, ch.mood + mo_gain)
+        ch.stamina = min(C.STAMINA_MAX, ch.stamina + st_gain)
+        flags["_home_day"] = day
+        ch.flags = flags
         self.db.upsert_char(ch)
-        self.db.append_log(gid, uid, "misc", f"{ch.name} 回《{w.name}》的「{p['name']}」休息了一阵", w.name)
-        return {
+        self.db.append_log(gid, uid, "misc",
+                           f"{ch.name} 回《{w.name}》的「{p['name']}」休息了一阵(体力+{st_gain}/心情+{mo_gain})", w.name)
+        view = {
             "type": "home",
             "gid": gid,
             "char_name": ch.name,
             "world_name": w.name if w else "",
             "plot": p,
-            "changes": ["心情+8", "体力+15"],
+            "stamina_gain": st_gain,
+            "mood_gain": mo_gain,
+            "changes": [f"心情+{mo_gain}", f"体力+{st_gain}"],
+            "ok_llm": False,
         }
+        # 小概率触发家居事件剧情(每天一次,因为回家本身每天一次)
+        try:
+            if w is not None and random.random() < self.HOME_EVENT_P:
+                r = await self.brain.home_event(
+                    world=w, char=ch, plot=p,
+                    memories=await self.mem.related(gid, f"{ch.name} 回家 家居", uid=uid, k=2),
+                    material=await self._kb_ctx(gid, "回家 家居 日常"))
+                if r.ok and r.data.get("narration"):
+                    ev_eff = dict(r.data.get("effects") or {})
+                    ev_eff.pop("gold", None); ev_eff.pop("stamina", None)
+                    view["changes"] += self._apply_effects(ch, ev_eff)
+                    view["narration"] = str(r.data.get("narration"))[:220]
+                    view["dialogues"] = self._norm_r_dialogues(r.data)
+                    view["event_title"] = f"🏠 归家的插曲 · {p.get('name')}"
+                    view["ok_llm"] = True
+                    self.db.upsert_char(ch)
+                    await self.mem.remember(gid, uid, "char",
+                                            r.data.get("memory") or f"回了{ p.get('name') }家歇息",
+                                            ref=f"home:{_now():.0f}")
+        except Exception:
+            pass
+        return view
 
     # ══════════════ 每日小任务(轻松、按世界生成)══════════════
     async def ensure_quests(self, gid: str, uid: str) -> list[dict]:
-        """领取/查看今日小任务:无则按世界+角色+记忆生成 3 个(目标不要太难)。被困时无法领取/查看。"""
+        """领取/查看今日任务:无则按世界+设施+NPC/生活角色+记忆生成 3 个带委托人/步骤的委托。"""
         day = self._day_key()
         ch = self.db.get_char(gid, uid)
         if not ch:
@@ -1768,7 +2123,7 @@ class Game:
         state_note = self._state_note(ch)
         if state_note:
             raise GameError(
-                f"⛓ 你正被「{state_note}」困住,连今日的小任务也无从下手。"
+                f"⛓ 你正被「{state_note}」困住,连今日的委托也无从下手。"
                 "先脱困再说——「/分身 冒险 <描述>」、找特殊NPC求助,或等群友来救 / 时机变化。"
             )
         qs = self.db.list_quests(gid, uid, day)
@@ -1777,23 +2132,50 @@ class Game:
         world = self.db.cur_world(gid)
         if not world:
             raise GameError("世界尚未初始化")
-        mems = await self.mem.related(gid, f"{ch.name} 日常 小目标", uid=uid, k=3)
-        r = await self.brain.gen_quests(world=world, char=ch, memories=mems,
-                                        material=await self._kb_ctx(gid, "日常 小任务 生活"))
-        for t in (r.data.get("quests") or [])[:3]:
-            if t.get("text"):
-                self.db.add_quest(gid, uid, day, t["text"], t.get("hint", ""))
+        npc_names = list(world.npc_names())
+        life_names = [c.name for c in self.db.list_chars(gid) if is_npc_uid(c.uid)]
+        facs = [i for i in (world.infra or []) if isinstance(i, dict) and str(i.get("name", "")).strip()]
+        mems = await self.mem.related(gid, f"{ch.name} 委托 任务", uid=uid, k=3)
+        r = await self.brain.gen_quests(world=world, char=ch, npc_names=npc_names,
+                                        life_names=life_names, facilities=facs, memories=mems,
+                                        material=await self._kb_ctx(gid, "委托 任务 世界观"))
+        quests = r.data.get("quests") if r.ok else []
+        if not quests:
+            # AI 兜底:设施/NPC 驱动的本地模板
+            fac = facs[0] if facs else {}
+            quests = [{
+                "text": "公会委托:讨伐作乱妖物", "giver": str(fac.get("name") or "冒险者公会"),
+                "place": str(fac.get("name") or "冒险者公会"),
+                "hint": "用「分身 冒险」去讨伐,关键词带【讨伐】",
+                "steps": [{"type": "act", "desc": "讨伐一次作乱妖物", "keywords": ["讨伐"], "done": False},
+                           {"type": "npc", "desc": "找回一位NPC", "npc": (npc_names or ["老铁"])[0], "done": False}],
+            }, {
+                "text": "帮委托人跑腿", "giver": (npc_names or ["季小姐"])[0] if len(npc_names) > 1 else "旧识",
+                "place": str(fac.get("name") or "集市"), "hint": "找对方聊几句就算数",
+                "steps": [{"type": "npc", "desc": "与委托人碰面", "npc": (npc_names or ["季小姐"])[-1], "done": False}],
+            }, {
+                "text": "赚点外快", "giver": "杂货铺掌柜", "place": str(fac.get("name") or "集市"),
+                "hint": "「分身 兼职」上一班",
+                "steps": [{"type": "work", "desc": "完成一次兼职打工", "done": False}],
+            }]
+        for t in quests[:3]:
+            if not t.get("text"):
+                continue
+            self.db.add_quest(gid, uid, day, t["text"], t.get("hint", ""),
+                              steps=t.get("steps"), giver=t.get("giver", ""), place=t.get("place", ""))
         return self.db.list_quests(gid, uid, day)
 
     async def complete_quest(self, gid: str, uid: str, idx: int) -> dict:
-        """完成一个小任务:轻松结算 + 小奖励(exp/gold/mood 都很克制)。"""
+        """向委托人交付任务:所有步骤都完成才能交;空步骤兼容旧行为。上场人物锁定委托人。"""
         ch = self.db.get_char(gid, uid)
         if not ch:
             raise GameError("你还没有创建分身")
+        if self._work_note(ch):
+            raise GameError(f"⚒ 你正{self._work_note(ch)},等下班再去交付委托吧。")
         state_note = self._state_note(ch)
         if state_note:
             raise GameError(
-                f"⛓ 你正被「{state_note}」困住,没法去完成今日小任务。"
+                f"⛓ 你正被「{state_note}」困住,没法去完成委托。"
                 "先脱困再说——「/分身 冒险 <描述>」、找特殊NPC求助,或等群友来救 / 时机变化。"
             )
         world = self.db.cur_world(gid)
@@ -1804,23 +2186,37 @@ class Game:
         if not (0 <= idx < len(open_qs)):
             raise GameError(f"请选择 1~{len(open_qs)} 之间的编号")
         q = open_qs[idx]
+        steps = json.loads(q.get("steps") or "[]") if isinstance(q.get("steps"), str) else (q.get("steps") or [])
+        undone = [s for s in steps if isinstance(s, dict) and not s.get("done")]
+        if steps and undone:
+            bullets = "\n".join(f"  ☐ {s.get('desc','')}" for s in undone[:3])
+            raise GameError(
+                f"委托「{q['text']}」还没完成全部步骤:需要先把这些做到——\n{bullets}\n"
+                "做完后再来交付即可。")
         if not self.db.resolve_quest_if_open(q["id"]):
-            raise GameError("这个任务刚被完成了")
-        mems = await self.mem.related(gid, f"{ch.name} {q['text']}", uid=uid, k=2)
-        r = await self.brain.finish_quest(world=world, char=ch, quest=q["text"], memories=mems,
-                                         material=await self._kb_ctx(gid, "任务完成 日常"))
+            raise GameError("这个委托刚被交付了")
+        steps_desc = [f"{s.get('desc','')}" for s in steps if isinstance(s, dict)]
+        giver = q.get("giver") or "委托人"
+        place = q.get("place") or ""
+        mems = await self.mem.related(gid, f"{ch.name} 交付 {q['text']} {giver}", uid=uid, k=2)
+        r = await self.brain.finish_quest(world=world, char=ch, quest=q["text"], giver=giver,
+                                          place=place, steps_desc=steps_desc, memories=mems,
+                                          material=await self._kb_ctx(gid, "交付 委托 报酬"))
         changes = self._apply_effects(ch, r.data.get("effects") or {})
-        await self.mem.remember(gid, uid, "char", f"完成了小任务「{q['text']}」", ref=f"quest:{q['id']}")
+        changes += self._apply_items(gid, uid, r.data.get("items_gain"), [])
+        await self.mem.remember(gid, uid, "char", f"交付委托「{q['text']}」(委托人:{giver})", ref=f"quest:{q['id']}")
+        await self.mem.remember(gid, "", "world",
+                                f"《{world.name}》{ch.name}完成了委托「{q['text']}」", ref=f"quest:{q['id']}")
         self.db.append_log(gid, uid, "quest",
-                           f"完成小任务「{q['text']}」:{(r.data.get('narration') or '')[:80]}", world.name)
+                           f"完成委托「{q['text']}」:{(r.data.get('narration') or '')[:80]}", world.name)
         return {
             "type": "result",
             "gid": gid,
             "uid": uid,
             "char_name": ch.name,
             "world_name": world.name,
-            "event_title": f"任务·{q['text']}",
-            "chosen": q["text"],
+            "event_title": f"委托交付 · {q['text']}",
+            "chosen": f"向{giver}交任务",
             "narration": r.data.get("narration", ""),
             "dialogues": r.data.get("dialogues") or [],
             "avatars": self._avatar_map(gid),
@@ -1831,6 +2227,23 @@ class Game:
     def _avatar_map(self, gid: str) -> dict:
         """群内所有 OC 的名字→头像路径(仅已设置头像者),供 IM 对话气泡使用。"""
         return {c.name: c.avatar for c in self.db.list_chars(gid) if c.avatar}
+
+    async def world_memory_panel(self, gid: str, world_name: str, k: int = 5) -> list[str]:
+        """世界记忆面板:世界范畴(world/npc 等)的最近大事记,供「分身 世界」展示。"""
+        try:
+            rows = await self.mem.related(gid, f"《{world_name}》 世界 主线 NPC 大事记",
+                                          uid="", scopes=["world", "npc", "misc"], k=k)
+        except Exception:
+            return []
+        if not rows:
+            # fallback:最近的非 char 记忆行(世界级事件/流转)
+            try:
+                fres = self.db.mem_rows(gid, scopes=["world", "npc"])
+                rows = [r["text"] for r in (fres or [])][-k:][::-1]
+            except Exception:
+                rows = []
+        return list(rows)
+
 
     # ══════════════ 关系系统:好感阶梯 / 表白 / 求婚 ══════════════
     def rel_stage_label(self, gid: str, a: str, b: str) -> str:

@@ -579,6 +579,17 @@ class OcversePlugin(Star):
             await self.game.expire_sweep()
         except Exception as e:
             logger.warning(f"ocverse: 事件过期扫描失败: {e}")
+        # 兼职到点自动下班结算(时段工:上工后无需再敲指令,到点发下班结算卡)
+        work_views = []
+        for g in self.db.list_groups():
+            gid = g["gid"]
+            try:
+                async with self._glock(gid):
+                    work_views += await self.game._sweep_work(gid)
+            except Exception as e:
+                logger.warning(f"ocverse: 群{gid}下班结算失败: {e}")
+        if work_views:
+            await self._broadcast(work_views)
 
     # ── 知识库定时采集:每天每组入库一条素材(联网/LLM),供所有生成功能注入 ──
     async def _kb_maintenance(self):
@@ -1077,6 +1088,10 @@ class OcversePlugin(Star):
         mems = await self.mem.related(gid, f"{ch.name} 最近 经历", uid=uid, k=3)
         badges = [C.FLAG_TITLES[k] for k in ("traveler", "socialite", "survivor")
                   if (ch.flags or {}).get(k)]
+        # 兼职时段徽章
+        _wn = self.game._work_note(ch)
+        if _wn:
+            badges.append(f"⚒ 上班中·{_wn}")
         # 自定义搞怪关系(我是谁的X / 谁是我的X)
         for bd in self.game.bonds_of(gid, uid)[:3]:
             other = name_map.get(bd["target"] if bd["proposer"] == uid else bd["proposer"], "?")
@@ -1156,7 +1171,9 @@ class OcversePlugin(Star):
             yield event.plain_result("世界尚未初始化。管理员:「/分身 初始化世界 [世界观描述]」")
             return
         day = self.game._world_day(gid)
-        imgs = world_card(w, self._card_cfg(), is_current=True, day=day)
+        # 直接取世界范畴(world/npc)近况:以原始记忆行还原标题+片段
+        world_mem = await self.game.world_memory_panel(gid, w.name, k=5)
+        imgs = world_card(w, self._card_cfg(), is_current=True, day=day, world_mem=world_mem)
         chain = self._chain(imgs)
         if chain:
             yield event.chain_result(chain)
@@ -1210,7 +1227,33 @@ class OcversePlugin(Star):
             lines.append(f"{i}. {it.get('kind','')}·{it.get('name','')} — {it.get('desc','')}{wk}")
         lines.append("")
         lines.append("用「/分身 兼职」去合适的地方打工赚钱。")
+        lines.append("")
+        inter = [it.get('name','') for it in w.infra if C.infra_interactable(it)]
+        lines.append("可光顾消遣(产生小事件):" + ("、".join(inter[:10]) if inter else "(暂时没有)"))
+        lines.append("用「/分身 去 <设施名> [想做什么]」去社交/娱乐/约会场所消磨时光(每天每家1次)。")
         yield event.plain_result("\n".join(lines))
+
+    @oc.command("去", alias={"光顾", "泡在", "逛", "溜达", "visit"})
+    @_guard
+    async def cmd_visit(self, event: AstrMessageEvent):
+        """分身 去 <设施名> [想做什么] - 去社交/娱乐/约会设施消磨时光,产生小事件(每天每家1次)"""
+        gid = self._need_gid(event)
+        rest = self._rest(event, "去", "光顾", "泡在", "逛", "溜达", "visit").strip()
+        if not rest:
+            yield event.plain_result("格式:/分身 去 <设施名> [想做什么]\n例:/分身 去 清风茶楼 喝茶听八卦\n(可光顾的设施见「/分身 设施」)")
+            return
+        parts = rest.split(maxsplit=1)
+        name = parts[0].strip()
+        action = parts[1].strip() if len(parts) > 1 else "随便转转"
+        yield event.plain_result("⏳ 正在前往…")
+        async with self._glock(gid):
+            v = await self.game.visit_facility(gid, self._uid(event), name, action)
+        imgs = render_views([v], self._card_cfg())
+        chain = self._chain(imgs)
+        if chain:
+            yield event.chain_result(chain)
+        else:
+            yield event.plain_result(v.get("narration", "你去逛了一圈。"))
 
     @oc.command("主线", alias={"story", "主线列表"})
     @_guard
@@ -1247,7 +1290,7 @@ class OcversePlugin(Star):
     @oc.command("兼职", alias={"parttime", "打半天工"})
     @_guard
     async def cmd_workday(self, event: AstrMessageEvent):
-        """分身 兼职 - 在当前世界找个基础设施打半天工,赚金币(不耗行动次数)"""
+        """分身 兼职 - 在世界基础设施里上一班,约2小时后自动下班结算(结算含NPC同事互动)"""
         gid = self._need_gid(event)
         async with self._glock(gid):
             v = self.game.work_today(gid, self._uid(event))
@@ -1256,10 +1299,44 @@ class OcversePlugin(Star):
             return
         imgs = render_views([v], self._card_cfg())
         chain = self._chain(imgs)
+        left_min = v.get("until_min", 120)
         if chain:
             yield event.chain_result(chain)
+            yield event.plain_result(f"⚒ 在「{v['spot']}」的这班约 {left_min} 分钟,到点自动下班结算;上班期间没法自由行动/互动。")
         else:
-            yield event.plain_result(f"你在「{v['spot']}」干了半天,赚了 {v['earn']} 金币。")
+            yield event.plain_result(
+                f"⚒ 你在「{v['spot']}」上工了({v['occupation']}),约 {left_min} 分钟后自动下班结算;"
+                "上班期间没法自由行动/互动,到点我会叫你。")
+
+    @oc.command("背包", alias={"inventory", "物品", "行李"})
+    @_guard
+    async def cmd_inventory(self, event: AstrMessageEvent):
+        """分身 背包 [丢弃 <物品名>] - 查看/丢弃随身物品(冒险/事件/委托/兼职都可能获得)"""
+        gid = self._need_gid(event)
+        uid = self._uid(event)
+        rest = self._rest(event, "背包", "inventory", "物品", "行李").strip()
+        if rest.startswith("丢弃") or rest.startswith("扔掉") or rest.startswith("丢"):
+            name = re.sub(r"^(丢弃|扔掉|丢)\s*", "", rest, count=1).strip()
+            if not name:
+                yield event.plain_result("格式:/分身 背包 丢弃 <物品名>")
+                return
+            if self.db.item_remove(gid, uid, name, 1):
+                yield event.plain_result(f"🎒 你扔掉了「{name}」。")
+            else:
+                yield event.plain_result(f"你没有「{name}」这东西。")
+            return
+        ch = self._char_of(event)
+        items = self.db.items_list(gid, uid)
+        if not items:
+            yield event.plain_result(f"🎒 {ch.name} 的背包空空如也(冒险/事件/委托/兼职都可能得到物品)。")
+            return
+        lines = [f"🎒 {ch.name} 的背包({len(items)} 件)", ""]
+        for i, it in enumerate(items, 1):
+            note = f" — {it['note']}" if it.get("note") else ""
+            lines.append(f"{i}. {it['name']} ×{it['count']}{note}")
+        lines.append("")
+        lines.append("丢弃:/分身 背包 丢弃 <物品名>")
+        yield event.plain_result("\n".join(lines))
 
     @oc.command("房产", alias={"住房", "物业", "买楼"})
     @_guard
@@ -1700,24 +1777,39 @@ class OcversePlugin(Star):
     @oc.command("任务", alias={"quests", "quest"})
     @_guard
     async def cmd_quests(self, event: AstrMessageEvent):
-        """分身 任务 - 领取/查看今天的简单小任务(AI 按世界生成)"""
+        """分身 任务 - 领取/查看今天的委托(委托人+发布设施+多步骤目标)"""
         gid = self._need_gid(event)
         ch = self._char_of(event)
-        yield event.plain_result("⏳ 正在生成今日任务,请稍候…")
+        yield event.plain_result("⏳ 正在领取今日委托,请稍候…")
         async with self._glock(gid):
             qs = await self.game.ensure_quests(gid, self._uid(event))
         open_qs = [q for q in qs if q["state"] == "open"]
         done = len(qs) - len(open_qs)
         if not open_qs:
-            yield event.plain_result(f"🎉 今天给「{ch.name}」的任务都完成啦,明天再来。")
+            yield event.plain_result(f"🎉 今天给「{ch.name}」的委托都完成啦,明天再来。")
             return
-        lines = [f"📌 {ch.name} 今天的小任务({done}/{len(qs)} 已完成)", ""]
+        lines = [f"📌 {ch.name} 今天的委托({done}/{len(qs)} 已完成)", ""]
         for i, q in enumerate(open_qs, 1):
             lines.append(f"{i}. {q['text']}")
+            giv = (q.get("giver") or "委托人").strip()
+            plc = (q.get("place") or "").strip()
+            lines.append(f"　 └ 📩 {giv}" + (f"(发布于「{plc}」)" if plc else ""))
             if q.get("hint"):
-                lines.append(f"　 └ {q['hint']}")
+                lines.append(f"　 └ 💡 {q['hint']}")
+            steps = q.get("steps") or []
+            if isinstance(steps, str):
+                import json as _json
+                try:
+                    steps = _json.loads(steps or "[]")
+                except Exception:
+                    steps = []
+            for s in steps:
+                if not isinstance(s, dict):
+                    continue
+                mk = "☑" if s.get("done") else "☐"
+                lines.append(f"　   {mk} {s.get('desc','')}")
         lines.append("")
-        lines.append("完成方式:/分身 交任务 <编号>(轻松结算,有小奖励)")
+        lines.append("完成方式:按步骤做完(冒险/互动/兼职/获得物品)→「/分身 交任务 <编号>」向委托人交付")
         yield event.plain_result("\n".join(lines))
 
     @oc.command("交任务", alias={"完成任务", "quest_done"})

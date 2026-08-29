@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS groups (
@@ -118,6 +118,9 @@ CREATE TABLE IF NOT EXISTS quests (
   text TEXT,
   hint TEXT DEFAULT '',
   state TEXT DEFAULT 'open',
+  giver TEXT DEFAULT '',
+  place TEXT DEFAULT '',
+  steps TEXT DEFAULT '[]',
   created_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_quests_gud ON quests (gid, uid, day);
@@ -172,6 +175,24 @@ _MIGRATIONS: list[tuple[int, str, list[str]]] = [
           status TEXT DEFAULT 'agreed',
           created_at REAL,
           PRIMARY KEY (gid, proposer, target)
+        )""",
+    ]),
+    (5, "任务改造:委托人/发布设施/多步骤目标列(quests.giver/place/steps)", [
+        "ALTER TABLE quests ADD COLUMN giver TEXT DEFAULT ''",
+        "ALTER TABLE quests ADD COLUMN place TEXT DEFAULT ''",
+        "ALTER TABLE quests ADD COLUMN steps TEXT DEFAULT '[]'",
+        "ALTER TABLE quests ADD COLUMN giver TEXT DEFAULT ''",
+        "ALTER TABLE quests ADD COLUMN place TEXT DEFAULT ''",
+        """CREATE TABLE IF NOT EXISTS items (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          gid TEXT NOT NULL,
+          uid TEXT NOT NULL,
+          name TEXT NOT NULL,
+          count INTEGER DEFAULT 1,
+          note TEXT DEFAULT '',
+          created_at REAL,
+          updated_at REAL,
+          UNIQUE (gid, uid, name)
         )""",
     ]),
 ]

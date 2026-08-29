@@ -195,7 +195,8 @@ def result_card(view: dict, cfg: dict) -> list[Image.Image]:
 
 
 # ══════════════════════════ 世界卡 ══════════════════════════
-def world_card(w, cfg: dict, is_current: bool = True, day: int = 1) -> list[Image.Image]:
+def world_card(w, cfg: dict, is_current: bool = True, day: int = 1,
+               world_mem: list[str] | None = None) -> list[Image.Image]:
     r = _mk(cfg)
     rows = []
     head = f"《{w.name}》" + (f" · 第{day}天" if is_current else "")
@@ -216,6 +217,15 @@ def world_card(w, cfg: dict, is_current: bool = True, day: int = 1) -> list[Imag
                     out.append(_para(r, f"　↳ {n['hook']}", color=r.t.text_muted, size=int(r.font_size * 0.72)))
             return out
         rows.append(PanelRow(r, "NPC", npc_rows))
+    if world_mem:
+        # 世界记忆:全局事件 / 主线 / NPC·设施流转 的近况
+        def mem_rows():
+            out = []
+            for t in world_mem[:5]:
+                out.append(_para(r, f"· {t}", color=r.t.text_secondary,
+                                 size=int(r.font_size * 0.74)))
+            return out
+        rows.append(PanelRow(r, "世界记忆(近况)", mem_rows))
     foot = "这是你们当前生活的世界" if is_current else "尚在沉眠,等待世界变动降临"
     rows.append(_para(r, foot, size=int(r.font_size * 0.72), color=r.t.text_muted))
     return r.render_rows(rows, title="世界档案")
@@ -374,6 +384,100 @@ def act_card(view: dict, cfg: dict) -> list[Image.Image]:
     return r.render_rows(rows, title=view.get("action_name", "行动"))
 
 
+# ══════════════════════════ 兼职卡(上工 / 下班结算)══════════════════════════
+def work_card(view: dict, cfg: dict) -> list[Image.Image]:
+    """兼职时段卡:phase=start 上工 / phase=done 自动下班结算(含NPC同事道别)。"""
+    r = _mk(cfg)
+    rows = []
+    phase = view.get("phase") or "start"
+    spot = view.get("spot") or "某处"
+    job = view.get("occupation") or "打零工"
+    wn = view.get("world_name", "")
+    if phase == "done":
+        rows.append(PillRow(r, f"⚒ 下班收工 · {spot}"))
+        rows.append(_para(r, view.get("narration", ""), color=r.t.text, margin=(6, 8, 0, 6)))
+        dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), {})
+        if dlg:
+            rows.append(EmptyRow(r, 4))
+            rows.extend(dlg)
+        changes = view.get("changes") or []
+        earn = view.get("earn", 0)
+        if earn:
+            changes = list(changes) + [f"金币+{earn}"]
+        if changes:
+            rows.append(EmptyRow(r, 4))
+            rows.append(TagRow(r, changes))
+        hours = view.get("hours", 0)
+        col = (view.get("colleague") or "").strip()
+        foot = f"共约 {hours} 小时" + (f" · 同事:「{col}」" if col else "")
+        if wn:
+            foot += f" · 《{wn}》"
+        rows.append(EmptyRow(r, 2))
+        rows.append(_para(r, foot, size=int(r.font_size * 0.72), color=r.t.text_muted))
+        return r.render_rows(rows, title="兼职·下班")
+    # 上工
+    rows.append(PillRow(r, f"⚒ 上工 · {spot}"))
+    rows.append(_para(r, f"你在「{spot}」谋到一份{job}的差事。", color=r.t.text, margin=(6, 8, 0, 6)))
+    col = (view.get("colleague") or "").strip()
+    hm = view.get("until_min", 120)
+    rows.append(TagRow(r, [f"职业:{job}", f"约{hm}分钟后下班", f"体力-{view.get('cost', 25)}"]))
+    if col:
+        rows.append(_para(r, f"同班同事:「{col}」——到点自动结算下班。", color=r.t.text_secondary, size=int(r.font_size * 0.78)))
+    rows.append(_para(r, "上班期间没法自由行动/互动,到点自动下班结算(不用再敲指令)。",
+                      size=int(r.font_size * 0.72), color=r.t.text_muted))
+    if wn:
+        rows.append(EmptyRow(r, 2))
+        rows.append(_para(r, f"《{wn}》", size=int(r.font_size * 0.72), color=r.t.text_muted))
+    return r.render_rows(rows, title="兼职·上工")
+
+
+# ══════════════════════════ 回家卡 ══════════════════════════
+def home_card(view: dict, cfg: dict) -> list[Image.Image]:
+    r = _mk(cfg)
+    rows = []
+    plot = view.get("plot") or {}
+    rows.append(PillRow(r, f"🏠 回家 · {plot.get('name') or '家'}"))
+    rows.append(_para(r, str(plot.get("desc") or ""), color=r.t.text_secondary,
+                      size=int(r.font_size * 0.78), margin=(4, 4, 0, 4)))
+    if view.get("narration"):
+        rows.append(_para(r, view["narration"], color=r.t.text, margin=(6, 8, 0, 6)))
+        dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), {})
+        if dlg:
+            rows.append(EmptyRow(r, 2))
+            rows.extend(dlg)
+    changes = view.get("changes") or []
+    if changes:
+        rows.append(EmptyRow(r, 4))
+        rows.append(TagRow(r, changes))
+    wn = view.get("world_name", "")
+    foot = f"· 每日一次 · 《{wn}》" if wn else "· 每日一次"
+    rows.append(EmptyRow(r, 2))
+    rows.append(_para(r, foot, size=int(r.font_size * 0.72), color=r.t.text_muted))
+    return r.render_rows(rows, title="回宅休整")
+
+
+# ══════════════════════════ 设施光顾卡 ══════════════════════════
+def facility_card(view: dict, cfg: dict) -> list[Image.Image]:
+    r = _mk(cfg)
+    rows = []
+    rows.append(PillRow(r, view.get("title", "去光顾")))
+    rows.append(_para(r, view.get("narration", ""), color=r.t.text, margin=(6, 8, 0, 6)))
+    dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), view.get("avatars"))
+    if dlg:
+        rows.append(EmptyRow(r, 4))
+        rows.extend(dlg)
+    changes = view.get("changes") or []
+    if changes:
+        rows.append(EmptyRow(r, 4))
+        rows.append(TagRow(r, changes))
+    wn = view.get("world_name", "")
+    if wn:
+        rows.append(EmptyRow(r, 2))
+        rows.append(_para(r, f"《{wn}》 · 每日每家限1次", size=int(r.font_size * 0.72),
+                          color=r.t.text_muted))
+    return r.render_rows(rows, title="设施光顾")
+
+
 # ══════════════════════════ 统一渲染入口 ══════════════════════════
 def render_views(views: list[dict], cfg: dict) -> list[Image.Image]:
     """把 game 层产出的 view dict 批量渲染为图片。"""
@@ -394,6 +498,12 @@ def render_views(views: list[dict], cfg: dict) -> list[Image.Image]:
             out += npc_card(v, cfg)
         elif t == "act":
             out += act_card(v, cfg)
+        elif t == "work":
+            out += work_card(v, cfg)
+        elif t == "home":
+            out += home_card(v, cfg)
+        elif t == "facility":
+            out += facility_card(v, cfg)
     return out
 
 
@@ -417,22 +527,25 @@ def help_card(cfg: dict, sub_prefix: str = "/分身") -> list[Image.Image]:
             f"{sub_prefix} 与 @群友 [互动方式/自由行动…] — 和别人的分身交朋友(或结仇),好感度随互动起落",
             f"🤝 {sub_prefix} 关系 @群友 <称谓> — 提议搞怪关系(想当TA的爸爸/主人/女仆…),AI 判定对方答不答应;恋人/情侣等亲密关系不可自定义,走告白/求婚",
             "💞 告白与求婚均由事件概率触发:好感≥85 互动中可能自然告白成恋人 / 65~79 单相思 / 恋人好感≥90 小概率求婚结为伴侣",
-            f"{sub_prefix} 任务 / 交任务 <编号> — 每日小任务(AI 按世界生成,轻松有奖)",
+            f"{sub_prefix} 任务 / 交任务 <编号> — 每日委托(委托人+发布设施+多步骤):按步骤做完(冒险/互动/兼职/拿物品),再向委托人交付拿悬赏;步骤没做完交不了",
             f"{sub_prefix} npc <名字> <想做什么> — 找当前世界的NPC搭话",
+            f"{sub_prefix} 背包 [丢弃 <物品>] — 查看随身物品(冒险/事件/委托/兼职都可能得到或失去)",
+            f"{sub_prefix} 世界 — 世界档案含「世界记忆」:全局大事/主线进展/NPC·设施流转",
             "⛓ 特殊状态:陷入囚禁/束缚等处境时会受限,需靠冒险/特殊NPC/群友救援/世界变动脱困",
         ]),
         sec("⚡ 主动行动(能动起来)", [
             f"{sub_prefix} 练习 <练什么…> — 修习/训练,精进一门技艺或属性",
             f"{sub_prefix} 健身 — 锻炼体魄(力量/敏捷)",
-            f"{sub_prefix} 兼职 — 在世界上找份基建活干半天,赚金币(不耗行动次数)",
+            f"{sub_prefix} 兼职 — 在世界设施上一班(约2小时),到点自动下班结算:开工期间不能自由行动/互动/光顾,下班时会有NPC同事道别",
             f"{sub_prefix} 打怪 <目标…> — 去危险地带猎杀怪物(高风险高回报)",
             f"{sub_prefix} 冒险 <自由描述…> — 想做什么都不设限,由世界与性格决定走向",
             "行动会消耗体力(每天限次),属性/金币/心情随之起落,还小概率触发机缘彩蛋",
         ]),
         sec("🏙 世界的生活", [
-            f"{sub_prefix} 设施 — 查看当前世界基础设施(商店/饭馆/工坊等,AI按世界生成)",
+            f"{sub_prefix} 设施 — 查看当前世界基础设施(20~28处,含社交娱乐约会;标注可光顾消遣者)",
+            f"{sub_prefix} 去 <设施名> [想做什么] — 去社交/娱乐/约会设施消磨时光,触发小事件(每天每家1次)",
             f"{sub_prefix} 主线 / 主线 推进 — 查看世界主线 / 推进一步(AI结算并阶梯解锁)",
-            f"{sub_prefix} 房产 / 房产 买 <编号> / 房产 回家 — 查看/购置当前世界房产,回家休整恢复",
+            f"{sub_prefix} 房产 / 房产 买 <编号> / 房产 回家 — 查看/购置当前世界房产;回家每天一次,按房价分档回复体力/心情,小概率触发家居事件",
             f"🎭 {sub_prefix} 定义角色 <名字> <描述…> — 创造持久『生活角色』;{sub_prefix} 找 <名字> [方式] 与TA互动,可发展关系/成婚;世界会不定时来人走人",
         ]),
         sec("🌀 世界的边界", [
