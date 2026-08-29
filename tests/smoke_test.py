@@ -1694,6 +1694,31 @@ async def main():
     assert not db.resolve_quest_if_open(done_id), "重复结算未被拦截"
     ok += 1; print("✓ 委托任务:委托人/发布设施/多步骤(冒险+物品+NPC+兼职)→交付→防重复")
 
+    # 5.6 任务指向普通设施:放行去访并推进 facility 步骤;无任务需求仍拦截
+    from ocverse.config import infra_interactable
+    w1 = db.cur_world("g1")
+    shop = next(i for i in w1.infra if not infra_interactable(i))
+    try:
+        await game.visit_facility("g1", "u2", shop["name"], "随便看看")
+        raise AssertionError("无任务需求时应拦截普通设施")
+    except GameError:
+        pass
+    day = game._day_key()
+    db.add_quest("g1", "u2", day, "替账房整理货单", "去账房走一趟",
+                 steps=[{"type": "facility", "desc": f"去{shop['name']}一趟", "facility": shop["name"], "done": False}],
+                 giver="季小姐", place=shop["name"])
+    vf = await game.visit_facility("g1", "u2", shop["name"], "取货单")
+    assert vf["type"] == "facility", vf.get("type")
+    qs2 = db.list_quests("g1", "u2", day)
+    st = json.loads(qs2[-1]["steps"])[0]
+    assert st["done"], "facility 步骤应已推进"
+    try:  # 同设施每日限次仍生效
+        await game.visit_facility("g1", "u2", shop["name"], "再来一趟")
+        raise AssertionError("同设施每日限次应生效")
+    except GameError:
+        pass
+    ok += 1; print("✓ 任务指向普通设施:放行拜访并推进 facility 步骤;无任务仍拦截")
+
     # 6. NPC 互动
     v = await game.npc_interact("g1", "u2", "老铁", "想打听雾码头的规矩")
     assert "老铁" in v["npc"]["name"] and v["reply"]

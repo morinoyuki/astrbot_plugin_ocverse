@@ -778,8 +778,10 @@ class Brain:
         return gains, loses
 
     @staticmethod
-    def _norm_quest_steps(steps, npc_names: list[str], life_names: list[str]) -> list[dict]:
-        """规范化任务步骤:类型限 act/npc/life/social/work/item,npc/life 校验名单。"""
+    def _norm_quest_steps(steps, npc_names: list[str], life_names: list[str],
+                          fac_names: list[str] | None = None) -> list[dict]:
+        """规范化任务步骤:类型限 act/npc/life/social/work/item/facility,
+        npc/life/facility 目标校验名单。"""
         out = []
         for s in (steps or [])[:3]:
             if not isinstance(s, dict):
@@ -810,6 +812,11 @@ class Brain:
                 if not item:
                     continue
                 out.append({"type": "item", "desc": desc or f"取得{item}", "item": item, "done": False})
+            elif t == "facility":
+                fac = str(s.get("facility", "")).strip()[:12]
+                if not fac:
+                    continue
+                out.append({"type": "facility", "desc": desc or f"去{fac}看看", "facility": fac, "done": False})
         # npc/life 目标尽量贴合名单(双向包含容错)
         known = list(npc_names) + list(life_names)
         for s in out:
@@ -818,6 +825,14 @@ class Brain:
                     near = next((nm for nm in known if s["npc"][0] == nm[0]), None)
                     if near:
                         s["npc"] = near
+        # facility 目标尽量贴合设施清单(双向包含容错)
+        facs = [f for f in (fac_names or []) if f]
+        for s in out:
+            if s["type"] == "facility" and facs:
+                if not any(s["facility"] in f or f in s["facility"] for f in facs):
+                    near = next((f for f in facs if s["facility"][0] == f[0]), None)
+                    if near:
+                        s["facility"] = near
         return out
 
     async def gen_quests(self, *, world, char, npc_names: list[str] | None = None,
@@ -826,7 +841,7 @@ class Brain:
                          memories: list[str] | None = None,
                          material: str = "") -> BrainResult:
         """生成 3 个由设施/委托人驱动的任务:每个任务有委托人、发布设施与
-        1~3 个可验证步骤(主动行动/找NPC/找生活角色/群友互动/兼职/取得物品)。"""
+        1~3 个可验证步骤(主动行动/找NPC/找生活角色/群友互动/兼职/取得物品/去设施)。"""
         sys = self.style
         user = prompts.gen_quests(
             world=world, char=char, npc_names=npc_names, life_names=life_names,
@@ -839,7 +854,9 @@ class Brain:
             for q in d["quests"][:3]:
                 if not (isinstance(q, dict) and str(q.get("text", "")).strip()):
                     continue
-                steps = self._norm_quest_steps(q.get("steps"), npc_names or [], life_names or [])
+                steps = self._norm_quest_steps(
+                    q.get("steps"), npc_names or [], life_names or [],
+                    fac_names=[f.get("name", "") for f in facs])
                 if not steps:
                     continue
                 fac_names = [f.get("name", "") for f in facs]

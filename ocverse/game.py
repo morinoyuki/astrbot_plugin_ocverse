@@ -1924,8 +1924,8 @@ class Game:
         return tags
 
     def _quest_progress(self, gid: str, uid: str, kind: str, name: str = "", text: str = "", item: str = ""):
-        """推进今日开放任务的步骤进度(act/npc/life/social/work/item),持久化 done 标记。"""
-        if kind not in ("act", "npc", "life", "social", "work", "item"):
+        """推进今日开放任务的步骤进度(act/npc/life/social/work/item/facility),持久化 done 标记。"""
+        if kind not in ("act", "npc", "life", "social", "work", "item", "facility"):
             return
         day = self._day_key()
         qs = self.db.list_quests(gid, uid, day)
@@ -1958,12 +1958,39 @@ class Game:
                     target = str((s.get("item") or "")).strip()
                     if target and (target in item or item in target):
                         s["done"] = True; changed = True
+                elif t == "facility" and kind == "facility" and name:
+                    target = str((s.get("facility") or "")).strip()
+                    if target and (target in name or name in target):
+                        s["done"] = True; changed = True
             if changed:
                 self.db.update_quest_steps(q["id"], steps)
 
+    def _quest_mentions(self, gid: str, uid: str) -> list[str]:
+        """今日开放任务中提及的设施相关文本(place / facility 步骤目标 / 任务名 / 步骤描述),
+        用于判断某设施是否为当前任务的办理地点——任务需要时才允许去普通(非社交娱乐)设施。"""
+        day = self._day_key()
+        texts: list[str] = []
+        for q in self.db.list_quests(gid, uid, day):
+            if q["state"] != "open":
+                continue
+            if str(q.get("place") or "").strip():
+                texts.append(str(q["place"]).strip())
+            if str(q.get("text") or "").strip():
+                texts.append(str(q["text"]).strip())
+            steps = json.loads(q.get("steps") or "[]") if isinstance(q.get("steps"), str) else (q.get("steps") or [])
+            for s in steps:
+                if not isinstance(s, dict):
+                    continue
+                if str(s.get("facility") or "").strip():
+                    texts.append(str(s["facility"]).strip())
+                if str(s.get("desc") or "").strip():
+                    texts.append(str(s["desc"]).strip())
+        return texts
+
     async def visit_facility(self, gid: str, uid: str, name: str, action: str = "") -> dict:
-        """去一家可交互设施(社交/娱乐/约会等)消磨时光,产生一段事件剧情。
-        每个设施每天限 1 次;打工中/被困不可前往。"""
+        """去一家设施消磨时光/办事,产生一段事件剧情。每个设施每天限 1 次;打工中/被困不可前往。
+        社交/娱乐/约会类场所可直接光顾;普通设施(店铺/工坊等)在今日任务指向它时也放行
+        (place / facility 步骤 / 任务名中提及),并推进对应任务步骤。"""
         ch = self._require_free(gid, uid, "去光顾")
         w = self.db.cur_world(gid)
         if not w:
@@ -1973,10 +2000,15 @@ class Game:
         if it is None:
             names = "、".join(f"{i.get('name')}" for i in facs[:20]) or "无"
             raise GameError(f"《{w.name}》没有「{name}」这处地方。现有设施:{names}")
-        if not C.infra_interactable(it):
+        # 任务需要:开放任务中提及该设施(办理地点/步骤目标)时,普通设施也放行
+        task_wants = any(
+            t and (t == it["name"] or t in it["name"] or it["name"] in t)
+            for t in self._quest_mentions(gid, uid))
+        if not C.infra_interactable(it) and not task_wants:
             raise GameError(
                 f"「{it.get('name')}」只是一处普通设施(去「{it.get('kind','')}」最好用「/分身 兼职」打工、"
-                "或「/分身 npc」拜访;社交/娱乐/约会类场所才可光顾消遣)。")
+                "或「/分身 npc」拜访;社交/娱乐/约会类场所才可光顾消遣,除非今日任务需要去这里)。")
+
         day = self._day_key()
         flags = dict(ch.flags or {})
         fk = f"_fac:{it['name']}:{day}"
@@ -2001,6 +2033,9 @@ class Game:
                                 ref=f"fac:{_now():.0f}")
         self.db.append_log(gid, uid, "act",
                            f"{ch.name} 光顾「{it['name']}」:{(data.get('narration') or '')[:80]}", w.name)
+        # 任务需要时推进「去该设施」步骤(facility 类型)
+        if task_wants:
+            self._quest_progress(gid, uid, "facility", name=it["name"])
         return {
             "type": "facility",
             "gid": gid,
