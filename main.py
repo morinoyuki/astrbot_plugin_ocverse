@@ -667,11 +667,11 @@ class OcversePlugin(Star):
         if not armed:
             return
         item = armed[0]
-        # 角色事件只能被本人消息触发:无分身的群友发言不引爆、不提示,
-        # 事件保持待命等本人(或有分身者)发言;绝不把别人的角色卷进来
+        # 角色事件只能由本人消息引爆:无分身的群友发言不触发,
+        # 事件保持待命等本人发言;绝不把别人的角色卷进来
+        # (引爆过程不发「请稍候」类提示,事件卡生成后直接送达)
         if not self.db.get_char(gid, self._uid(event)):
             return
-        yield event.plain_result("⏳ 似乎有什么正朝这里靠近…")
         try:
             async with self._glock(gid):
                 # 二次确认(等待锁期间可能已被别的消息引爆)
@@ -1298,37 +1298,30 @@ class OcversePlugin(Star):
         if not n:
             yield event.plain_result("格式:回复要抉择的事件卡,发送「/分身 选择 <编号>」(选项编号见卡片)")
             return
+        # 强制引用识别:没引用/解析不出№标签 → 不执行,提示后返回
         eid = await self._quoted_event_id(event)
+        if eid is None:
+            yield event.plain_result(
+                "❌ 没有识别到要抉择的事件:请回复(引用)对应的事件卡后,再发送「/分身 选择 编号」")
+            return
         yield event.plain_result("⏳ 正在结算抉择,请稍候…")
         async with self._glock(gid):
-            if eid is not None:
-                # 引用识别:精确结算被回复的那张事件卡
-                ev = self.db.get_event(eid)
-                if not ev or ev.gid != gid:
-                    yield event.plain_result("❌ 没识别到有效的事件卡:请回复(引用)要抉择的那张事件卡再发送选择")
-                    return
-                if ev.state != "pending":
-                    yield event.plain_result("❌ 这张事件卡已经结束了(可能已被结算或过期)")
-                    return
-                if ev.uid and ev.uid != uid:
-                    other = self.db.get_char(gid, ev.uid)
-                    yield event.plain_result(f"这次遭遇是冲「{other.name if other else '别人'}」来的,让 TA 来抉择吧")
-                    return
-                if ev.kind == "life_multi" and not self.game._multi_includes(ev, uid):
-                    names = "、".join(str(p.get("name", "")) for p in (ev.payload.get("participants") or []))
-                    yield event.plain_result(f"这场交集是「{names}」的,没带上你就不能替他们做主啦")
-                    return
-            else:
-                # 未引用:仅当恰好一张可结算事件时直接结算,多张则提示引用对应卡
-                mine = [e for e in self.db.pending_sent_events(gid, uid)
-                        if not self.game.choose_locked(e, uid)]
-                if not mine:
-                    yield event.plain_result("当前没有等待抉择的事件")
-                    return
-                if len(mine) > 1:
-                    yield event.plain_result("当前有多张事件卡等待抉择:请回复(引用)对应的事件卡,再发送「/分身 选择 编号」")
-                    return
-                ev = mine[0]
+            # 引用识别:精确结算被回复的那张事件卡
+            ev = self.db.get_event(eid)
+            if not ev or ev.gid != gid:
+                yield event.plain_result("❌ 这张事件卡无效或已不存在(可能已被清理)")
+                return
+            if ev.state != "pending":
+                yield event.plain_result("❌ 这张事件卡已经结束了(可能已被结算或过期)")
+                return
+            if ev.uid and ev.uid != uid:
+                other = self.db.get_char(gid, ev.uid)
+                yield event.plain_result(f"这次遭遇是冲「{other.name if other else '别人'}」来的,让 TA 来抉择吧")
+                return
+            if ev.kind == "life_multi" and not self.game._multi_includes(ev, uid):
+                names = "、".join(str(p.get("name", "")) for p in (ev.payload.get("participants") or []))
+                yield event.plain_result(f"这场交集是「{names}」的,没带上你就不能替他们做主啦")
+                return
             v = await self.game.choose(gid, uid, int(n) - 1, ev=ev)
         imgs = render_views([v], self._card_cfg())
         chain = self._chain(imgs)
