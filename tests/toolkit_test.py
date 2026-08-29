@@ -1,0 +1,138 @@
+"""工具层功能测试:在不启动 astrbot 的情况下,把 OcversePlugin 属主对象补全成
+一个最小可用实例,直接驱动 ocverse_* 工具方法(验证自然语言工具链路)。"""
+import asyncio
+import json
+import os
+import sys
+import tempfile
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PARENT = os.path.dirname(ROOT)
+sys.path.insert(0, ROOT)
+sys.path.insert(0, PARENT)
+
+def llm_fake(system, user):
+    if "生成一个新世界" in user:
+        return json.dumps(WORLD_JSON, ensure_ascii=False)
+    if "生成一次突发遭遇" in user:
+        return json.dumps({"title": "小插曲", "scene": "茶馆里雾气腾腾。", "options": [
+            {"label": "喝茶", "hint": "舒服"}, {"label": "打听", "hint": "有收获"}, {"label": "离开", "hint": "无妨"}]}, ensure_ascii=False)
+    if "【设定描述】" in user:
+        return json.dumps({"gender": "男", "tags": ["冷静", "天才"], "backstory": "白发蓝瞳的男孩子。",
+                           "attrs": {"force": 30, "agility": 30, "intellect": 60, "charm": 40, "luck": 30, "sanity": 35}}, ensure_ascii=False)
+    if "修改描述" in user:
+        return json.dumps({"tags": ["开朗"], "backstory": "白发蓝瞳,性格开朗。"}, ensure_ascii=False)
+    if "整理成档案" in user:
+        return json.dumps({"role": "掌柜", "persona": "精明和气", "hook": "知道每桌客人的故事"}, ensure_ascii=False)
+    if "整理成人设" in user:
+        return json.dumps({"gender": "男", "tags": ["热情"], "backstory": "茶楼主人。",
+                           "attrs": {"force": 20, "agility": 25, "intellect": 45, "charm": 45, "luck": 30, "sanity": 40}}, ensure_ascii=False)
+    if "恰同" in user:
+        pass
+    if "生成今天的 3 个委托任务" in user:
+        return json.dumps({"quests": [
+            {"text": "给雾婆婆送信", "giver": "驿站长", "place": "驿站", "hint": "送到灯塔",
+             "steps": [{"type": "npc", "desc": "找灯叔聊聊", "npc": "灯叔"}]}]}, ensure_ascii=False)
+    if "请结算" in user or "写一段" in user or "写出这段互动" in user or "与角色进行多轮对话" in user \
+            or "执行行动" in user or "想在这里打发时光" in user or "推进叙述" in user:
+        return json.dumps({"narration": "事情到此有了一个明确的收尾。",
+                           "dialogues": [{"speaker": "自己", "text": "那今天就这样。"},
+                                         {"speaker": "对方", "text": "嗯,改日再会。"}],
+                           "effects": {"mood": 3, "exp": 5}}, ensure_ascii=False)
+    return json.dumps({"narration": "ok", "effects": {}}, ensure_ascii=False)
+
+WORLD_JSON = {
+    "name": "雾镇", "genre": "低魔日常",
+    "atmosphere": "薄雾与旧灯塔。", "desc": "一座临海小镇。",
+    "rules": ["夜里雾大"], "features": ["灯塔看得见全城"],
+    "npcs": [{"name": "灯叔", "role": "灯塔看守", "persona": "寡言", "hook": "知道旧事", "daily": "在灯塔", "quirk": "擦怀表", "builtin": 1}],
+    "event_ideas": ["雾夜集市"],
+    "infra": [{"kind": "茶馆", "name": "清风茶楼", "desc": "喝茶听八卦", "work": "茶博士"},
+              {"kind": "驿站", "name": "雾边驿站", "desc": "收发信件", "work": "驿员"}],
+    "mainline": [{"stage": "雾夜来客", "desc": "镇口来了陌生人"}],
+    "plots": [{"kind": "小屋", "name": "转角小屋", "desc": "安静", "price": 300}],
+}
+
+class FakeEvent:
+    def __init__(self, uid="u1", admin=False):
+        self._uid = uid
+        self._admin = admin
+    def get_group_id(self):
+        return "g1"
+    def get_sender_id(self):
+        return self._uid
+    def is_admin(self):
+        return self._admin
+    def plain_result(self, text):
+        return text
+
+def make_plugin():
+    from ocverse.db import Database
+    from ocverse.embedder import HashEmbedder
+    from ocverse.memory import MemoryStore, KnowledgeStore
+    from ocverse.llm_engine import Brain
+    from ocverse.game import Game
+    from astrbot_plugin_ocverse.main import OcversePlugin
+
+    tmpd = tempfile.mkdtemp(prefix="ocverse_tool_")
+    cfg = {"memory_top_k": 6, "event_expire_minutes": 45, "card_width": 900,
+           "card_font_size": 34, "card_theme": "dark", "knowledge_base_max": 40}
+    pl = OcversePlugin.__new__(OcversePlugin)
+    pl._cfg = lambda k, d=None: cfg.get(k, d)
+    pl._cfgi = lambda k, d: int(cfg.get(k, d))
+    pl.db = Database(os.path.join(tmpd, "t.sqlite3"))
+    emb, fb = HashEmbedder(), HashEmbedder()
+    pl.mem = MemoryStore(pl.db, emb, fb, top_k=6)
+    pl.kb = KnowledgeStore(pl.db, emb, fb, top_k=3, max_items=40)
+    pl.brain = Brain(raw_call=llm_fake)
+    pl.game = Game(pl.db, pl.brain, pl.mem, pl._cfg, kb=pl.kb)
+    pl._glocks = {}
+    pl._umo_map = {}
+    pl._default_mode_hint = {}
+    from ocverse.config import DEFAULT_INTERACTIONS
+    pl._default_mode_hint = {m: d for m, d in DEFAULT_INTERACTIONS}
+    pl._glock = lambda gid: pl._glocks.setdefault(gid, asyncio.Lock())
+    return pl
+
+async def main():
+    pl = make_plugin()
+    ev = FakeEvent("u1")
+    # 1) 创建分身
+    r = await pl.ocverse_create_character(ev, "凛", "白发蓝瞳的温柔少年")
+    print("创建:", r.splitlines()[0], "|", "属性" in r)
+    # 2) 再创建会拦截
+    r2 = await pl.ocverse_create_character(ev, "凛2", "x")
+    print("重复创建:", r2)
+    # 3) 角色卡
+    print("卡片:\n" + (await pl.ocverse_show_character(ev, "")))
+    # 4) 修改人设
+    print("修改:", await pl.ocverse_edit_character(ev, "性格改成开朗"))
+    # 5) 初始化世界(非管理员被拦;管理员可建)
+    print("未授权:", await pl.ocverse_init_world(ev, "蒸汽城"))
+    admin = FakeEvent("u1", admin=True)
+    print("初始化世界:", (await pl.ocverse_init_world(admin, "雾镇,低魔日常,临海"))[:60])
+    print("事件频率(非管理员):", await pl.ocverse_admin_setting(ev, "频率", "2 4"))
+    print("权限工具:", await pl.ocverse_trigger_world_shift(ev))
+    # 6) 定义生活角色 + 互动
+    print("生活角色:", await pl.ocverse_define_life_character(ev, "绫波", "雾码头的婆婆"))
+    ev2 = FakeEvent("u2")
+    await pl.ocverse_create_character(ev2, "阿澈", "话多")
+    print("朋友互动:\n" + (await pl.ocverse_interact_with_friend(ev, "阿澈", "一起喝茶")))
+    print("觅角色互动:\n" + (await pl.ocverse_interact_with_life(ev, "绫波", "打招呼")))
+    # 7) 设施/行动/任务
+    print("去茶楼:\n" + (await pl.ocverse_visit_place(ev, "清风茶楼", "喝茶")))
+    print("行动:", (await pl.ocverse_do_action(ev, "练习", "剑术")).splitlines()[0])
+    print("打工:", (await pl.ocverse_work_parttime(ev)).splitlines()[0])
+    # 8) 世界与设施查看
+    print("设施数:", len((await pl.ocverse_show_facilities(ev)).splitlines()))
+    # 9) 工具集构建
+    ts = pl._build_tool_set()
+    names = sorted(ts.names())
+    print("ToolSet 大小:", len(names))
+    assert len(names) == 30, names
+    for n in names:
+        tool = ts.get_tool(n)
+        assert tool.description, f"{n} 缺描述"
+    print("✓ 工具集完整且每个都有描述")
+
+asyncio.run(main())

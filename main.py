@@ -69,6 +69,68 @@ def _guard(fn):
     return wrapper
 
 
+def _guard_tool(fn):
+    """Agent 工具守卫:异常以文本返回(工具结果是给 LLM 看的字符串)。
+
+    functools.wraps 保留 docstring,供 `_build_tool_set` 解析参数生成工具 schema。
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(self, event: AstrMessageEvent, *args, **kwargs):
+        try:
+            return await fn(self, event, *args, **kwargs)
+        except GameError as e:
+            return f"❌ {e}"
+        except Exception as e:
+            logger.exception(f"ocverse: 工具 {getattr(fn, '__name__', '?')} 执行异常: {e}")
+            return f"❌ 执行出错:{e}"
+    return wrapper
+
+
+def _parse_docstring_tool(docstring: str) -> tuple[str, dict]:
+    """从 llm_tool 风格 docstring 解析出 (description, parameters schema)。
+
+    复用 astrbot.core.star.register.star_handler 的解析思路;
+    类型映射复用 astrbot.core.provider.func_tool_manager.PY_TO_JSON_TYPE。
+
+    Args:
+        param_name(string): 描述(含 "可选"/"默认"/"=" → 非必填)
+    """
+    from astrbot.core.provider.func_tool_manager import PY_TO_JSON_TYPE
+    import docstring_parser
+
+    if not docstring:
+        return "", {"type": "object", "properties": {}}
+    parsed = docstring_parser.parse(docstring)
+    description = (parsed.description or "").strip()
+    properties: dict = {}
+    required: list[str] = []
+    for arg in parsed.params:
+        type_name = (arg.type_name or "").strip().lower()
+        if not type_name:
+            continue
+        sub_type_name = None
+        nested = __import__("re").match(r"(\w+)\s*\[\s*(\w+)\s*\]", type_name)
+        if nested:
+            type_name, sub_type_name = nested.group(1), nested.group(2)
+        json_type = PY_TO_JSON_TYPE.get(type_name, type_name)
+        if json_type not in ("string", "number", "object", "array", "boolean"):
+            continue
+        prop: dict = {"type": json_type, "description": (arg.description or "").strip()}
+        if sub_type_name:
+            sub_json = PY_TO_JSON_TYPE.get(sub_type_name, sub_type_name)
+            if json_type == "array":
+                prop["items"] = {"type": sub_json}
+        properties[arg.arg_name] = prop
+        desc_lower = (arg.description or "").lower()
+        if "可选" not in desc_lower and "默认" not in desc_lower and "=" not in desc_lower:
+            required.append(arg.arg_name)
+    parameters: dict = {"type": "object", "properties": properties}
+    if required:
+        parameters["required"] = required
+    return description, parameters
+
+
 AUTHOR = "morinoyuki"
 VERSION = "1.0.0"
 PLUGIN_NAME = "astrbot_plugin_ocverse"
@@ -111,6 +173,8 @@ class OcversePlugin(Star):
         self._confirm: dict[str, float] = {}    # 二次确认状态
         self._default_mode_hint = {m: d for m, d in C.DEFAULT_INTERACTIONS}
         self._web_tools = None  # 联网搜索工具集(懒加载缓存)
+        self._cached_tool_set = None  # 自然语言工具集(懒构建缓存)
+        self._global_tools_done = False  # 全局 LLM 工具已注册标记
 
     # ═══════════════════════════ 基础设施 ═══════════════════════════
     def _cfgi(self, key, default):
@@ -465,6 +529,11 @@ class OcversePlugin(Star):
     async def initialize(self):
         self._task = asyncio.create_task(self._loop())
         logger.info("ocverse: 后台调度已启动")
+        # 自然语言 Agent 工具:注册进全局 LLM 工具表,普通聊天里可直接用大白话操作
+        try:
+            self._register_global_tools()
+        except Exception as e:
+            logger.warning(f"ocverse: 全局工具注册失败: {e}")
         # 后台管理:注册进 Dashboard(admin_enable=false 时不注册)。
         # 页面本体在 pages/admin/,由 Dashboard 自动发现并以 iframe + bridge 加载;
         # 鉴权由 Dashboard 登录态统一处理,无需任何密钥。
@@ -729,10 +798,848 @@ class OcversePlugin(Star):
             raise GameError("你还没有创建分身,先「/分身 创建 名字」")
         return ch
 
-    # ═══════════════════════════ 指令:引导/管理 ═══════════════════════════
+    # ═══════════════════════════ 自然语言 Agent 工具(ocverse_*) ═══════════════════════════
+    # 两种使用方式:
+    # 1) global_nl_tools 开启时,同一批工具注册进 provider_manager.llm_tools ——
+    #     用户在普通聊天里用大白话描述意图,主力智体会按需调用;
+    # 2) /分身 说 <自然语言>:插件自建 ToolSet 跑 tool_loop_agent,只暴露本插件工具,
+    #     不依赖主力智体是否开启函数调用。
+    def _build_tool_set(self):
+        """收集本类所有 ocverse_* 方法构建 ToolSet(bound method 作 handler,自动解析 docstring)。
+
+        工具集运行时不变,懒缓存避免每轮重建。
+        """
+        if getattr(self, "_cached_tool_set", None) is not None:
+            return self._cached_tool_set
+        from astrbot.core.agent.tool import FunctionTool, ToolSet
+        ts = ToolSet()
+        for attr_name in dir(self):
+            if not attr_name.startswith("ocverse_"):
+                continue
+            attr = getattr(self, attr_name, None)
+            if attr is None or not callable(attr):
+                continue
+            doc = getattr(attr, "__doc__", "") or ""
+            desc, params = _parse_docstring_tool(doc)
+            ts.add_tool(FunctionTool(name=attr_name, parameters=params,
+                                     description=desc or attr_name, handler=attr))
+        if len(ts) == 0:
+            logger.warning("ocverse: 未找到任何 ocverse_* 工具,自然语言指令不可用")
+        self._cached_tool_set = ts
+        return ts
+
+    def _register_global_tools(self):
+        """把 ocverse_* 工具注册进全局 llm_tools(普通聊天可被主力智体调用)。
+        handler 用 bound method,避免 unbound 调用时 event 变成 self 的 bug。"""
+        if getattr(self, "_global_tools_done", False):
+            return
+        self._global_tools_done = True
+        if not self._cfg("global_nl_tools", True):
+            return
+        try:
+            pm = getattr(self.context, "provider_manager", None)
+            if pm is None or not hasattr(pm, "llm_tools"):
+                return
+            registry = pm.llm_tools
+            add_tool = getattr(registry, "add_tool", None)
+            add_func = getattr(registry, "add_func", None)
+            if add_tool is None and add_func is None:
+                return
+            count = 0
+            for ft in self._build_tool_set():
+                if add_tool is not None:
+                    add_tool(ft)  # ToolSet 风格注册(新版本)
+                else:
+                    # FuncCall 风格:func_args 列表 + handler
+                    props = (ft.parameters or {}).get("properties", {})
+                    args = [{"type": p.get("type", "string"), "name": pname,
+                             "description": p.get("description", "")}
+                            for pname, p in props.items()]
+                    add_func(ft.name, args, ft.description, ft.handler)
+                count += 1
+            logger.info(f"ocverse: 已注册 {count} 个自然语言工具到全局 LLM 工具表")
+        except Exception as e:
+            logger.warning(f"ocverse: 全局工具注册失败(不影响 /分身 说): {e}")
+
+    async def _chat_provider_id(self, event: AstrMessageEvent) -> str:
+        """解析本轮可用的 chat provider id(配置优先 → 会话默认 → 全局默认)。"""
+        pid = str(self._cfg("provider_id", "") or "").strip()
+        if pid:
+            return pid
+        umo = event.unified_msg_origin or self._umo_map.get("__last__")
+        if umo and hasattr(self.context, "get_current_chat_provider_id"):
+            try:
+                cpid = await self.context.get_current_chat_provider_id(umo=umo)
+                if cpid:
+                    return str(cpid)
+            except Exception:
+                pass
+        gp = getattr(self.context, "get_using_provider", None)
+        try:
+            prov = gp() if gp else None
+            if prov is not None:
+                return str(getattr(prov, "provider_id", "") or "")
+        except Exception:
+            pass
+        return ""
+
+    def _char_by_name(self, gid: str, name: str):
+        """按名字查找角色(真人分身或生活角色),先精确后包含。"""
+        name = (name or "").strip()
+        if not name:
+            return None
+        c = self.db.get_char_by_name(gid, name)
+        if c:
+            return c
+        chars = self.db.list_chars(gid)
+        for c in chars:
+            if len(name) >= 2 and name in c.name:
+                return c
+        for c in chars:
+            if len(name) >= 2 and c.name in name:
+                return c
+        return None
+
+    def _char_text(self, gid: str, uid: str) -> str:
+        """角色卡文字版(给 LLM/工具的紧凑摘要)。"""
+        ch = self.db.get_char(gid, uid)
+        if not ch:
+            return "(没有找到该角色)"
+        from .ocverse.game import is_npc_uid
+        w = self.db.cur_world(gid)
+        rels = self.db.list_rels_for(gid, uid, 3)
+        name_map = {c.uid: c.name for c in self.db.list_chars(gid)}
+        rel_line = "、".join(
+            f"{name_map.get(u, u[:8])}({self.game.rel_stage_label(gid, uid, u)})" for u, _s in rels) or "无"
+        attrs = " ".join(f"{C.ATTR_NAMES.get(k, k)} {ch.attrs.get(k, 0)}" for k, _ in C.ATTRS)
+        mark = "(生活角色)" if is_npc_uid(uid) else "(玩家)"
+        lines = [
+            f"【{ch.name}】{mark} Lv{ch.level} {ch.title} · {ch.gender}",
+            f"性格:{'、'.join(ch.tags or []) or '未设定'}",
+            f"背景:{str(ch.backstory or '未详')[:150]}",
+            f"体力 {ch.stamina}/100 · 心情 {ch.mood}/100 · 金币 {ch.gold}",
+            f"属性: {attrs}",
+            f"关系:{rel_line}",
+        ]
+        _wn = self.game._work_note(ch)
+        if _wn:
+            lines.append(f"状态:上班中({_wn})")
+        _st = (ch.flags or {}).get("_state")
+        if isinstance(_st, dict) and (_st.get("type") or _st.get("reason")):
+            lines.append(f"状态:被{_st.get('type')}困住({_st.get('reason')})")
+        lines.append(f"所在世界:《{w.name if w else '?'}》")
+        return "\n".join(lines)
+
+    def _view_text(self, v: dict) -> str:
+        """把 game 层 view dict 转成紧凑文本(工具返回给 LLM 引用)。"""
+        if not isinstance(v, dict):
+            return ""
+        t = v.get("type", "")
+        parts: list[str] = []
+        if t == "event":
+            p = v.get("payload") or {}
+            parts.append(f"事件:{(p.get('title') or '').strip()}")
+            parts.append(str(p.get("scene", "")).strip())
+            for i, o in enumerate((p.get("options") or [])[:3], 1):
+                hint = f"({o.get('hint', '')})" if o.get("hint") else ""
+                parts.append(f"选项{i}. {o.get('label', '')}{hint}")
+        elif t == "morning":
+            p = v.get("payload") or {}
+            parts.append(str(p.get("brief", "")).strip())
+            if p.get("watch"):
+                parts.append(f"今日留意:{p.get('watch')}")
+        elif t == "arrive":
+            parts.append(str(v.get("narration", "")).strip())
+            tips = [str(x) for x in (v.get("tips") or [])]
+            if tips:
+                parts.append("忠告:" + "、".join(tips))
+        else:
+            if v.get("event_title"):
+                parts.append(str(v["event_title"]).strip())
+            if v.get("narration"):
+                parts.append(str(v["narration"]).strip())
+            if v.get("reply"):
+                parts.append(str(v["reply"]).strip())
+            if v.get("brief"):
+                parts.append(str(v["brief"]).strip())
+            for d in (v.get("dialogues") or [])[:6]:
+                sp = str(d.get("speaker") or "").strip()
+                tx = str(d.get("text") or "").strip()
+                if sp and tx:
+                    parts.append(f"{sp}: {tx}")
+            chg = [str(c) for c in (v.get("changes") or [])[:6]]
+            if chg:
+                parts.append("变化:" + "、".join(chg))
+            if v.get("rel_label"):
+                parts.append(f"关系:{v['rel_label']}")
+        return "\n".join(x for x in parts if x)
+
+    def _mix_view(self, v: dict) -> list[dict]:
+        """取主 view 并弹出其 extra_views 一起返回(与指令路径一致)。"""
+        return [v] + (v.pop("extra_views", []) or [])
+
+    def _nl_system_prompt(self, gid: str, uid: str) -> str:
+        """/分身 说 私域 agent 的系统提示词。"""
+        w = self.db.cur_world(gid)
+        ch = self.db.get_char(gid, uid)
+        world_line = f"《{w.name}》[{w.genre}] {w.desc} 氛围:{w.atmosphere}" if w else "世界尚未初始化"
+        me_line = f"你是谁:{ch.name} Lv{ch.level} {ch.title} · {'、'.join(ch.tags or []) or ''}" if ch else "你还没有分身"
+        return (
+            "你是「分身的世界」这个群聊文字游戏模组的操作员,替用户操作游戏。\n"
+            f"当前世界:{world_line}\n{me_line}\n"
+            "你的工具能在世界里完成创建/查看/互动/冒险/打工/买房/穿越等几乎所有动作。\n"
+            "规则:\n"
+            "1. 听到用户请求,先判断需要哪些工具,按顺序调用;能一步做完不要绕弯。\n"
+            "2. 工具返回的是游戏演出文本(可能较长),你要改写成一段自然、平实、口语化的中文告诉用户,"
+            "保留关键信息(角色名、地点、发生的事、数值变化),不要逐字照抄工具输出。\n"
+            "3. 用户没说清细节时用合理默认直接执行(如打招呼/随便转转),不要反复追问。\n"
+            "4. 用户还没有分身时先创建;世界未初始化则提示需要管理员初始化。\n"
+            "5. 文风:平实具体、不夸张不浮夸、说话直白不玩神秘、凡事给出明确结果;"
+            "不用感叹号轰炸,不留没头没尾的话。\n"
+            "6. 全程用中文,像游戏助手一样干脆。"
+        )
+
+    # ══════════════════ 查看类 ══════════════════
+    @_guard_tool
+    async def ocverse_help(self, event: AstrMessageEvent, ask: str = ""):
+        """了解「分身的世界」玩法与当前群状态的总览(世界/居民/自己/能做什么)。
+
+        Args:
+            ask(string): 可选,想了解的具体内容
+        """
+        gid = self._need_gid(event)
+        w = self.db.cur_world(gid)
+        ch = self.db.get_char(gid, self._uid(event))
+        names = "、".join(c.name for c in self.db.list_chars(gid)) or "无"
+        return "\n".join([
+            "【分身的世界】群聊 OC 养成模组",
+            f"· 当前世界:{w.name if w else '尚未初始化'}",
+            f"· 本群居民:{names}",
+            f"· 你:{ch.name if ch else '还没有分身(直接告诉我想创建什么样的角色即可)'}",
+            "· 可以直接对我说:创建/修改分身、看看世界、去某处逛逛、找某人聊天、练技能、"
+            "看看任务、买房子、去别的世界……",
+            "· 图文卡片、事件抉择、传图换头像:用「/分身 帮助」看基础指令",
+        ])
+
+    @_guard_tool
+    async def ocverse_show_character(self, event: AstrMessageEvent, name: str = ""):
+        """查看某个角色的分身卡(等级/属性/资源/关系),不填名字看自己。
+
+        Args:
+            name(string): 可选,角色名,留空查看自己
+        """
+        gid = self._need_gid(event)
+        uid = self._uid(event)
+        if (name or "").strip():
+            target = self._char_by_name(gid, name)
+            if target is None:
+                names = "、".join(c.name for c in self.db.list_chars(gid)) or "无"
+                return f"找不到叫「{name}」的角色。现有居民:{names}"
+            uid = target.uid
+        else:
+            self._char_of(event)
+        return self._char_text(gid, uid)
+
+    @_guard_tool
+    async def ocverse_roster(self, event: AstrMessageEvent):
+        """查看本群所有分身/生活角色一览。"""
+        gid = self._need_gid(event)
+        from .ocverse.game import is_npc_uid
+        chars = self.db.list_chars(gid)
+        if not chars:
+            return "本群还没有任何角色,让群友创建分身吧。"
+        lines = [f"本群居民({len(chars)}):"]
+        for c in chars:
+            mark = "生活角色" if is_npc_uid(c.uid) else "玩家"
+            lines.append(f"· {c.name}({mark}) Lv{c.level} {c.title} · {'、'.join(c.tags or [])[:30]}")
+        return "\n".join(lines)
+
+    @_guard_tool
+    async def ocverse_show_world(self, event: AstrMessageEvent):
+        """查看当前所在世界的档案(题材/氛围/规则/独特之处/NPC/设施概况)。"""
+        gid = self._need_gid(event)
+        w = self.db.cur_world(gid)
+        if not w:
+            return "世界尚未初始化,请管理员先创建。"
+        return "\n".join([
+            f"《{w.name}》[{w.genre}] 第{self.game._world_day(gid)}天",
+            f"氛围:{w.atmosphere}",
+            f"描述:{w.desc}",
+            f"规则:{'；'.join(w.rules or [])}",
+            f"独特之处:{'、'.join(w.features or [])}",
+            f"NPC:{'、'.join(f"{x.get('name','')}({x.get('role','')})" for x in (w.npcs or [])[:12])}",
+            f"设施 {len(w.infra or [])} 处 · 主线 {len(w.mainline or [])} 节",
+        ])
+
+    @_guard_tool
+    async def ocverse_show_worlds(self, event: AstrMessageEvent):
+        """查看世界书:已经去过(可穿越)与还没去过(沉眠)的世界。"""
+        gid = self._need_gid(event)
+        visited = self.db.list_worlds(gid, only_visited=True)
+        pending = [w for w in self.db.list_worlds(gid) if not w.visited]
+        cur = self.db.cur_world(gid)
+        lines = [f"当前世界:《{cur.name}》" if cur else "当前还没有世界"]
+        if visited:
+            lines.append("已解锁(可穿越):")
+            for w in visited:
+                mark = " ←当前" if cur and cur.id == w.id else ""
+                lines.append(f"· {w.id}.《{w.name}》[{w.genre}]{mark}")
+        if pending:
+            lines.append("沉眠中(等待世界变动降临):")
+            for w in pending:
+                lines.append(f"· {w.id}.《{w.name}》[{w.genre}]")
+        return "\n".join(lines)
+
+    @_guard_tool
+    async def ocverse_show_facilities(self, event: AstrMessageEvent):
+        """查看当前世界的设施(商店/饭馆/工作/消遣去处)。"""
+        gid = self._need_gid(event)
+        w = self.db.cur_world(gid)
+        if not w:
+            return "世界尚未初始化。"
+        if not w.infra:
+            return f"《{w.name}》暂时没有特别的基础设施。"
+        lines = [f"《{w.name}》的设施:"]
+        for i, it in enumerate(w.infra, 1):
+            wk = f"｜可打工:{it.get('work')}" if it.get("work") else ""
+            lines.append(f"{i}. {it.get('kind','')}·{it.get('name','')} — {it.get('desc','')}{wk}")
+        return "\n".join(lines)
+
+    @_guard_tool
+    async def ocverse_show_quests(self, event: AstrMessageEvent):
+        """查看(必要时自动领取)今天的委托任务列表。"""
+        gid = self._need_gid(event)
+        ch = self._char_of(event)
+        async with self._glock(gid):
+            qs = await self.game.ensure_quests(gid, self._uid(event))
+        open_qs = [q for q in qs if q["state"] == "open"]
+        done = len(qs) - len(open_qs)
+        if not open_qs:
+            return f"{ch.name} 今天的委托都完成啦({done}/{len(qs)}),明天再来。"
+        lines = [f"{ch.name} 今天的委托({done}/{len(qs)} 已完成):"]
+        for i, q in enumerate(open_qs, 1):
+            lines.append(f"{i}. {q['text']}(委托人:{q.get('giver') or '委托人'})")
+            if q.get("place"):
+                lines.append(f"　发布于「{q['place']}」")
+            if q.get("hint"):
+                lines.append(f"　💡 {q['hint']}")
+            for s in (q.get("steps") or [])[:3]:
+                if isinstance(s, dict):
+                    mk = "☑" if s.get("done") else "☐"
+                    lines.append(f"　 {mk} {s.get('desc', '')}")
+        lines.append("(做完后对我说「交第 N 个任务」)")
+        return "\n".join(lines)
+
+    @_guard_tool
+    async def ocverse_inventory(self, event: AstrMessageEvent):
+        """查看自己的背包物品。"""
+        gid = self._need_gid(event)
+        ch = self._char_of(event)
+        items = self.db.items_list(gid, self._uid(event))
+        if not items:
+            return f"{ch.name} 的背包空空如也。"
+        lines = [f"{ch.name} 的背包({len(items)} 件):"]
+        for i, it in enumerate(items, 1):
+            note = f" — {it['note']}" if it.get("note") else ""
+            lines.append(f"{i}. {it['name']} ×{it['count']}{note}")
+        return "\n".join(lines)
+
+    @_guard_tool
+    async def ocverse_search_memory(self, event: AstrMessageEvent, keyword: str):
+        """按关键词语义检索本群记忆(过去发生过什么)。
+
+        Args:
+            keyword(string): 检索关键词,如某人的名字/地点/事件
+        """
+        gid = self._need_gid(event)
+        q = (keyword or "").strip()
+        if not q:
+            return "请给出检索关键词。"
+        results = self.mem.related_by_keyword(gid, q, k=6)
+        if not results:
+            return f"没有找到与「{q}」相关的记忆。"
+        return "\n".join([f"与「{q}」相关的记忆:"] + [f"· {r.get('text', '')}" for r in results])
+
+    @_guard_tool
+    async def ocverse_log(self, event: AstrMessageEvent, page: int = 1):
+        """查看自己分身的人生日志(最近经历流水)。
+
+        Args:
+            page(number): 可选,页码,默认 1
+        """
+        gid = self._need_gid(event)
+        ch = self._char_of(event)
+        page_n = max(1, int(page or 1))
+        limit = 20
+        total = self.db.count_logs(gid, ch.uid)
+        pages = max(1, (total + limit - 1) // limit)
+        page_n = min(page_n, pages)
+        entries = self.db.recent_logs(gid, ch.uid, limit=limit, offset=(page_n - 1) * limit)
+        if not entries:
+            return f"{ch.name} 还没有人生日志。"
+        lines = [f"{ch.name} 的人生日志 · 第{page_n}/{pages}页:"]
+        for e in entries[:limit]:
+            ts = time.strftime("%m-%d %H:%M", time.localtime(float(e.get("created_at") or 0)))
+            lines.append(f"[{ts}] {e.get('text', '')}")
+        return "\n".join(lines)
+
+    def _views_text(self, views: list[dict]) -> str:
+        """多张 view 的文本合并(含附加场景卡)。"""
+        out = []
+        for v in views:
+            tx = self._view_text(v)
+            if tx:
+                out.append(tx)
+        return "\n---\n".join(out)
+
+    # ══════════════════ 创建 / 修改 ══════════════════
+    @_guard_tool
+    async def ocverse_create_character(self, event: AstrMessageEvent, name: str, description: str = ""):
+        """创建自己的 OC 分身(AI 自动整理人设并按设定分配初始属性;一人一个)。
+
+        Args:
+            name(string): 角色名字(1~12字)
+            description(string): 可选,外貌/性格/背景等设定描述
+        """
+        gid = self._need_gid(event)
+        uid = self._uid(event)
+        if self.db.get_char(gid, uid):
+            return "你已经有一个分身了;想改人设可以说「修改分身」,想换人先删号。"
+        name = (name or "").strip()[:12]
+        if not name:
+            return "名字不能为空。"
+        desc = (description or "").strip()
+        gender, tags, backstory, llm_attrs = "保密", [], "", None
+        if desc:
+            r = await self.brain.parse_persona(desc)
+            if r.ok:
+                gender, tags, backstory, llm_attrs = r.data["gender"], r.data["tags"], r.data["backstory"], r.data.get("attrs")
+            else:
+                backstory = desc[:4000]
+        async with self._glock(gid):
+            ch = self.game.create_char(gid, uid, name, gender, tags, backstory, attrs=llm_attrs)
+        return (
+            f"分身「{ch.name}」创建成功!\n"
+            + self._char_text(gid, uid)
+            + "\n头像可发张图片让我设置;想改人设随时说。"
+        )
+
+    @_guard_tool
+    async def ocverse_edit_character(self, event: AstrMessageEvent, text: str):
+        """修改自己分身的人设(一句话描述想改什么,AI 自动处理)。
+
+        Args:
+            text(string): 修改描述,如「改成白发蓝瞳」「性格变得开朗大胆」
+        """
+        gid = self._need_gid(event)
+        uid = self._uid(event)
+        ch = self._char_of(event)
+        content = (text or "").strip()
+        if not content:
+            return "请描述要改什么。"
+        r = await self.brain.parse_persona_update(
+            cur_name=ch.name, cur_gender=ch.gender, cur_tags=list(ch.tags or []),
+            cur_backstory=ch.backstory or "", text=content)
+        if not r.ok:
+            return "没识别出要改的内容,请描述具体一点(如:性别改成…/性格是…/背景…)。"
+        d = r.data
+        changed = []
+        async with self._glock(gid):
+            if d.get("gender"):
+                self.db.update_char(gid, uid, gender=d["gender"][:8])
+                changed.append("性别")
+            if d.get("tags"):
+                self.db.update_char(gid, uid, tags=d["tags"][:6])
+                changed.append("性格")
+            if d.get("backstory"):
+                self.db.update_char(gid, uid, backstory=d["backstory"][:4000])
+                changed.append("背景设定")
+        return f"已更新{ch.name}的:{'、'.join(changed)}" if changed else "没识别出要改的内容。"
+
+    @_guard_tool
+    async def ocverse_define_life_character(self, event: AstrMessageEvent, name: str, description: str = ""):
+        """创造一位持久「生活角色」(不属于任何真人,像群友一样生活在世界里)。
+
+        Args:
+            name(string): 生活角色名字
+            description(string): 可选,TA 的设定/性格/来历
+        """
+        gid = self._need_gid(event)
+        name = (name or "").strip()[:12]
+        if not name:
+            return "名字不能为空。"
+        desc = (description or "").strip()
+        existing = self.db.get_char(gid, npc_uid(gid, name))
+        async with self._glock(gid):
+            ch = self.game.define_npc_char(gid, name, desc, self._uid(event))
+        if existing:
+            return f"已重设生活角色「{ch.name}」的设定(等级/关系保留)。"
+        return f"生活角色「{ch.name}」融入了群世界!可以找TA聊天、发展关系,甚至成婚。"
+
+    @_guard_tool
+    async def ocverse_define_world(self, event: AstrMessageEvent, name: str, description: str):
+        """把自己原创的世界写进世界书,等待某次世界变动时降临。
+
+        Args:
+            name(string): 世界名(1~16字)
+            description(string): 世界观描述
+        """
+        gid = self._need_gid(event)
+        name = (name or "").strip()[:16]
+        desc = (description or "").strip()
+        if not name or not desc:
+            return "需要世界名和描述,例如:机械都市 / 一切由齿轮与蒸汽驱动,情感被禁止…"
+        async with self._glock(gid):
+            r = await self.game.define_world(gid, self._uid(event), name, desc)
+        return f"《{r['name']}》已写进世界书,会在某次世界变动时降临——降临后即可自由穿越。"
+
+    @_guard_tool
+    async def ocverse_add_npc(self, event: AstrMessageEvent, name: str, description: str, world: str = ""):
+        """给世界添加一位 NPC(AI 自动整理档案;可指定世界名,默认当前世界)。
+
+        Args:
+            name(string): NPC 名字
+            description(string): 职业/性格/来历等描述
+            world(string): 可选,所在世界名(留空为当前世界)
+        """
+        gid = self._need_gid(event)
+        name = (name or "").strip()[:12]
+        if not name:
+            return "名字不能为空。"
+        desc = (description or "").strip()[:400]
+        world_ref = (world or "").strip()
+        if desc:
+            w = self.game._find_world(gid, world_ref)
+            r = await self.brain.parse_npc(name, desc, world=w, npc_names=w.npc_names())
+            role, persona, hook = (r.data["role"], r.data["persona"], r.data["hook"]) if r.ok else ("", "", desc[:40])
+        else:
+            role, persona, hook = "", "", ""
+        async with self._glock(gid):
+            wname, npc = await self.game.add_npc(gid, self._uid(event), name, role, persona, hook, world_ref)
+        return f"《{wname}》新增NPC「{npc['name']}」:职业{npc['role']} | 性格{npc['persona']} | 钩子:{npc['hook']}"
+
+    @_guard_tool
+    async def ocverse_delete_npc(self, event: AstrMessageEvent, name: str):
+        """从当前世界移除一位 NPC。
+
+        Args:
+            name(string): NPC 名字
+        """
+        gid = self._need_gid(event)
+        name = (name or "").strip()
+        if not name:
+            return "请给出要删除的 NPC 名字。"
+        async with self._glock(gid):
+            wname, rm = self.game.del_npc(gid, self._uid(event), name, "")
+        return f"《{wname}》的NPC「{rm}」已移除。"
+# ══════════════════ 行动类 ══════════════════
+    @_guard_tool
+    async def ocverse_interact_with_friend(self, event: AstrMessageEvent, target_name: str, action: str = ""):
+        """与某位群友的分身互动(打招呼/闲聊/一起做点什么,自由描述即可)。
+
+        Args:
+            target_name(string): 对方分身(玩家)的名字
+            action(string): 可选,想怎么互动,留空默认打招呼
+        """
+        gid = self._need_gid(event)
+        uid = self._uid(event)
+        self._char_of(event)
+        target = self._char_by_name(gid, target_name)
+        if target is None:
+            return f"找不到叫「{target_name}」的分身。"
+        if target.uid == uid:
+            return "不能和自己互动哦。"
+        act = (action or "").strip()
+        mode, detail = ("自由互动", act) if act else ("打招呼", self._default_mode_hint["打招呼"])
+        async with self._glock(gid):
+            v = await self.game.interact(gid, uid, target.uid, mode, detail)
+        views = self._mix_view(v)
+        return self._views_text(views)
+
+    @_guard_tool
+    async def ocverse_interact_with_life(self, event: AstrMessageEvent, name: str, action: str = ""):
+        """与某位持久生活角色互动(可发展关系/成婚)。
+
+        Args:
+            name(string): 生活角色名字
+            action(string): 可选,想怎么互动(聊天/请客/送东西/自由描述)
+        """
+        gid = self._need_gid(event)
+        uid = self._uid(event)
+        self._char_of(event)
+        act = (action or "").strip()
+        mode, detail = ("自由互动", act) if act else ("打招呼", self._default_mode_hint["打招呼"])
+        async with self._glock(gid):
+            v = await self.game.interact_life_char(gid, uid, (name or "").strip(), mode, detail)
+        views = self._mix_view(v)
+        return self._views_text(views)
+
+    @_guard_tool
+    async def ocverse_interact_with_npc(self, event: AstrMessageEvent, name: str, action: str):
+        """与当前世界的 NPC 搭话/办事。
+
+        Args:
+            name(string): NPC 名字
+            action(string): 想找 TA 做什么/问什么
+        """
+        gid = self._need_gid(event)
+        self._char_of(event)
+        async with self._glock(gid):
+            v = await self.game.npc_interact(gid, self._uid(event), (name or "").strip()[:12], (action or "").strip()[:80])
+        return self._view_text(v)
+
+    @_guard_tool
+    async def ocverse_visit_place(self, event: AstrMessageEvent, place: str, action: str = ""):
+        """去某个社交/娱乐/约会设施消磨时光(产生小事件)。
+
+        Args:
+            place(string): 设施名,如茶馆/酒馆/花园
+            action(string): 可选,想在那里做什么
+        """
+        gid = self._need_gid(event)
+        self._char_of(event)
+        act = (action or "").strip() or "随便转转"
+        async with self._glock(gid):
+            v = await self.game.visit_facility(gid, self._uid(event), (place or "").strip(), act)
+        return self._view_text(v)
+
+    @_guard_tool
+    async def ocverse_do_action(self, event: AstrMessageEvent, kind: str, detail: str = ""):
+        """主动行动一次:练习/健身/打怪/冒险(消耗体力,可能掉血也可能大丰收)。
+
+        Args:
+            kind(string): 练习 或 健身 或 打怪 或 冒险
+            detail(string): 可选,想练什么/想做什么(冒险必填)
+        """
+        gid = self._need_gid(event)
+        self._char_of(event)
+        kind = (kind or "").strip()
+        alias_map = {"练习": "练习", "训练": "练习", "健身": "健身", "锻炼": "健身",
+                     "打怪": "打怪", "狩猎": "打怪", "冒险": "冒险", "探索": "冒险"}
+        act_key = alias_map.get(kind)
+        if not act_key:
+            return "支持的行动:练习 / 健身 / 打怪 / 冒险。"
+        async with self._glock(gid):
+            v = await self.game.act(gid, self._uid(event), act_key, (detail or "").strip())
+        return self._view_text(v)
+
+    @_guard_tool
+    async def ocverse_work_parttime(self, event: AstrMessageEvent):
+        """在世界设施里上一班(约2小时后自动下班结算赚金币)。"""
+        gid = self._need_gid(event)
+        async with self._glock(gid):
+            v = self.game.work_today(gid, self._uid(event))
+        if v is None:
+            return "现在没有适合你打工的地方。"
+        return self._view_text(v)
+
+    @_guard_tool
+    async def ocverse_claim_quest(self, event: AstrMessageEvent, number: int):
+        """交付/完成今天的第 N 个委托任务。
+
+        Args:
+            number(number): 任务编号(从 1 开始)
+        """
+        gid = self._need_gid(event)
+        self._char_of(event)
+        idx = max(0, int(number or 1) - 1)
+        async with self._glock(gid):
+            v = await self.game.complete_quest(gid, self._uid(event), idx)
+        return self._view_text(v)
+
+    @_guard_tool
+    async def ocverse_advance_mainline(self, event: AstrMessageEvent):
+        """推进当前世界主线一步。"""
+        gid = self._need_gid(event)
+        self._char_of(event)
+        async with self._glock(gid):
+            v = await self.game.mainline_progress(gid, self._uid(event))
+        return self._view_text(v)
+
+    @_guard_tool
+    async def ocverse_travel_world(self, event: AstrMessageEvent, target: str):
+        """穿越到已经去过的世界(编号或名字见「世界书」)。
+
+        Args:
+            target(string): 目标世界编号或名字
+        """
+        gid = self._need_gid(event)
+        self._char_of(event)
+        async with self._glock(gid):
+            v = await self.game.travel(gid, self._uid(event), (target or "").strip())
+        return self._view_text(v)
+
+    @_guard_tool
+    async def ocverse_real_estate(self, event: AstrMessageEvent, action: str, target: str = ""):
+        """房产操作:看房/买房/回家(查看、买第几号、回宅休整)。
+
+        Args:
+            action(string): 买/回家/查看 等
+            target(string): 可选,买房时填编号(如 2)
+        """
+        gid = self._need_gid(event)
+        uid = self._uid(event)
+        act = (action or "").strip()
+        if any(k in act for k in ("回家", "回宅", "休息")):
+            self._char_of(event)
+            async with self._glock(gid):
+                hv = await self.game.my_home(gid, uid)
+            return self._view_text(hv)
+        if any(k in act for k in ("买", "购", "买楼")):
+            self._char_of(event)
+            nums = re.findall(r"\d+", (target or "") + act)
+            if not nums:
+                return "请给出要买的房产编号(如:买 2)。"
+            async with self._glock(gid):
+                w, p, chg = self.game.buy_plot(gid, uid, int(nums[0]) - 1)
+            return f"购入《{w.name}》的「{p['name']}」({p['kind']})。\n" + "\n".join(f"· {c}" for c in chg)
+        w = self.db.cur_world(gid)
+        if not w:
+            return "世界尚未初始化。"
+        plots = self.db.plots(gid, w.id)
+        if not plots:
+            return f"《{w.name}》暂时没有可购置的房产。"
+        ch = self.db.get_char(gid, uid)
+        mine_pid = (ch.flags or {}).get("home_plot") if ch else None
+        lines = [f"《{w.name}》房产:"]
+        for i, p in enumerate(plots, 1):
+            if p["id"] == mine_pid:
+                own = "〔已购〕"
+            elif p.get("owner_uid"):
+                own = "〔已售〕"
+            else:
+                own = f"〔在售 {p.get('price', 0)} 金币〕"
+            lines.append(f"{i}. {p.get('kind','')}·{p.get('name','')} {own} — {p.get('desc','')}")
+        lines.append("(想买说「买第几号」,回家说「回家」)")
+        return "\n".join(lines)
+
+    @_guard_tool
+    async def ocverse_propose_bond(self, event: AstrMessageEvent, target_name: str, label: str):
+        """提议一个搞怪/生活向自定义关系(如认TA当爸爸/师父/女仆),AI 判断对方答不答应。
+
+        Args:
+            target_name(string): 对方角色名
+            label(string): 想要的称谓,如 爸爸/师父/冤种弟弟
+        """
+        gid = self._need_gid(event)
+        uid = self._uid(event)
+        self._char_of(event)
+        target = self._char_by_name(gid, target_name)
+        if target is None:
+            return f"找不到叫「{target_name}」的角色。"
+        if target.uid == uid:
+            return "不能和自己提关系。"
+        label = (label or "").strip()
+        if not label:
+            return "请写明想要的称谓,如:爸爸。"
+        async with self._glock(gid):
+            v = await self.game.propose_bond(gid, uid, target.uid, label)
+        return self._view_text(v)
+# ══════════════════ 管理类(仅群管理员) ══════════════════
+    @_guard_tool
+    async def ocverse_init_world(self, event: AstrMessageEvent, description: str = ""):
+        """初始化/重建当前群的世界(仅管理员;生成全新世界,保留角色)。
+
+        Args:
+            description(string): 可选,世界观描述/题材,不填则 AI 自由发挥
+        """
+        gid = self._need_gid(event)
+        if not event.is_admin():
+            return "只有群管理员能初始化世界。"
+        async with self._glock(gid):
+            v = await self.game.init_world(gid, (description or "").strip() or None, self._uid(event))
+        return self._view_text(v)
+
+    @_guard_tool
+    async def ocverse_trigger_world_shift(self, event: AstrMessageEvent):
+        """立即触发一次世界变动(全员可能穿越到新世界;仅管理员,有冷却)。"""
+        gid = self._need_gid(event)
+        if not event.is_admin():
+            return "只有群管理员能触发世界变动。"
+        async with self._glock(gid):
+            v = await self.game.world_shift(gid, manual=True)
+        return self._view_text(v)
+
+    @_guard_tool
+    async def ocverse_admin_setting(self, event: AstrMessageEvent, key: str, value: str):
+        """调整世界参数(仅管理员):事件频率(每日几个事件)或世界变动概率(每日 %)。
+
+        Args:
+            key(string): 频率 或 概率
+            value(string): 频率填「2 4」(最小 最大,0~12);概率填 0~80 的数字
+        """
+        gid = self._need_gid(event)
+        if not event.is_admin():
+            return "只有群管理员能调整。"
+        k = (key or "").strip()
+        v = (value or "").strip()
+        self.db.ensure_group(gid, {})
+        if "频" in k or "事件" in k:
+            parts = re.findall(r"\d+", v)
+            if len(parts) < 2:
+                return "格式:频率 最小 最大(如:频率 2 4)"
+            emin, emax = int(parts[0]), int(parts[1])
+            if not (0 <= emin <= emax <= 12):
+                return "范围需满足 0 ≤ 最小 ≤ 最大 ≤ 12。"
+            self.db.update_group(gid, event_min=emin, event_max=emax)
+            return f"每日事件数已设为 {emin}~{emax} 个。"
+        if "概" in k or "变动" in k:
+            parts = re.findall(r"\d+", v)
+            if not parts:
+                return "格式:概率 数字(0~80)"
+            pct = int(parts[0])
+            if not (0 <= pct <= 80):
+                return "概率需在 0~80 之间。"
+            self.db.update_group(gid, shift_percent=pct)
+            return f"世界变动概率已设为 {pct}%/日。"
+        return "支持调整:事件频率 / 世界变动概率。"
+
     @filter.command_group("分身", alias={"oc", "ocs"})
     async def oc(self):
         """分身的世界 · 指令组。发送「/分身」或「/分身 帮助」查看全部指令。"""
+
+# ═══════════════════════════ 指令:引导/管理 ═══════════════════════════
+    # ═══════════════════════════ 自然语言入口(「/分身 说」)═══════════════════════════
+    @oc.command("说", alias={"自由", "自然语言", "nl", "do", "随我心意"})
+    @_guard
+    async def cmd_nl(self, event: AstrMessageEvent):
+        """分身 说 <自然语言…> - 用大白话让 AI 操作世界(自动调用工具),无需背指令"""
+        gid = self._need_gid(event)
+        q = self._rest(event, "说", "自由", "自然语言", "nl", "do", "随我心意")
+        if not q:
+            yield event.plain_result(
+                "格式:/分身 说 <你想做什么>\n"
+                "例如:/分身 说 帮我看看现在是什么世界\n"
+                "/分身 说 我想去茶馆喝杯茶\n"
+                "/分身 说 和绫波婆婆打个招呼\n"
+                "或直接在普通聊天里描述意图,我也会按需调用工具。"
+            )
+            return
+        if not self._cfg("nl_agent_enabled", True):
+            yield event.plain_result("自然语言模式已在插件配置中关闭,请改用基础指令(「/分身 帮助」)。")
+            return
+        pid = await self._chat_provider_id(event)
+        if not pid:
+            yield event.plain_result("❌ 没有可用的 LLM 提供商,自然语言模式暂不可用(可改用「/分身 帮助」的基础指令)。")
+            return
+        yield event.plain_result("⏳ 正在理解你的想法并行动,请稍候…")
+        try:
+            tools = self._build_tool_set()
+            resp = await self.context.tool_loop_agent(
+                event=event,
+                chat_provider_id=pid,
+                prompt=q,
+                tools=tools,
+                system_prompt=self._nl_system_prompt(gid, self._uid(event)),
+                max_steps=self._cfgi("nl_max_steps", 6),
+                tool_call_timeout=self._cfgi("nl_tool_timeout", 90),
+            )
+        except Exception as e:
+            logger.exception(f"ocverse: 自然语言执行异常: {e}")
+            yield event.plain_result(f"❌ 执行失败:{e}")
+            return
+        text = (getattr(resp, "completion_text", "") or "").strip()
+        yield event.plain_result(text or "……似乎没有生成回复,换个说法再试试?")
 
     @oc.command("帮助", alias={"help", "菜单"})
     @_guard
