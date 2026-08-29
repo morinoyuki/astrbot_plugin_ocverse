@@ -1,0 +1,63 @@
+/* 分身的世界 · 后台管理页样式(跟随 Dashboard 亮暗主题) */
+:root{
+  --bg:#12161d;--panel:#1a2029;--line:#2a323d;--tx:#dbe2ea;--mut:#8b96a5;
+  --acc:#5b9cf5;--ok:#6fc9ae;--bad:#e06c55;
+}
+body.light{
+  --bg:#f4f6f9;--panel:#ffffff;--line:#e3e8ef;--tx:#26303c;--mut:#69758a;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.6 system-ui,"PingFang SC","Microsoft Yahei",sans-serif}
+.muted{color:var(--mut)}.ok{color:var(--ok)}.bad{color:var(--bad)}
+
+.topbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+.brand{font-size:16px;font-weight:600;margin-right:8px}
+.brand .sub{font-size:12px;color:var(--mut);font-weight:400;margin-left:4px}
+.topbar .sel{min-width:220px}
+
+input,select,textarea,button{background:var(--bg);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:6px 10px;font:inherit}
+input:focus,textarea:focus,select:focus{outline:1px solid var(--acc)}
+.btn{cursor:pointer}
+.btn:hover{border-color:var(--acc)}
+.btn.primary{background:var(--acc);border-color:var(--acc);color:#fff}
+.btn.danger{background:transparent;border-color:var(--bad);color:var(--bad)}
+.btn.ghost{background:transparent}
+.btn.tiny{padding:2px 8px;font-size:12px}
+
+.tabs{display:flex;gap:4px;padding:10px 16px 0;flex-wrap:wrap}
+.tab{border-radius:6px 6px 0 0;border-bottom:none;color:var(--mut);background:transparent}
+.tab.active{color:var(--acc);background:var(--panel);border-color:var(--acc)}
+
+main{padding:16px;max-width:1200px;margin:0 auto}
+.panel{display:none}
+.panel.active{display:block}
+
+.table-wrap{overflow-x:auto}
+.tbl{width:100%;border-collapse:collapse;background:var(--panel);border-radius:8px;overflow:hidden}
+.tbl th,.tbl td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;font-size:13px}
+.tbl th{color:var(--mut);font-weight:500;white-space:nowrap}
+
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:14px}
+.card h3{margin:0 0 10px;font-size:14px}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin-bottom:14px}
+.cards .card{margin:0;text-align:center}
+.cards .num{font-size:22px;font-weight:700}
+.cards .lbl{font-size:12px;color:var(--mut)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+label{display:block;color:var(--mut);font-size:12px;margin:8px 0 3px}
+input.w,textarea.w,select.w{width:100%}
+textarea.w{min-height:64px;resize:vertical}
+.row-end{display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap;margin:10px 0}
+.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.pill{display:inline-block;background:var(--bg);border:1px solid var(--line);border-radius:20px;padding:2px 10px;font-size:12px;color:var(--mut);margin:2px}
+.code{white-space:pre-wrap;word-break:break-all;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px;font-size:12px;margin:6px 0}
+
+.toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--panel);border:1px solid var(--line);padding:8px 18px;border-radius:8px;display:none;z-index:30;max-width:80vw}
+.toast.show{display:block}
+
+.modal-mask{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:20;align-items:center;justify-content:center}
+.modal-mask.show{display:flex}
+.modal{background:var(--panel);border:1px solid var(--line);border-radius:12px;max-width:560px;width:92vw;max-height:80vh;display:flex;flex-direction:column}
+.modal-head{padding:12px 16px;border-bottom:1px solid var(--line)}
+.modal-body{padding:12px 16px;overflow:auto}
+.modal-foot{padding:10px 16px;border-top:1px solid var(--line);display:flex;gap:8px;justify-content:flex-end}

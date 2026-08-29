@@ -1,13 +1,15 @@
 """后台管理:注册进 AstrBot Dashboard 的插件 Web API(4.27+)。
 
-- 页面:pages/admin/index.html,由 Dashboard 插件页面机制自动发现并内嵌展示
-  (自动注入 bridge SDK,页面内经 AstrBotPluginPage.apiGet/apiPost 调用,
-  鉴权由 Dashboard 统一处理,无需插件自行做令牌)。
+- 页面:pages/admin/index.html(+ style.css / app.js),由 Dashboard 插件页面
+  机制自动发现并以 iframe + bridge SDK 方式加载(鉴权由 Dashboard 统一处理);
+  页面 JS 只通过 AstrBotPluginPage.apiGet/apiPost 调用本模块接口。
 - 接口:context.register_web_api 注册在 /<插件名>/admin/api/*,
   等效 URL:/api/v1/plugins/extensions/<插件名>/admin/api/*。
+  返回裸数据字典(bridge 会原样递给页面);错误走 error_response envelope,
+  页面端会收到抛出的 Error(message)。
 - 触发/删除等破坏性操作经 ops 注入(main 层持锁并广播)。
 
-设计约定:依赖 astrbot.api.web(4.27+)与 starlette;game/db 注入运行,可独立测试。
+设计约定:依赖 astrbot.api.web(4.27+)与 starlette;db/game 注入运行,可独立测试。
 """
 
 from __future__ import annotations
@@ -15,8 +17,7 @@ from __future__ import annotations
 from dataclasses import asdict
 
 from astrbot.api import logger
-from astrbot.api.web import request as web_req
-from starlette.responses import HTMLResponse
+from astrbot.api.web import error_response, request as web_req
 
 # 群配置可编辑的白名单(键 → 钳制范围)
 _CFG_FIELDS = {
@@ -27,8 +28,9 @@ _CFG_FIELDS = {
     "travel_cooldown_h": (0, 168),
 }
 
-# 角色可编辑白名单:标量直接写,tags/attrs/flags 由 update_char 自动 json
-_CHAR_SIMPLE = ("name", "gender", "title", "backstory")
+# 角色可编辑白名单:name/gender/title/backstory 分别限长(与创角/编辑指令一致),
+# tags/attrs/flags 由 update_char 自动 json
+_CHAR_SIMPLE = (("name", 24), ("gender", 12), ("title", 32), ("backstory", 4000))
 _CHAR_INT = ("level", "exp", "gold", "mood", "stamina")
 _CHAR_STRUCT = ("attrs", "flags")
 
@@ -54,40 +56,48 @@ class AdminPanel:
             return 0
         base = f"/{self.plugin_name}/admin"
         reg = context.register_web_api
-        reg(f"{base}/api/overview", self.api_overview, ["GET"], "管理:总览")
-        reg(f"{base}/api/chars", self.api_chars, ["GET"], "管理:角色列表")
-        reg(f"{base}/api/char", self.api_char_detail, ["GET"], "管理:角色详情")
-        reg(f"{base}/api/char", self.api_char_edit, ["POST"], "管理:编辑角色")
-        reg(f"{base}/api/char/delete", self.api_char_delete, ["POST"], "管理:删除角色")
-        reg(f"{base}/api/world", self.api_world, ["GET"], "管理:世界与NPC")
-        reg(f"{base}/api/world", self.api_world_edit, ["POST"], "管理:编辑世界/NPC")
-        reg(f"{base}/api/events", self.api_events, ["GET"], "管理:事件列表")
-        reg(f"{base}/api/event/expire", self.api_event_expire, ["POST"], "管理:事件收场")
-        reg(f"{base}/api/logs", self.api_logs, ["GET"], "管理:时间线日志")
-        reg(f"{base}/api/memories", self.api_memories, ["GET"], "管理:记忆列表")
-        reg(f"{base}/api/memory/delete", self.api_mem_delete, ["POST"], "管理:删除记忆")
-        reg(f"{base}/api/config", self.api_config, ["GET"], "管理:群参数")
-        reg(f"{base}/api/config", self.api_config_edit, ["POST"], "管理:编辑群参数")
-        reg(f"{base}/api/rel", self.api_rel, ["POST"], "管理:编辑羁绊")
-        reg(f"{base}/api/trigger", self.api_trigger, ["POST"], "管理:手动触发")
-        logger.info("ocverse: 后台管理 API 已注册(Dashboard → 插件页面)")
-        return 16
+        routes = (
+            (f"{base}/api/overview", self.api_overview, ["GET"], "总览"),
+            (f"{base}/api/chars", self.api_chars, ["GET"], "角色列表"),
+            (f"{base}/api/char", self.api_char_detail, ["GET"], "角色详情"),
+            (f"{base}/api/char", self.api_char_edit, ["POST"], "编辑角色"),
+            (f"{base}/api/char/delete", self.api_char_delete, ["POST"], "删除角色"),
+            (f"{base}/api/world", self.api_world, ["GET"], "世界与NPC"),
+            (f"{base}/api/world", self.api_world_edit, ["POST"], "编辑世界/NPC"),
+            (f"{base}/api/events", self.api_events, ["GET"], "事件列表"),
+            (f"{base}/api/event/expire", self.api_event_expire, ["POST"], "事件收场"),
+            (f"{base}/api/logs", self.api_logs, ["GET"], "时间线日志"),
+            (f"{base}/api/memories", self.api_memories, ["GET"], "记忆列表"),
+            (f"{base}/api/memory/delete", self.api_mem_delete, ["POST"], "删除记忆"),
+            (f"{base}/api/config", self.api_config, ["GET"], "群参数"),
+            (f"{base}/api/config", self.api_config_edit, ["POST"], "编辑群参数"),
+            (f"{base}/api/rel", self.api_rel, ["POST"], "编辑羁绊"),
+            (f"{base}/api/trigger", self.api_trigger, ["POST"], "手动触发"),
+        )
+        n = 0
+        for route, handler, methods, desc in routes:
+            try:
+                reg(route, handler, methods, f"ocverse: {desc}")
+                n += 1
+            except Exception as e:
+                logger.warning(f"ocverse: 注册 Web API {route} 失败: {e}")
+        if n:
+            logger.info(f"ocverse: 后台管理 API 已注册 {n} 条(Dashboard → 插件页面)")
+        return n
 
     # ── 工具 ──────────────────────────────────────────────────
     def _gid(self) -> str:
-        return str(web_req.query.get("gid") or "")
+        try:
+            return str(web_req.query.get("gid") or "")
+        except RuntimeError:  # 测试直调时无绑定请求
+            return ""
 
     async def _body(self) -> dict:
-        d = await web_req.json()
+        try:
+            d = await web_req.json(default=None)
+        except RuntimeError:
+            return {}
         return d if isinstance(d, dict) else {}
-
-    @staticmethod
-    def _ok(data=None):
-        return {"ok": True, "data": data if data is not None else {}}
-
-    @staticmethod
-    def _err(msg: str):
-        return {"ok": False, "error": msg}
 
     # ── 序列化 ────────────────────────────────────────────────
     @staticmethod
@@ -122,19 +132,18 @@ class AdminPanel:
                 "pending_events": self.db.count_pending_events(gid),
                 "config": {k: g.get(k) for k in _CFG_FIELDS},
             })
-        return self._ok({"groups": groups})
+        return {"groups": groups}
 
     # ── 角色 ──────────────────────────────────────────────────
     async def api_chars(self):
         gid = self._gid()
-        chars = [self._char_json(c) for c in self.db.list_chars(gid)]
-        return self._ok({"chars": chars})
+        return {"chars": [self._char_json(c) for c in self.db.list_chars(gid)]}
 
     async def api_char_detail(self):
         gid, uid = self._gid(), str(web_req.query.get("uid") or "")
         c = self.db.get_char(gid, uid)
         if not c:
-            return self._err("角色不存在")
+            return error_response("角色不存在", status_code=404)
         rels = []
         for o in self.db.list_chars(gid):
             if o.uid == uid:
@@ -147,68 +156,67 @@ class AdminPanel:
         mems = [m for m in self.db.mem_rows(gid) if m.get("uid") == uid][-30:][::-1]
         for m in mems:
             m.pop("vec", None)
-        return self._ok({"char": self._char_json(c), "rels": rels,
-                         "logs": logs, "memories": mems})
+        return {"char": self._char_json(c), "rels": rels, "logs": logs, "memories": mems}
 
     async def api_char_edit(self):
         gid, uid = self._gid(), str(web_req.query.get("uid") or "")
         if not self.db.get_char(gid, uid):
-            return self._err("角色不存在")
+            return error_response("角色不存在", status_code=404)
         body = await self._body()
         fields = {}
-        for k in _CHAR_SIMPLE:
+        for k, cap in _CHAR_SIMPLE:
             if k in body and body[k] is not None:
-                fields[k] = str(body[k])[:1200]
+                fields[k] = str(body[k])[:cap]
         for k in _CHAR_INT:
             if k in body:
                 try:
                     fields[k] = int(body[k])
                 except (TypeError, ValueError):
-                    return self._err(f"{k} 应为整数")
+                    return error_response(f"{k} 应为整数", status_code=400)
         for k in _CHAR_STRUCT:
             if k in body and isinstance(body[k], dict):
                 fields[k] = body[k]
         if "tags" in body and isinstance(body["tags"], list):
             fields["tags"] = [str(t)[:32] for t in body["tags"][:10]]
         if not fields:
-            return self._err("没有可更新的字段")
+            return error_response("没有可更新的字段", status_code=400)
         self.db.update_char(gid, uid, **fields)
-        return self._ok(self._char_json(self.db.get_char(gid, uid)))
+        return self._char_json(self.db.get_char(gid, uid))
 
     async def api_char_delete(self):
         if self.ops is None:
-            return self._err("未接入删除操作")
+            return error_response("未接入删除操作", status_code=400)
         body = await self._body()
         gid, uid = str(body.get("gid") or ""), str(body.get("uid") or "")
         if not gid or not uid:
-            return self._err("需要 gid 与 uid")
+            return error_response("需要 gid 与 uid", status_code=400)
         try:
             name = await self.ops.delete_char(gid, uid)
         except Exception as e:
-            return self._err(str(e))
-        return self._ok({"deleted": name})
+            return error_response(str(e), status_code=400)
+        return {"deleted": name}
 
     # ── 世界 / NPC ────────────────────────────────────────────
     async def api_world(self):
         gid = self._gid()
-        worlds = [self._world_json(w) for w in self.db.list_worlds(gid)]
-        return self._ok({"worlds": worlds})
+        return {"worlds": [self._world_json(w) for w in self.db.list_worlds(gid)]}
 
     async def api_world_edit(self):
         gid = self._gid()
         w = self.db.cur_world(gid)
         if not w:
-            return self._err("该群尚未初始化世界")
+            return error_response("该群尚未初始化世界", status_code=404)
         body = await self._body()
         fields = {}
-        for k in ("name", "genre", "atmosphere"):
+        # 上限与生成时 _norm_world 对齐,避免管理页保存被意外截断
+        for k, cap in (("name", 16), ("genre", 20), ("atmosphere", 60)):
             if k in body and body[k] is not None:
-                fields[k] = str(body[k])[:200]
+                fields[k] = str(body[k])[:cap]
         if "desc" in body and body["desc"] is not None:
-            fields["desc"] = str(body["desc"])[:1200]
-        for k in ("rules", "features"):
+            fields["desc"] = str(body["desc"])[:4000]
+        for k, cap, cnt in (("rules", 40, 4), ("features", 50, 5)):
             if k in body and isinstance(body[k], list):
-                fields[k] = [str(x)[:200] for x in body[k][:20]]
+                fields[k] = [str(x)[:cap] for x in body[k][:cnt]]
         if "npcs" in body and isinstance(body["npcs"], list):
             npcs = []
             for n in body["npcs"][:50]:
@@ -222,26 +230,28 @@ class AdminPanel:
                 })
             names = [n["name"] for n in npcs]
             if len(names) != len(set(names)):
-                return self._err("NPC 名字重复")
+                return error_response("NPC 名字重复", status_code=400)
             fields["npcs"] = npcs
         if not fields:
-            return self._err("没有可更新的字段")
+            return error_response("没有可更新的字段", status_code=400)
         self.db.update_world(w.id, **fields)
-        return self._ok(self._world_json(self.db.get_world(w.id)))
+        return self._world_json(self.db.get_world(w.id))
 
     # ── 事件 ──────────────────────────────────────────────────
     async def api_events(self):
         evs = [self._event_json(e) for e in self.db.list_events(self._gid(), 60)]
-        return self._ok({"events": evs})
+        return {"events": evs}
 
     async def api_event_expire(self):
         body = await self._body()
         try:
             eid = int(body.get("id"))
         except (TypeError, ValueError):
-            return self._err("需要事件 id")
+            return error_response("需要事件 id", status_code=400)
         ok = self.db.expire_event(eid)
-        return self._ok({"expired": bool(ok)}) if ok else self._err("事件不存在或已结束")
+        if not ok:
+            return error_response("事件不存在或已结束", status_code=400)
+        return {"expired": True}
 
     # ── 日志 / 记忆 ───────────────────────────────────────────
     async def api_logs(self):
@@ -251,9 +261,9 @@ class AdminPanel:
             limit = _clamp(int(web_req.query.get("limit", 50)), 1, 200)
             offset = _clamp(int(web_req.query.get("offset", 0)), 0, 100000)
         except ValueError:
-            return self._err("limit/offset 应为整数")
+            return error_response("limit/offset 应为整数", status_code=400)
         rows = self.db.recent_logs(gid, uid, limit=limit, offset=offset)
-        return self._ok({"logs": rows, "total": self.db.count_logs(gid, uid)})
+        return {"logs": rows, "total": self.db.count_logs(gid, uid)}
 
     async def api_memories(self):
         gid, uid = self._gid(), str(web_req.query.get("uid") or "")
@@ -262,23 +272,23 @@ class AdminPanel:
             rows = [m for m in rows if m.get("uid") == uid]
         for m in rows:
             m.pop("vec", None)
-        return self._ok({"memories": rows[::-1]})
+        return {"memories": rows[::-1]}
 
     async def api_mem_delete(self):
         body = await self._body()
         ids = [int(i) for i in (body.get("ids") or []) if str(i).lstrip("-").isdigit()]
         if not ids:
-            return self._err("没有要删除的记忆 id")
+            return error_response("没有要删除的记忆 id", status_code=400)
         self.db.mem_delete_ids(ids)
-        return self._ok({"deleted": len(ids)})
+        return {"deleted": len(ids)}
 
     # ── 群配置 / 羁绊 / 触发 ──────────────────────────────────
     async def api_config(self):
         row = self.db.get_group(self._gid())
         if not row:
-            return self._err("群不存在")
+            return error_response("群不存在", status_code=404)
         g = dict(row)
-        return self._ok({k: g.get(k) for k in _CFG_FIELDS})
+        return {k: g.get(k) for k in _CFG_FIELDS}
 
     async def api_config_edit(self):
         gid = self._gid()
@@ -289,65 +299,53 @@ class AdminPanel:
                 try:
                     fields[k] = _clamp(int(body[k]), lo, hi)
                 except (TypeError, ValueError):
-                    return self._err(f"{k} 应为整数")
+                    return error_response(f"{k} 应为整数", status_code=400)
         if not fields:
-            return self._err("没有可更新的字段")
-        if int(fields.get("event_min", 0)) > int(fields.get("event_max", 0)):
-            return self._err("事件数下限不能大于上限")
+            return error_response("没有可更新的字段", status_code=400)
+        # min>max 校验:未提交的一侧用当前库里的值比较(而非默认 0)
+        if "event_min" in fields or "event_max" in fields:
+            row = dict(self.db.get_group(gid) or {})
+            lo = fields.get("event_min", row.get("event_min", 0))
+            hi = fields.get("event_max", row.get("event_max", 0))
+            if int(lo) > int(hi):
+                return error_response("事件数下限不能大于上限", status_code=400)
         self.db.update_group(gid, **fields)
         g = dict(self.db.get_group(gid))
-        return self._ok({k: g.get(k) for k in _CFG_FIELDS})
+        return {k: g.get(k) for k in _CFG_FIELDS}
 
     async def api_rel(self):
         gid = self._gid()
         body = await self._body()
         a, b = str(body.get("a", "")), str(body.get("b", ""))
         if not a or not b or a == b:
-            return self._err("需要 a、b 两个不同的角色 uid")
+            return error_response("需要 a、b 两个不同的角色 uid", status_code=400)
         if not (self.db.get_char(gid, a) and self.db.get_char(gid, b)):
-            return self._err("角色不存在")
+            return error_response("角色不存在", status_code=404)
         if "score" in body:
-            self.db.set_rel_score(gid, a, b, _clamp(int(body["score"]), -100, 100))
+            try:
+                score = int(body["score"])
+            except (TypeError, ValueError):
+                return error_response("score 应为整数", status_code=400)
+            self.db.set_rel_score(gid, a, b, _clamp(score, -100, 100))
         if body.get("state") is not None:
             st = str(body["state"])
             if st not in ("", "crush", "lovers", "couple", "married"):
-                return self._err("state 仅支持:空/crush/lovers/couple/married")
+                return error_response("state 仅支持:空/crush/lovers/couple/married", status_code=400)
             self.db.set_rel_state(gid, a, b, st)
-        return self._ok(self.db.get_rel_full(gid, a, b))
+        return self.db.get_rel_full(gid, a, b)
 
     async def api_trigger(self):
         if self.ops is None:
-            return self._err("未接入触发操作")
+            return error_response("未接入触发操作", status_code=400)
         body = await self._body()
         kind = str(body.get("kind", "event"))
         gid = str(body.get("gid") or self._gid())
         if kind not in ("event", "shift", "morning"):
-            return self._err("kind 仅支持:event/shift/morning")
+            return error_response("kind 仅支持:event/shift/morning", status_code=400)
         if not gid:
-            return self._err("需要 gid")
+            return error_response("需要 gid", status_code=400)
         try:
             msg = await self.ops.trigger(gid, kind)
         except Exception as e:
-            return self._err(str(e))
-        return self._ok({"message": msg})
-
-
-def build_page_html() -> str:
-    """供 pages/admin/index.html 无法被 Dashboard 发现时的兜底(当前页面直接以文件形式提供)。"""
-    from pathlib import Path
-    p = Path(__file__).resolve().parent.parent / "pages" / "admin" / "index.html"
-    try:
-        return p.read_text(encoding="utf-8")
-    except OSError:
-        return "<h1>ocverse admin page missing</h1>"
-
-
-def page_html_handler(panel: "AdminPanel"):
-    """GET /<插件名>/admin/page —— 直接输出管理页 HTML(备用入口,
-    正常情况请走 Dashboard 的「插件 → 页面」,那里有主题与鉴权桥接)。"""
-
-    async def handler():
-        _ = panel
-        return HTMLResponse(build_page_html(), status_code=200)
-
-    return handler
+            return error_response(str(e), status_code=400)
+        return {"message": msg}

@@ -29,7 +29,7 @@ from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.utils.quoted_message.extractor import QuotedMessageExtractor
 
 from .ocverse import config as C
-from .ocverse.admin import AdminPanel, page_html_handler
+from .ocverse.admin import AdminPanel
 from .ocverse.avatar_store import AvatarStore
 from .ocverse.db import Database
 from .ocverse.embedder import make_embedder
@@ -465,16 +465,13 @@ class OcversePlugin(Star):
     async def initialize(self):
         self._task = asyncio.create_task(self._loop())
         logger.info("ocverse: 后台调度已启动")
-        # 后台管理:注册进 Dashboard(admin_enable=false 时不注册)
+        # 后台管理:注册进 Dashboard(admin_enable=false 时不注册)。
+        # 页面本体在 pages/admin/,由 Dashboard 自动发现并以 iframe + bridge 加载;
+        # 鉴权由 Dashboard 登录态统一处理,无需任何密钥。
         try:
             self._admin = AdminPanel(self.db, self.game, self._cfg, self._admin_ops(),
                                      plugin_name=PLUGIN_NAME)
             self._admin.register(self.context)
-            # 备用直接入口:/api/v1/plugins/extensions/<插件名>/admin/page(?key=Dashboard密钥)
-            self.context.register_web_api(
-                f"/{PLUGIN_NAME}/admin/page", page_html_handler(self._admin),
-                ["GET"], "管理页(直接入口)"
-            )
         except Exception as e:
             logger.warning(f"ocverse: 后台管理注册失败(不影响插件运行): {e}")
 

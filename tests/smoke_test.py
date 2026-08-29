@@ -627,60 +627,73 @@ async def check_admin_server():
                             path_params={}, plugin_name="astrbot_plugin_ocverse", username="admin")
         with bind_request_context(req):
             resp = await handler()
-        # 生产环境由 Dashboard 把 dict 转 JSONResponse;测试直接兼容两种形态
-        return json.loads(resp.body) if hasattr(resp, "body") else resp
+        # 成功:裸数据字典;失败:error_response envelope({status:error,message})
+        if hasattr(resp, "body"):
+            j = json.loads(resp.body)
+            if isinstance(j, dict) and j.get("status") == "error":
+                return {"ok": False, "error": j.get("message")}
+            return j
+        return resp
 
     # 2) 总览
-    j = await call(panel.api_overview, query={"gid": "ga"})
-    assert j["ok"] and j["data"]["groups"][0]["gid"] == "ga" and j["data"]["groups"][0]["config"]
+    j = await call(panel.api_overview)
+    assert j["groups"][0]["gid"] == "ga" and j["groups"][0]["config"]
     # 3) 角色详情 + 编辑(标量/标签/六维)
     j = await call(panel.api_char_detail, query={"gid": "ga", "uid": "u1"})
-    assert j["ok"] and j["data"]["char"]["name"] == "阿凛" and isinstance(j["data"]["logs"], list)
+    assert j["char"]["name"] == "阿凛" and isinstance(j["logs"], list)
     body = {"name": "阿凛改", "gold": 777, "mood": 88, "tags": ["冷静", "改"],
+            "backstory": "长" * 3000,  # 长设定不被管理页截断(上限 4000)
             "attrs": {"force": 11, "agility": 22, "intellect": 33, "charm": 44, "luck": 55, "sanity": 66}}
     j = await call(panel.api_char_edit, method="POST", query={"gid": "ga", "uid": "u1"}, body=body)
-    assert j["ok"] and j["data"]["gold"] == 777 and j["data"]["name"] == "阿凛改" and j["data"]["attrs"]["charm"] == 44
+    assert j["gold"] == 777 and j["name"] == "阿凛改" and j["attrs"]["charm"] == 44
+    assert len(j["backstory"]) == 3000, "长背景不应被截断"
     c = db.get_char("ga", "u1")
-    assert c.gold == 777 and c.attrs["force"] == 11
+    assert c.gold == 777 and c.attrs["force"] == 11 and len(c.backstory) == 3000
     # 4) 世界 + NPC 整表替换
     j = await call(panel.api_world, query={"gid": "ga"})
-    assert j["ok"] and j["data"]["worlds"]
+    assert j["worlds"]
     npcs = [{"name": "管理新NPC", "role": "铁匠", "persona": "沉默寡言", "builtin": 0}]
     j = await call(panel.api_world_edit, method="POST", query={"gid": "ga"},
                    body={"npcs": npcs, "desc": "新描述"})
-    assert j["ok"] and j["data"]["npcs"][0]["name"] == "管理新NPC"
+    assert j["npcs"][0]["name"] == "管理新NPC"
     assert db.cur_world("ga").desc == "新描述"
     # 5) 事件列表 + 强制收场
     _delivered(db, await game.fire_event("ga", char_uid="u1"))
     j = await call(panel.api_events, query={"gid": "ga"})
-    ev = next(e for e in j["data"]["events"] if e["state"] == "pending")
+    ev = next(e for e in j["events"] if e["state"] == "pending")
     j = await call(panel.api_event_expire, method="POST", body={"gid": "ga", "id": ev["id"]})
-    assert j["ok"] and j["data"]["expired"]
+    assert j["expired"]
     # 6) 日志 / 记忆 / 羁绊
     j = await call(panel.api_logs, query={"gid": "ga"})
-    assert j["ok"] and j["data"]["total"] > 0
+    assert j["total"] > 0
     await mem.remember("ga", "u1", "char", "一条管理测试记忆")
     j = await call(panel.api_memories, query={"gid": "ga"})
-    mid = j["data"]["memories"][0]["id"]
+    mid = j["memories"][0]["id"]
     j = await call(panel.api_mem_delete, method="POST", body={"gid": "ga", "ids": [mid]})
-    assert j["ok"] and j["data"]["deleted"] == 1
+    assert j["deleted"] == 1
     j = await call(panel.api_rel, method="POST", query={"gid": "ga"}, body={"a": "u1", "b": "u2", "score": 55})
-    assert j["ok"] and j["data"]["score"] == 55
-    # 7) 群配置编辑 + 非法校验
+    assert j["score"] == 55
+    # 7) 群配置编辑 + 非法校验(只改一侧时,另一侧用当前库值比较,不误报)
     j = await call(panel.api_config_edit, method="POST", query={"gid": "ga"},
                    body={"event_min": 2, "event_max": 5, "shift_percent": 10})
-    assert j["ok"] and j["data"]["event_max"] == 5
+    assert j["event_max"] == 5
+    j = await call(panel.api_config_edit, method="POST", query={"gid": "ga"},
+                   body={"event_min": 3})  # 只改下限,库里上限=5 → 合法
+    assert j["event_min"] == 3 and j["event_max"] == 5, "单侧修改不应误报下限>上限"
     j = await call(panel.api_config_edit, method="POST", query={"gid": "ga"},
                    body={"event_min": 9, "event_max": 3})
     assert not j["ok"] and "下限" in j["error"]
     # 8) 触发(走注入的 ops)+ 删除角色
     j = await call(panel.api_trigger, method="POST", body={"gid": "ga", "kind": "event"})
-    assert j["ok"] and "已触发" in j["data"]["message"]
+    assert "已触发" in j["message"]
     j = await call(panel.api_char_delete, method="POST", body={"gid": "ga", "uid": "u2"})
-    assert j["ok"] and j["data"]["deleted"] == "老徐" and db.get_char("ga", "u2") is None
-    # 9) 管理页 HTML 可构建(含 tabs 与 bridge 兑底)
-    html = __import__("ocverse.admin", fromlist=["build_page_html"]).build_page_html()
-    assert "后台管理" in html and "AstrBotPluginPage" in html
+    assert j["deleted"] == "老徐" and db.get_char("ga", "u2") is None
+    # 9) 页面三件套存在且引用 bridge/相对资源
+    root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pages", "admin")
+    html = open(os.path.join(root, "index.html"), encoding="utf-8").read()
+    assert "bridge-sdk.js" in html and './app.js' in html
+    js = open(os.path.join(root, "app.js"), encoding="utf-8").read()
+    assert "AstrBotPluginPage" in js and "apiGet" in js and "fetch(" not in js, "页面应只走 bridge,不做直连 fetch"
     print("✓ 后台管理(Dashboard集成):注册/总览/角色/世界NPC/事件/日志记忆/配置/触发/删除 全链路")
     db.close()
 
@@ -694,7 +707,10 @@ async def check_bond_flow():
     db = Database(os.path.join(tmpd, "t.sqlite3"))
     emb = HashEmbedder()
     mem = MemoryStore(db, emb, emb, top_k=6)
-    cfg = lambda k, d=None: CFG.get(k, d)
+
+    def cfg(k, d=None):
+        return CFG.get(k, d)
+
     game = Game(db, Brain(raw_call=fake_llm), mem, cfg)
     await game.init_world("gb", "一座城市", "admin")
     game.create_char("gb", "u1", "阿凛", "女", ["冷静"], "s")
