@@ -649,7 +649,7 @@ async def check_admin_server():
     assert len(j["backstory"]) == 3000, "长背景不应被截断"
     c = db.get_char("ga", "u1")
     assert c.gold == 777 and c.attrs["force"] == 11 and len(c.backstory) == 3000
-    # 4) 世界 + NPC 整表替换
+    # 4) 世界 + NPC 整表替换(当前世界)
     j = await call(panel.api_world, query={"gid": "ga"})
     assert j["worlds"]
     npcs = [{"name": "管理新NPC", "role": "铁匠", "persona": "沉默寡言", "builtin": 0}]
@@ -657,6 +657,19 @@ async def check_admin_server():
                    body={"npcs": npcs, "desc": "新描述"})
     assert j["npcs"][0]["name"] == "管理新NPC"
     assert db.cur_world("ga").desc == "新描述"
+    # 4b) world_id 指定编辑任意世界(含沉眠)+ 设施整表 + 跨群拦截
+    from ocverse.models import World
+    w2 = World(gid="ga", name="自设世界", genre="奇幻", desc="d", source="user", visited=0)
+    wid2 = db.add_world(w2)
+    j = await call(panel.api_world_edit, method="POST", query={"gid": "ga"},
+                   body={"world_id": wid2, "desc": "自设世界描述",
+                         "infra": [{"kind": "黑市", "name": "暗巷黑市", "desc": "夜里开张", "work": "销赃"}]})
+    assert j["infra"][0]["name"] == "暗巷黑市" and j["infra"][0]["work"] == "销赃"
+    w2db = db.get_world(wid2)
+    assert w2db.desc == "自设世界描述" and w2db.infra[0]["kind"] == "黑市"
+    j = await call(panel.api_world_edit, method="POST", query={"gid": "ga"},
+                   body={"world_id": 99999, "npcs": []})
+    assert not j["ok"] and "不属于该群" in j["error"]
     # 5) 事件列表 + 强制收场
     _delivered(db, await game.fire_event("ga", char_uid="u1"))
     j = await call(panel.api_events, query={"gid": "ga"})

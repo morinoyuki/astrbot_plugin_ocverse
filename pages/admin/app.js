@@ -63,7 +63,6 @@
 
   let GID = "";
   let CHARS = [];
-  let NPCS = [];
   let LOG = { uid: "", offset: 0 };
   let MEM = { uid: "" };
 
@@ -204,12 +203,26 @@
     });
   }
 
-  // ── 世界与NPC ──
+  // ── 世界与NPC(可选任意世界;设施/NPC 整表编辑) ──
+  let WORLDS = [];
+  let WID = null;
+  let NPCS = [];
+  let INFRA = [];
   async function loadWorld() {
     const d = await apiGet("/admin/api/world", { gid: GID });
-    const cur = d.worlds.find((w) => w.visited) || d.worlds[0];
-    if (!cur) { $("#world-wrap").innerHTML = '<p class="muted">该群还没有世界。</p>'; return; }
+    WORLDS = d.worlds || [];
+    if (!WORLDS.length) { $("#world-wrap").innerHTML = '<p class="muted">该群还没有世界。</p>'; return; }
+    if (!WORLDS.find((w) => w.id === WID)) WID = (WORLDS.find((w) => w.visited) || WORLDS[0]).id;
+    renderWorldEditor();
+  }
+
+  function renderWorldEditor() {
+    const cur = WORLDS.find((w) => w.id === WID);
+    if (!cur) return;
     NPCS = cur.npcs || [];
+    INFRA = cur.infra || [];
+    const opts = WORLDS.map((w) =>
+      `<option value="${w.id}"${w.id === WID ? " selected" : ""}>${w.visited ? "✅" : "🔒"} ${esc(w.name)} [${esc(w.genre)}]</option>`).join("");
     const npcRow = (n, i) => `
       <tr>
         <td><input value="${esc(n.name)}" data-i="${i}" data-k="name" style="width:90px"></td>
@@ -218,21 +231,38 @@
         <td><input value="${esc(n.hook)}" data-i="${i}" data-k="hook" style="width:140px"></td>
         <td><input value="${esc(n.daily)}" data-i="${i}" data-k="daily" style="width:120px"></td>
         <td><input value="${esc(n.quirk)}" data-i="${i}" data-k="quirk" style="width:110px"></td>
-        <td>${n.builtin ? '<span class="pill">系统</span>' : ""}<button class="btn tiny danger" data-del="${i}">删</button></td>
+        <td>${n.builtin ? '<span class="pill">系统</span>' : ""}<button class="btn tiny danger" data-n="${i}">删</button></td>
+      </tr>`;
+    const infraRow = (f, i) => `
+      <tr>
+        <td><input value="${esc(f.kind)}" data-fi="${i}" data-k="kind" style="width:90px" placeholder="类型"></td>
+        <td><input value="${esc(f.name)}" data-fi="${i}" data-k="name" style="width:110px" placeholder="名字"></td>
+        <td><input value="${esc(f.desc)}" data-fi="${i}" data-k="desc" style="width:220px" placeholder="功能/氛围"></td>
+        <td><input value="${esc(f.work)}" data-fi="${i}" data-k="work" style="width:130px" placeholder="打工职业(可空)"></td>
+        <td><button class="btn tiny danger" data-f="${i}">删</button></td>
       </tr>`;
     $("#world-wrap").innerHTML = `
-      <div class="card"><h3>当前世界 · 《${esc(cur.name)}》${cur.visited ? "" : "(未降临)"}</h3>
+      <div class="toolbar">编辑目标:<select id="w-sel" class="sel">${opts}</select>
+        <span class="muted">${cur.visited ? "当前世界" : "沉眠世界(未降临)"} · #${cur.id}</span></div>
+      <div class="card"><h3>世界档案</h3>
       <div class="grid">
         <label>名字 <input class="w" id="w-name" value="${esc(cur.name)}"></label>
         <label>题材 <input class="w" id="w-genre" value="${esc(cur.genre)}"></label>
         <label>氛围 <input class="w" id="w-atmosphere" value="${esc(cur.atmosphere)}"></label>
       </div>
-      <label>描述</label><textarea class="w" id="w-desc">${esc(cur.desc)}</textarea>
-      <div class="grid">
-        <label>规则(每行一条)<textarea class="w" id="w-rules">${esc((cur.rules || []).join("\n"))}</textarea></label>
-        <label>独特之处(每行一条)<textarea class="w" id="w-features">${esc((cur.features || []).join("\n"))}</textarea></label>
-      </div>
-      <div class="row-end"><button class="btn primary" id="w-save">保存世界</button></div></div>
+      <label>描述</label><textarea class="w" id="w-desc" rows="5">${esc(cur.desc)}</textarea>
+      <label>规则(每行一条,最多 4 条)</label><textarea class="w ta-lg" id="w-rules">${esc((cur.rules || []).join("\n"))}</textarea>
+      <label>独特之处(每行一条,最多 5 条)</label><textarea class="w ta-lg" id="w-features">${esc((cur.features || []).join("\n"))}</textarea>
+      <div class="row-end"><button class="btn primary" id="w-save">保存世界档案</button></div></div>
+      <div class="card"><h3>基础设施(保存为整表替换;work 非空的设施可兼职)</h3>
+      <div class="table-wrap"><table class="tbl" id="infra-tbl">
+        <thead><tr><th>类型</th><th>名字</th><th>功能/氛围</th><th>打工职业</th><th></th></tr></thead>
+        <tbody>${INFRA.map(infraRow).join("")}</tbody>
+      </table></div>
+      <div class="row-end">
+        <button class="btn" id="infra-add">+ 添加设施</button>
+        <button class="btn primary" id="infra-save">保存全部设施</button>
+      </div></div>
       <div class="card"><h3>NPC(保存为整表替换)</h3>
       <div class="table-wrap"><table class="tbl" id="npc-tbl">
         <thead><tr><th>名字</th><th>身份</th><th>人设</th><th>钩子</th><th>日常</th><th>怪癖</th><th></th></tr></thead>
@@ -241,31 +271,44 @@
       <div class="row-end">
         <button class="btn" id="npc-add">+ 添加 NPC</button>
         <button class="btn primary" id="npc-save">保存全部 NPC</button>
-      </div></div>
-      <div class="card"><h3>全部世界</h3>${d.worlds.map((w) =>
-        `<span class="pill">${w.visited ? "✅" : "🔒"} ${esc(w.name)} [${esc(w.genre)}]</span>`).join("")}</div>`;
-    $$("#npc-tbl input").forEach((inp) => {
-      inp.onchange = () => { NPCS[parseInt(inp.dataset.i, 10)][inp.dataset.k] = inp.value; };
-    });
-    $$("#npc-tbl [data-del]").forEach((b) => {
-      b.onclick = () => { NPCS.splice(parseInt(b.dataset.del, 10), 1); loadWorld(); };
-    });
-    $("#npc-add").onclick = () => {
-      NPCS.push({ name: "新NPC", role: "居民", persona: "", hook: "", daily: "", quirk: "", builtin: 0 });
-      loadWorld();
-    };
-    $("#npc-save").onclick = async () => {
-      await apiPost("/admin/api/world", { gid: GID, npcs: NPCS });
-      toast("✅ NPC 已保存");
-    };
+      </div></div>`;
+    $("#w-sel").onchange = () => { WID = parseInt($("#w-sel").value, 10); renderWorldEditor(); };
+    const ls = (id) => $(id).value.split(/\n/).map((s) => s.trim()).filter(Boolean);
     $("#w-save").onclick = async () => {
-      const ls = (id) => $(id).value.split(/\n/).map((s) => s.trim()).filter(Boolean);
       await apiPost("/admin/api/world", {
-        gid: GID, name: $("#w-name").value, genre: $("#w-genre").value,
+        gid: GID, world_id: WID, name: $("#w-name").value, genre: $("#w-genre").value,
         atmosphere: $("#w-atmosphere").value, desc: $("#w-desc").value,
         rules: ls("#w-rules"), features: ls("#w-features"),
       });
       toast("✅ 世界已保存");
+    };
+    $$("#infra-tbl input").forEach((inp) => {
+      inp.onchange = () => { INFRA[parseInt(inp.dataset.fi, 10)][inp.dataset.k] = inp.value; };
+    });
+    $$("#infra-tbl [data-f]").forEach((b) => {
+      b.onclick = () => { INFRA.splice(parseInt(b.dataset.f, 10), 1); renderWorldEditor(); };
+    });
+    $("#infra-add").onclick = () => {
+      INFRA.push({ kind: "商店", name: "新设施", desc: "", work: "" });
+      renderWorldEditor();
+    };
+    $("#infra-save").onclick = async () => {
+      await apiPost("/admin/api/world", { gid: GID, world_id: WID, infra: INFRA });
+      toast("✅ 设施已保存");
+    };
+    $$("#npc-tbl input").forEach((inp) => {
+      inp.onchange = () => { NPCS[parseInt(inp.dataset.i, 10)][inp.dataset.k] = inp.value; };
+    });
+    $$("#npc-tbl [data-n]").forEach((b) => {
+      b.onclick = () => { NPCS.splice(parseInt(b.dataset.n, 10), 1); renderWorldEditor(); };
+    });
+    $("#npc-add").onclick = () => {
+      NPCS.push({ name: "新NPC", role: "居民", persona: "", hook: "", daily: "", quirk: "", builtin: 0 });
+      renderWorldEditor();
+    };
+    $("#npc-save").onclick = async () => {
+      await apiPost("/admin/api/world", { gid: GID, world_id: WID, npcs: NPCS });
+      toast("✅ NPC 已保存");
     };
   }
 

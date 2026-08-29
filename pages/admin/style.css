@@ -47,6 +47,7 @@ main{padding:16px;max-width:1200px;margin:0 auto}
 label{display:block;color:var(--mut);font-size:12px;margin:8px 0 3px}
 input.w,textarea.w,select.w{width:100%}
 textarea.w{min-height:64px;resize:vertical}
+textarea.ta-lg{min-height:150px;font-family:inherit}
 .row-end{display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap;margin:10px 0}
 .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
 .pill{display:inline-block;background:var(--bg);border:1px solid var(--line);border-radius:20px;padding:2px 10px;font-size:12px;color:var(--mut);margin:2px}

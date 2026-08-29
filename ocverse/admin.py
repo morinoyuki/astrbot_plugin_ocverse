@@ -203,12 +203,22 @@ class AdminPanel:
 
     async def api_world_edit(self):
         gid = self._gid()
-        w = self.db.cur_world(gid)
-        if not w:
-            return error_response("该群尚未初始化世界", status_code=404)
         body = await self._body()
+        # 编辑目标:默认当前世界;传 world_id 可编辑该群任意世界(含沉眠中)
+        wid = body.get("world_id")
+        if wid is not None:
+            try:
+                w = self.db.get_world(int(wid))
+            except (TypeError, ValueError):
+                return error_response("world_id 应为整数", status_code=400)
+            if not w or w.gid != gid:
+                return error_response("世界不存在或不属于该群", status_code=404)
+        else:
+            w = self.db.cur_world(gid)
+            if not w:
+                return error_response("该群尚未初始化世界", status_code=404)
         fields = {}
-        # 上限与生成时 _norm_world 对齐,避免管理页保存被意外截断
+        # 上限与生成时 _norm_world/_norm_infra 对齐,避免管理页保存被意外截断
         for k, cap in (("name", 16), ("genre", 20), ("atmosphere", 60)):
             if k in body and body[k] is not None:
                 fields[k] = str(body[k])[:cap]
@@ -217,6 +227,21 @@ class AdminPanel:
         for k, cap, cnt in (("rules", 40, 4), ("features", 50, 5)):
             if k in body and isinstance(body[k], list):
                 fields[k] = [str(x)[:cap] for x in body[k][:cnt]]
+        if "infra" in body and isinstance(body["infra"], list):
+            items = []
+            for it in body["infra"][:12]:
+                if not isinstance(it, dict) or not str(it.get("name", "")).strip():
+                    continue
+                items.append({
+                    "kind": str(it.get("kind", "设施"))[:10],
+                    "name": str(it.get("name"))[:16],
+                    "desc": str(it.get("desc", ""))[:90],
+                    "work": str(it.get("work", ""))[:40],
+                })
+            names = [i["name"] for i in items]
+            if len(names) != len(set(names)):
+                return error_response("设施名字重复", status_code=400)
+            fields["infra"] = items
         if "npcs" in body and isinstance(body["npcs"], list):
             npcs = []
             for n in body["npcs"][:50]:
