@@ -763,6 +763,10 @@ class Game:
         if ev.kind == "life_multi" and not self._multi_includes(ev, uid):
             names = "、".join(str(p.get("name", "")) for p in (ev.payload.get("participants") or []))
             raise GameError(f"这场交集是「{names}」的,没带上你就不能替他们做主啦")
+        # 有效期严格校验(清理循环约1分钟一次,存在短暂窗口期)
+        if 0 < ev.expires_at < _now():
+            self.db.expire_event(ev.id)
+            raise GameError("这张事件卡已经过了有效期,悄然错过了")
         opts = ev.payload.get("options") or []
         if not (0 <= idx < len(opts)):
             raise GameError(f"请选择 1~{len(opts)} 之间的编号")

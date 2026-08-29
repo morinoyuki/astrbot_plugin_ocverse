@@ -521,6 +521,25 @@ async def check_event_quote_binding():
     assert all(e.id != vu["event_id"] for e in db.pending_sent_events("gq", "u1"))
     print("✓ 未发送事件不可回落结算(引用不受限,但兜底只认已送达卡)")
 
+    # 3.5) 真实到期:抉择时严格校验有效期;清理循环负责平淡收场+日志
+    import time as _time
+    ve = _delivered(db, await game.fire_event("gq", char_uid="u1"))
+    assert ve and ve["type"] == "event"
+    db.update_event(ve["event_id"], expires_at=_time.time() - 1)
+    try:
+        await game.choose("gq", "u1", 0, ev=db.get_event(ve["event_id"]))
+        raise AssertionError("过期事件竟能抉择")
+    except GameError as e:
+        assert "有效期" in str(e), e
+    assert db.get_event(ve["event_id"]).state == "expired", "抉择校验应内联过期"
+
+    vf = _delivered(db, await game.fire_event("gq", char_uid="u1"))
+    db.update_event(vf["event_id"], expires_at=_time.time() - 1)
+    await game.expire_sweep()
+    assert db.get_event(vf["event_id"]).state == "expired", "清理循环应收场过期事件"
+    assert any("平淡收场" in str(t.get("text", "")) for t in db.recent_logs("gq", "u1", 5)), "到期应留痕"
+    print("✓ 事件真实到期:抉择时严格拦截;清理循环自动平淡收场+日志")
+
     # 4) 归属守卫:别人的个人事件不可代为抉择
     v3 = _delivered(db, await game.fire_event("gq", char_uid="u1"))
     try:

@@ -568,6 +568,12 @@ class OcversePlugin(Star):
                 logger.error(f"ocverse: 群{gid}调度异常: {e}")
         if views:
             await self._broadcast(views)
+        # 超时事件统一平淡收场(卡片上的「45分钟内有效」是真的):
+        # 每分钟扫描一次 pending 且已过 expires_at 的事件
+        try:
+            await self.game.expire_sweep()
+        except Exception as e:
+            logger.warning(f"ocverse: 事件过期扫描失败: {e}")
 
     # ── 知识库定时采集:每天每组入库一条素材(联网/LLM),供所有生成功能注入 ──
     async def _kb_maintenance(self):
