@@ -57,6 +57,7 @@ class FakeEvent:
     def __init__(self, uid="u1", admin=False):
         self._uid = uid
         self._admin = admin
+        self.unified_msg_origin = "aiocqhttp:GroupMessage:g1"
     def get_group_id(self):
         return "g1"
     def get_sender_id(self):
@@ -65,6 +66,8 @@ class FakeEvent:
         return self._admin
     def plain_result(self, text):
         return text
+    def chain_result(self, chain):
+        return ("chain", chain)
 
 def make_plugin():
     from ocverse.db import Database
@@ -88,6 +91,9 @@ def make_plugin():
     pl.game = Game(pl.db, pl.brain, pl.mem, pl._cfg, kb=pl.kb)
     pl._glocks = {}
     pl._umo_map = {}
+    pl._pending = {}
+    pl._confirm = {}
+    pl.data_dir = tmpd
     pl._default_mode_hint = {}
     from ocverse.config import DEFAULT_INTERACTIONS
     pl._default_mode_hint = {m: d for m, d in DEFAULT_INTERACTIONS}
@@ -213,5 +219,33 @@ async def main():
     t, _ = pl._resolve_interact_target("g1", AtEvent("u1"), "不存在的人 闲聊")
     assert t is None
     print("✓ 互动目标解析:@组件 → 文本@名字 → 角色名,官方接口兼容")
+
+    # 12) 非个人剧情(晨报/主动事件/远征等)一律走 _send_to 主动通道,不引用群友消息
+    pl._remember_umo(ev)
+    assert pl.db.kv_get("g1", "umo") == "aiocqhttp:GroupMessage:g1", "umo 应持久化"
+    sent_umos = []
+
+    async def ok_send(umo, chain):
+        sent_umos.append(umo)
+        return True
+
+    pl._send_to = ok_send
+    pl._pending["g1"] = [{"type": "morning", "gid": "g1", "world_name": "雾镇",
+                          "brief": "雾更浓了。", "watch": "", "ok_llm": False}]
+    async for _ in pl.on_group_msg(ev):
+        pass
+    assert sent_umos == ["aiocqhttp:GroupMessage:g1"], sent_umos
+    assert not pl._pending.get("g1"), "发送成功应清空积压"
+    print("✓ 积压补发走 _send_to 主动通道(不引用群友消息)")
+
+    async def bad_send(umo, chain):
+        return False
+
+    pl._send_to = bad_send
+    pl._pending["g1"] = [{"type": "morning", "gid": "g1", "brief": "x", "ok_llm": False}]
+    async for _ in pl.on_group_msg(ev):
+        pass
+    assert len(pl._pending["g1"]) == 1, "主动通道失败应重新排队,卡片不丢"
+    print("✓ 主动通道失败 → 卡片重新排队等待下次,不落消息引用")
 
 asyncio.run(main())

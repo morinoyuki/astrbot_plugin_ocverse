@@ -337,6 +337,12 @@ class OcversePlugin(Star):
         gid = self._gid(event)
         if gid:
             self._umo_map[gid] = event.unified_msg_origin
+            try:
+                # 持久化:重启后晨报/事件/远征等主动推送仍能找到发送通道,
+                # 避免落入"积压-补发"路径(补发曾以消息引用形态出现)
+                self.db.kv_set(gid, "umo", event.unified_msg_origin)
+            except Exception:
+                pass
         self._umo_map["__last__"] = event.unified_msg_origin
 
     @staticmethod
@@ -820,14 +826,25 @@ class OcversePlugin(Star):
                     v = cand
                     break
             if v is not None:
+                # 非个人剧情(晨报/主动事件/远征等)一律走主动通道发送:
+                # 以消息上下文回复会把卡片挂在触发消息上,引用无关群友的信息
+                sent = False
                 try:
                     chain = self._chain_views([v])
-                    if chain:
-                        self._mark_sent(v)  # 补发送出才算「发送过」,之后才可回落结算
-                        yield event.chain_result(chain)
+                    umo = self._umo_map.get(gid) or (self.db.kv_get(gid, "umo") or "")
+                    if chain and umo:
+                        sent = await self._send_to(umo, chain)
                 except Exception as e:
-                    logger.warning(f"ocverse: 补发卡片失败: {e}")
-            return
+                    logger.warning(f"ocverse: 补发卡片异常: {e}")
+                if sent:
+                    self._mark_sent(v)  # 送出才算「发送过」,之后才可回落结算
+                else:
+                    pend.insert(0, v)   # 主动通道暂不可用 → 重新排队,下条消息再试
+                    logger.warning(f"ocverse: 群{gid} 积压卡片主动补发失败,已重新排队")
+            if sent:
+                return
+            # 主动通道失败时不阻断:继续检查被动事件引爆(引爆卡是个人的,走消息上下文)
+        # 被动事件:群里有动静,伏笔引爆(每次消息最多一个,自然限流)
         # 被动事件:群里有动静,伏笔引爆(每次消息最多一个,自然限流)
         armed = self.game.armed_passives(gid)
         if not armed:
