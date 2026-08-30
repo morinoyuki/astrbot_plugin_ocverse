@@ -280,6 +280,7 @@
         <button class="btn primary" id="w-save">保存世界档案</button>
         <button class="btn" id="content-regen">🎲 AI 重绘区域/治疗物品</button>
         <button class="btn" id="mainline-regen">📜 AI 重铸主线</button>
+        <button class="btn danger" id="world-del">🗑 删除该世界</button>
       </div></div>
       <div class="card"><h3>基础设施(保存为整表替换;work 非空的设施可兼职)</h3>
       <div class="table-wrap"><table class="tbl" id="infra-tbl">
@@ -414,6 +415,16 @@
       await apiPost("/admin/api/world", { gid: GID, world_id: WID, heal_items: HEALS });
       toast("✅ 治疗物品已保存");
     };
+    $("#world-del").onclick = () => confirmAction("删除世界",
+      `将抹除《${cur.name}》[${cur.genre}] 及其全部世界数据(设施/危险区域/NPC/房产/世界声望;角色保留),不可恢复。继续?`,
+      async () => {
+        const r = await apiPost("/admin/api/world/delete", { gid: GID, world_id: WID });
+        toast("✅ 已删除");
+        WID = null;
+        await loadWorld();
+        if (!WORLDS.length) { $("#world-wrap").innerHTML = '<p class="muted">该群已没有任何世界,请「初始化世界」重新铺设。</p>'; }
+        toast(String(r.message || "已删除").split("\n")[0]);
+      });
     $("#mainline-regen").onclick = () => confirmAction("AI 重铸主线",
       "将丢弃当前主线小节,由 AI 贴合世界观重新生成 3~6 节(含阶段门槛)。继续?",
       async () => {

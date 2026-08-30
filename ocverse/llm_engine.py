@@ -419,12 +419,14 @@ class Brain:
     # ════════════════ 事件生成 ════════════════
     async def make_event(self, *, world, char=None, kind="solo", npc=None,
                          memories: list[str] | None = None, ideas: list[str] | None = None,
-                         state_note: str = "", material: str = "") -> BrainResult:
-        """生成一次遭遇。char=None 时为全员群事件。state_note: 若角色处于特殊状态(囚禁等),强调脱困方向。"""
+                         state_note: str = "", material: str = "",
+                         previous: list[str] | None = None) -> BrainResult:
+        """生成一次遭遇。char=None 时为全员群事件。state_note: 若角色处于特殊状态(囚禁等),强调脱困方向。
+        previous: 近期已发生事件(防剧情绕圈)。"""
         sys = self.style
         user = prompts.make_event(
             world=world, char=char, npc=npc,
-            memories=memories, ideas=ideas, state_note=state_note)
+            memories=memories, ideas=ideas, state_note=state_note, previous=previous)
         user = self._with_material(user, material)
         d = await self._ask_json(sys, user)
         if d and d.get("scene"):
@@ -446,10 +448,11 @@ class Brain:
 
     async def make_life_event(self, *, world, chars, rels: str = "",
                               memories: list[str] | None = None,
-                              material: str = "") -> BrainResult:
+                              material: str = "",
+                              previous: list[str] | None = None) -> BrainResult:
         """生成一次『群像生活事件』:2~N 名玩家角色在同一世界偶遇/结伴/共同度过一段日常。
         chars: 参与的 Char 列表(≥2);rels: 两两关系简述字符串(由 game 层拼接)。
-        返回与 make_event 相同的 {title, scene, options} 结构。"""
+        返回与 make_event 相同的 {title, scene, options} 结构。previous: 近期事件(防剧情绕圈)。"""
         cast = []
         for i, c in enumerate(chars, 1):
             cast.append(
@@ -458,7 +461,7 @@ class Brain:
             )
         sys = self.style
         user = prompts.make_life_event(
-            world=world, chars=chars, rels=rels, memories=memories)
+            world=world, chars=chars, rels=rels, memories=memories, previous=previous)
         user = self._with_material(user, material)
         d = await self._ask_json(sys, user)
         if d and d.get("scene"):

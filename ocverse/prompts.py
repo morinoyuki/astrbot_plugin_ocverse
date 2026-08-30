@@ -22,6 +22,8 @@ STYLE_BASE = (
     "四、有始有终:每个场景都必须有明确的结果与落点——成功、失败、进展、付出什么代价都要交代清楚,"
     "结尾干脆收束,不许留下悬而未决的空洞尾巴;"
     "五、对话生动口语化、节奏明快,文风克制不堆砌、不水字数;"
+    "六、剧情向前推进:新剧情不要围绕同一件旧事(吃过的东西、买过的物品、上一场遭遇)反复展开——"
+    "除非玩家主动提起,旧事件只能作为背景偶尔被顺带提及,绝不能成为新剧情的核心钩子或主要场景;"
     "严格贴合指令给定的行动/互动主题展开,不跑题、不擅改场景、不凭空插入无关事件或陌生人物;"
     "不提及任何现实平台或AI身份。"
     "所有输出必须是严格的 JSON,不要 markdown 代码围栏,不要解释。"
@@ -45,6 +47,15 @@ WORLD_SCHEMA = (
 def attr_names_line() -> str:
     from .config import ATTRS  # noqa: E402
     return "、".join(f"{k}={v}" for k, v in ATTRS)
+
+
+def recent_events_block(previous: list[str] | None) -> str:
+    """近期已发生事件一览:新遭遇必须明显不同,禁止绕着旧事打转。"""
+    if not previous:
+        return ""
+    return ("\n近期已经发生过的事件(本次遭遇必须在场景、题材与冲突上与它们明显不同——"
+            "不要围绕这些旧事展开,不要让它们再次成为剧情核心;它们只能作为过去式偶尔被顺带提及):\n"
+            + "\n".join(f"- {t[:70]}" for t in previous[:5]))
 
 
 def previous_block(previous: list[str] | None) -> str:
@@ -248,7 +259,8 @@ def enrich_user_world(name: str, desc: str) -> str:
 
 # ═══════════════════════════ 事件生成/结算 ═══════════════════════════
 def make_event(*, world, char=None, npc=None, memories: list[str] | None = None,
-               ideas: list[str] | None = None, state_note: str = "") -> str:
+               ideas: list[str] | None = None, state_note: str = "",
+               previous: list[str] | None = None) -> str:
     """生成一次突发遭遇的 user prompt。char=None 时为全员群事件。"""
     role = (
         "这是全员都会被卷入的群事件,主角是『群里的众人』。"
@@ -272,6 +284,7 @@ def make_event(*, world, char=None, npc=None, memories: list[str] | None = None,
         f"{_world_line(world)}\n"
         f"{role}{npc_line}{idea}\n"
         f"{mem}\n"
+        + recent_events_block(previous) + "\n"
         "生成一次突发遭遇:结合世界设定与角色性格/状态,事件要具体、有钩子、能做出选择。\n"
         '严格输出 JSON:{"title":"标题≤10字","scene":"场景描述70-120字",'
         '"options":[{"label":"选项≤8字","hint":"后果暗示≤14字"},{"label":"","hint":""},{"label":"","hint":""}]}'
@@ -280,7 +293,8 @@ def make_event(*, world, char=None, npc=None, memories: list[str] | None = None,
 
 
 def make_life_event(*, world, chars, rels: str = "",
-                    memories: list[str] | None = None) -> str:
+                    memories: list[str] | None = None,
+                    previous: list[str] | None = None) -> str:
     """群像生活事件(2~N 名玩家角色偶遇/结伴)的 user prompt。"""
     cast = []
     for i, c in enumerate(chars, 1):
@@ -294,6 +308,7 @@ def make_life_event(*, world, chars, rels: str = "",
     return (
         f"{_world_line(world)}\n"
         f"{cast_line}{rel_line}\n{mem}\n"
+        + recent_events_block(previous) + "\n"
         "这群人是生活在同一个世界的真实人物。请让其中几人产生交集,生成一幕自然的生活日常："
         "偶遇寒暄、结伴逛街/吃饭、一起去某个地方、碰上同一个小麻烦、或某个人的心事被旁人撞见。"
         "要有画面感与生活气息,不搞超展开;事件要具体、能做出选择。\n"

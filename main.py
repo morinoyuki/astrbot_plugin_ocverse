@@ -624,6 +624,11 @@ class OcversePlugin(Star):
                     msg, nodes = await plugin.game.regen_mainline(gid, world_id=world_id)
                 return {"message": msg, "mainline": nodes}
 
+            async def delete_world(self_, gid: str, world_id: int) -> dict:
+                async with plugin._glock(gid):
+                    msg = plugin.game.delete_world(gid, str(world_id))
+                return {"message": msg}
+
         return _Ops()
 
     async def terminate(self):
@@ -1965,6 +1970,35 @@ class OcversePlugin(Star):
         yield event.plain_result("⏳ 正在重铸世界主线(可能联网搜索),请稍候…")
         async with self._glock(gid):
             msg, _nodes = await self.game.regen_mainline(gid)
+        yield event.plain_result(msg)
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @oc.command("删除世界", alias={"del_world", "抹除世界"})
+    @_guard
+    async def cmd_del_world(self, event: AstrMessageEvent):
+        """分身 删除世界 <编号/名称> - 管理员抹除一个世界及其全部世界数据
+        (设施/危险区域/NPC/房产/世界声望;角色及其记忆物品关系保留),需二次确认"""
+        gid = self._need_gid(event)
+        ref = self._rest(event, "删除世界", "del_world", "抹除世界").strip()
+        if not ref:
+            yield event.plain_result(
+                "格式:/分身 删除世界 <编号/名称>\n"
+                "(编号/名称见「/分身 世界列表」;将抹除该世界的设施/危险区域/NPC/房产/世界声望,"
+                "角色及其记忆物品关系保留;需二次确认)")
+            return
+        key = f"delw:{gid}:{self._uid(event)}"
+        now = time.time()
+        if now - self._confirm.get(key, 0) > 120 or self._confirm.get(key + ":ref") != ref:
+            self._confirm[key] = now
+            self._confirm[key + ":ref"] = ref
+            yield event.plain_result(
+                f"⚠ 将抹除世界「{ref}」及其全部世界数据(设施/危险区域/NPC/房产/世界声望;角色保留,不可恢复)。\n"
+                f"确认请再发一次:「/分身 删除世界 {ref}」(2分钟内有效)")
+            return
+        self._confirm.pop(key, None)
+        self._confirm.pop(key + ":ref", None)
+        async with self._glock(gid):
+            msg = self.game.delete_world(gid, ref, f"管理员{self._uid(event)}")
         yield event.plain_result(msg)
 
     @oc.command("定义世界", alias={"add_world", "世界书"})

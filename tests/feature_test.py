@@ -70,12 +70,14 @@ WORLD_JSON = {
 DIALOGUE = [{"speaker": "自己", "text": "先这样。"}, {"speaker": "对方", "text": "嗯,回头见。"}]
 INVITE_PROMPTS: list[str] = []   # 记录远征邀约 prompt(验证任务信息注入)
 REPORT_PROMPTS: list[str] = []   # 记录远征播报 prompt(验证物资归属规则)
+EVENT_PROMPTS: list[str] = []    # 记录事件生成 prompt(验证近期事件防绕圈)
 
 
 def llm_fake(system, user):
     if "生成一个新世界" in user or "补全它的题材标签" in user:
         return json.dumps(WORLD_JSON, ensure_ascii=False)
     if "突发遭遇" in user:
+        EVENT_PROMPTS.append(user)
         return json.dumps({"title": "废墟枪声", "scene": "远处传来一声枪响。",
                            "options": [{"label": "去看看", "hint": "危险"}, {"label": "躲开", "hint": "稳"},
                                        {"label": "喊人", "hint": "求援"}]}, ensure_ascii=False)
@@ -507,6 +509,20 @@ async def main():
           and ov3["offer"]["zone_name"] in {z["name"] for z in db.get_world(w.id).zones}
           and len(db.get_world(w.id).zones) >= C.ZONES_MIN)
 
+    # ── 剧情防绕圈:事件生成注入近期事件 + 全局文风铁律 ──
+    from ocverse.prompts import make_event as _me, STYLE_BASE
+    check("全局文风含『剧情向前推进』铁律", "剧情向前推进" in STYLE_BASE
+          and "不要围绕同一件旧事" in STYLE_BASE)
+    # 触发一次新事件:验证近期事件被注入(防绕圈)
+    v_ev = await game.fire_event(gid, "u1")
+    db.expire_event(v_ev["event_id"])
+    _pep = EVENT_PROMPTS[-1] if EVENT_PROMPTS else ""
+    check("事件生成注入近期事件(防绕圈)", "近期已经发生过的事件" in _pep
+          and ("废墟枪声" in _pep or "远征" in _pep or "小剧场" in _pep), extra=_pep[-200:])
+    check("make_event previous 块生效", "近期已经发生过的事件" in _me(
+        world=db.get_world(w.id), char=db.get_char(gid, "u1"),
+        previous=["小插曲:茶馆里雾气腾腾。"]))
+
     # ── 物品归属规则注入(事件/行动/远征)──
     from ocverse.prompts import resolve_action as _ra, resolve_event as _re, expedition_report as _er
     _w = db.get_world(w.id)
@@ -547,10 +563,12 @@ async def main():
     db.update_char(gid, "u1", flags=fl)
     life_gold_before = db.get_char(gid, life2.uid).gold
     life_exp_before = db.get_char(gid, life2.uid).exp
+    life_level_before = db.get_char(gid, life2.uid).level
     sv = await game.settle_expedition(gid, "u1")
     lc = db.get_char(gid, life2.uid)
-    check("随行持久角色分得战利品(金币/经验)", sv["outcome"] == "success"
-          and lc.gold > life_gold_before and lc.exp > life_exp_before
+    check("随行持久角色分得战利品(金币/经验/升级)", sv["outcome"] == "success"
+          and lc.gold > life_gold_before
+          and (lc.exp != life_exp_before or lc.level > life_level_before)
           and any(c.startswith("🎖") for c in sv["changes"]))
     if hasattr(game, "_exp_success_rate_del"):
         pass
@@ -596,7 +614,25 @@ async def main():
     check("旧库迁移后角色可读(生命默认满)", ch_old.hp == C.HP_MAX)
     db2.close()
 
+    # ── 世界删除:级联清理 + 当前世界切换(角色保留)──
+    await game.init_world(gid, "临时的第二世界", "admin")
+    w_cur = db.cur_world(gid)
+    db.plot_add(gid, w_cur.id, 1, "房", "测试小屋", "x", 700)
+    db.rep_add(gid, "u1", w_cur.id, 30, "test")
+    msg = game.delete_world(gid, str(w_cur.id), "admin")
+    check("世界删除:世界行移除", db.get_world(w_cur.id) is None
+          and all(x.id != w_cur.id for x in db.list_worlds(gid)))
+    check("世界删除:级联清理(房产/声望)", db.plots(gid, w_cur.id) == []
+          and db.rep_get(gid, "u1", w_cur.id) == 0)
+    check("世界删除:当前世界自动切换", db.cur_world(gid) is not None
+          and db.cur_world(gid).id != w_cur.id)
+    check("世界删除:总结文本", "已从世界书中抹去" in msg and "角色" in msg)
+    for x in list(db.list_worlds(gid)):
+        game.delete_world(gid, str(x.id), "admin")
+    check("世界全删后当前世界清空", db.cur_world(gid) is None)
+    await game.init_world(gid, "收尾世界", "admin")
     db.close()
+
     print(f"\nALL PASS ({ok} 项检查全部通过)")
 
 

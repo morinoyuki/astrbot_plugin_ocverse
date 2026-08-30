@@ -154,6 +154,18 @@ class Database:
             return None
         return self.get_world(int(g["cur_world_id"]))
 
+    def delete_world(self, wid: int) -> bool:
+        cur = self._ex("DELETE FROM worlds WHERE id=?", (int(wid),))
+        return cur.rowcount > 0
+
+    def plots_delete_world(self, gid: str, world_id: int) -> int:
+        cur = self._ex("DELETE FROM plots WHERE gid=? AND world_id=?", (gid, int(world_id)))
+        return cur.rowcount
+
+    def rep_delete_world(self, gid: str, world_id: int) -> int:
+        cur = self._ex("DELETE FROM reputations WHERE gid=? AND world_id=?", (gid, int(world_id)))
+        return cur.rowcount
+
     def list_worlds(self, gid: str, only_visited: bool = False) -> list[World]:
         sql = "SELECT * FROM worlds WHERE gid=?"
         if only_visited:

@@ -66,6 +66,7 @@ class AdminPanel:
             (f"{base}/api/char/delete", self.api_char_delete, ["POST"], "删除角色"),
             (f"{base}/api/world", self.api_world, ["GET"], "世界与NPC"),
             (f"{base}/api/world", self.api_world_edit, ["POST"], "编辑世界/NPC"),
+            (f"{base}/api/world/delete", self.api_world_delete, ["POST"], "删除世界"),
             (f"{base}/api/events", self.api_events, ["GET"], "事件列表"),
             (f"{base}/api/event/expire", self.api_event_expire, ["POST"], "事件收场"),
             (f"{base}/api/infra/regen", self.api_infra_regen, ["POST"], "AI 重新生成世界设施"),
@@ -321,6 +322,24 @@ class AdminPanel:
             return error_response("没有可更新的字段", status_code=400)
         self.db.update_world(w.id, **fields)
         return self._world_json(self.db.get_world(w.id))
+
+    async def api_world_delete(self):
+        """删除一个世界及其全部世界相关数据(设施/区域/NPC/房产/声望;角色保留)。
+        body/query: gid 必填;world_id 必填。"""
+        if self.ops is None or not hasattr(self.ops, "delete_world"):
+            return error_response("未接入删除世界操作", status_code=400)
+        body = await self._body()
+        gid = self._gid() or str(body.get("gid") or "")
+        if not gid:
+            return error_response("需要 gid", status_code=400)
+        try:
+            wid = int(body.get("world_id"))
+        except (TypeError, ValueError):
+            return error_response("world_id 应为整数", status_code=400)
+        try:
+            return await self.ops.delete_world(gid, wid)
+        except Exception as e:
+            return error_response(str(e), status_code=400)
 
     # ── 事件 ──────────────────────────────────────────────────
     async def api_events(self):

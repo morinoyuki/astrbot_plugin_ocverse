@@ -945,6 +945,9 @@ class Game:
             gid, f"{char.name if char else '群事件'} {world.name} {npc['name'] if npc else ''}",
             uid=char.uid if char else None,
         )
+        # 近期已发生事件(防剧情绕圈:新遭遇必须在场景/题材/冲突上明显不同)
+        prev_logs = [r.get("text", "") for r in self.db.recent_logs(gid, uid=(char.uid if char else None), limit=14)
+                     if r.get("kind") in ("event", "act", "interaction", "npc")][:5]
         if multi is not None:
             # 群像生活事件:多主角,记忆检索用共同语境
             mems = await self.mem.related(
@@ -954,6 +957,7 @@ class Game:
             rels = self._group_rels(gid, multi)
             r = await self.brain.make_life_event(
                 world=world, chars=multi, rels=rels, memories=mems,
+                previous=prev_logs,
                 material=await self._kb_ctx(gid, f"日常 相遇 生活 {world.name}"),
             )
             r.data["participants"] = [{"uid": c.uid, "name": c.name} for c in multi]
@@ -978,6 +982,7 @@ class Game:
         r = await self.brain.make_event(world=world, char=char, kind="npc" if npc else ("group" if is_group else "solo"),
                                         npc=npc, memories=mems, ideas=world.event_ideas,
                                         state_note=self._state_note(char) if char else "",
+                                        previous=prev_logs,
                                         material=await self._kb_ctx(gid, f"随机事件 剧情 钩子 {world.name}"))
         ev = EventRow(
             gid=gid,
@@ -1889,6 +1894,44 @@ class Game:
         w.mainline = self._ensure_mainline_baseline(w, w.mainline)
         self.db.update_world(w.id, mainline=w.mainline)
         return w
+
+    def delete_world(self, gid: str, ref: str, by: str = "") -> str:
+        """抹除一个世界及其全部世界相关数据(设施/区域/NPC/房产/世界声望),角色及其记忆/物品/关系保留。
+        ref: 世界编号或名称。若删除的是当前世界,自动切换到另一个已解锁世界。"""
+        w = None
+        if str(ref).isdigit():
+            cand = self.db.get_world(int(ref))
+            if cand and cand.gid == gid:
+                w = cand
+        if w is None:
+            for cand in self.db.list_worlds(gid):
+                if cand.name == ref or ref in cand.name:
+                    w = cand
+                    break
+        if w is None:
+            raise GameError(f"找不到要删除的世界「{ref}」。用「/分身 世界列表」查看编号/名称。")
+        plots = self.db.plots(gid, w.id)
+        n_infra, n_zones, n_npcs = len(w.infra or []), len(w.zones or []), len(w.npcs or [])
+        self.db.plots_delete_world(gid, w.id)
+        self.db.rep_delete_world(gid, w.id)
+        self.db.delete_world(w.id)
+        cur_msg = ""
+        g_row = self.db.get_group(gid)
+        g = dict(g_row) if g_row else None
+        if g and g.get("cur_world_id") == w.id:
+            others = [x for x in self.db.list_worlds(gid) if x.visited]
+            if others:
+                self.db.update_group(gid, cur_world_id=others[0].id)
+                cur_msg = f"当前世界已切换到《{others[0].name}》"
+            else:
+                self.db.update_group(gid, cur_world_id=None)
+                cur_msg = "本群已没有任何世界——请管理员「/分身 初始化世界」重新铺设"
+        self.db.append_log(gid, "", "shift",
+                           f"🗑 世界《{w.name}》[{w.genre}] 被{by or '管理员'}从世界书中抹去", "")
+        _fire_remember(self.mem, gid, "", "world", f"世界《{w.name}》已被抹除", ref=f"delw:{w.id}")
+        return (f"🗑 《{w.name}》[{w.genre}] 已从世界书中抹去:\n"
+                f"· 清除:设施 {n_infra} 处、危险区域 {n_zones} 片、NPC {n_npcs} 位、房产 {len(plots)} 处、本世界声望记录\n"
+                f"(角色及其记忆/物品/关系全部保留)\n{cur_msg}")
 
     async def regen_mainline(self, gid: str, world_id: int | None = None) -> tuple[str, list[dict]]:
         """管理员:让 AI 按世界观重新生成主线(force,无视失败上限)。返回(总结文本, 新小节)。"""
