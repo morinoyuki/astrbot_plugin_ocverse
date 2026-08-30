@@ -520,6 +520,52 @@ async def main():
     _bn = game._backpack_heal_note(gid, "u1", _w)
     check("治疗物品提示归属角色本人(有药时)", ("角色本人" in _bn) if _bn else True)
 
+    # ── 远征:随行角色消耗与奖励 / 持久角色每日小剧场 ──
+    life2 = db.get_char(gid, "npc:g1:绫波")
+    db.item_add(gid, life2.uid, "绷带包", 1, "")
+    db.kv_set(gid, f"exp_team:{game._day_key()}:u1", json.dumps(["绫波"], ensure_ascii=False))
+    db.update_char(gid, "u1", stamina=100)
+    await game.ensure_expedition_offer(gid, "u1")
+    dv = await game.accept_expedition(gid, "u1")
+    ch = db.get_char(gid, "u1")
+    exp_now = game._on_expedition(ch)
+    check("招募者编入远征队伍(生活角色随队)", "绫波" in (exp_now.get("teammates") or [])
+          and life2.uid in (exp_now.get("life_teammates") or []))
+    # 队友行囊消耗:LLM 指定『绫波:绷带包』
+    ft_module = sys.modules[__name__]
+    ft_module.REPORT_LOSE = ["绫波:绷带包"]
+    fl = dict(ch.flags); fl["_exp"]["next_report"] = 0; fl["_exp"]["until"] = __import__("time").time() + 3600
+    db.update_char(gid, "u1", flags=fl)
+    canned_before = (db.item_get(gid, "u1", "罐头") or {}).get("count", 0)
+    rv = await game.expedition_report(gid, "u1")
+    check("队友行囊消耗(归属成员名解析)", (db.item_get(gid, life2.uid, "绷带包") or {"count": 0}).get("count", 0) == 0
+          and (db.item_get(gid, "u1", "罐头") or {"count": 0}).get("count", 0) == canned_before
+          and any("绫波" in c and "绷带包" in c for c in rv["changes"]))
+    # 归来结算:随行角色分战利品(强制成功)
+    game._exp_success_rate = lambda c_, z_, n_: 100
+    fl = dict(db.get_char(gid, "u1").flags); fl["_exp"]["until"] = 1
+    db.update_char(gid, "u1", flags=fl)
+    life_gold_before = db.get_char(gid, life2.uid).gold
+    life_exp_before = db.get_char(gid, life2.uid).exp
+    sv = await game.settle_expedition(gid, "u1")
+    lc = db.get_char(gid, life2.uid)
+    check("随行持久角色分得战利品(金币/经验)", sv["outcome"] == "success"
+          and lc.gold > life_gold_before and lc.exp > life_exp_before
+          and any(c.startswith("🎖") for c in sv["changes"]))
+    if hasattr(game, "_exp_success_rate_del"):
+        pass
+    del game._exp_success_rate   # 还原类方法
+    # 持久角色每日小剧场
+    ft_module.REPORT_LOSE = ["阿灰:罐头"]
+    lc = db.get_char(gid, life2.uid)
+    lc_exp_before, lc_mood_before = lc.exp, lc.mood
+    lv = await game.fire_life_event(gid)
+    lc = db.get_char(gid, life2.uid)
+    check("持久角色每日小剧场(触发+结算)", lv is not None and lv["narration"]
+          and (lc.exp > lc_exp_before or lc.mood != lc_mood_before))
+    plan = game.ensure_plan(gid, day="2099-01-01")
+    check("每日计划含生活角色小剧场项", any(it.get("kind") == "life_event" for it in plan))
+
     # ── 剧情权重:主线终章=高潮 ──
     from ocverse.prompts import resolve_mainline as _rm, story_weight_line
     p_major = _rm(world=db.get_world(w.id), char=ch, stage={"stage": "x", "desc": "y"})
