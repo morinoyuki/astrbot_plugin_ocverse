@@ -34,6 +34,7 @@ from .ocverse.avatar_store import AvatarStore
 from .ocverse.db import Database
 from .ocverse.embedder import make_embedder
 from .ocverse.game import Game, GameError, is_npc_uid, npc_uid
+from .ocverse.imcard import strip_script  # noqa: F401
 from .ocverse.imcard import (
     fortune_card,
     help_card,
@@ -1081,7 +1082,7 @@ class OcversePlugin(Star):
             else:
                 parts.append(lead)
             if v.get("narration"):
-                parts.append(str(v["narration"]).strip())
+                parts.append(strip_script(str(v["narration"])))
             for d in (v.get("dialogues") or [])[:6]:
                 sp = str(d.get("speaker") or "").strip()
                 tx = str(d.get("text") or "").strip()
@@ -1094,7 +1095,7 @@ class OcversePlugin(Star):
             if v.get("event_title"):
                 parts.append(str(v["event_title"]).strip())
             if v.get("narration"):
-                parts.append(str(v["narration"]).strip())
+                parts.append(strip_script(str(v["narration"])))
             if v.get("reply"):
                 parts.append(str(v["reply"]).strip())
             if v.get("brief"):

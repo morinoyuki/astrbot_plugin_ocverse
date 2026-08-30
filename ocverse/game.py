@@ -151,6 +151,13 @@ class Game:
         reason = str(s.get("reason") or "").strip()
         return f"{typ}" + (f"({reason})" if reason else "")
 
+    @staticmethod
+    def _narr_plain(text, n: int) -> str:
+        """演出脚本 → 纯文字切片(n 字符),供记忆/日志存档(去掉胶囊与对白标签)。"""
+        from .imcard.markdown import strip_script
+
+        return strip_script(text)[:n]
+
     # ══════════════ 生命值(HP)══════════════
     def _apply_hp(self, ch: Char, delta: int) -> str:
         """增减生命值并处理归零昏迷/苏醒。返回人话变更(可能为空)。"""
@@ -1186,7 +1193,8 @@ class Game:
         r = await self.brain.resolve_event(
             world=world, char=target_char, event=ev.payload, choice_idx=idx, previous=prev,
             state_note=state_note, heal_note=heal_note,
-            material=await self._kb_ctx(gid, "事件结算 结果 剧情 氛围"))
+            material=await self._kb_ctx(gid, "事件结算 结果 剧情 氛围"),
+            avatars=self._avatar_names(gid))
         data = r.data
         changes: list[str] = []
         if target_char:
@@ -1208,13 +1216,13 @@ class Game:
         mem_owner = ev.uid or uid  # 全员事件的记忆记在抉择者名下
         mem_text = data.get("memory") or f"{target_char.name if target_char else '众人'}:「{opts[idx]['label']}」——{ev.payload.get('title','')}"
         await self.mem.remember(gid, mem_owner, "char", mem_text, ref=f"event:{ev.id}")
-        await self.mem.remember(gid, "", "world", f"《{world.name}》{ev.payload.get('title','')}:{(data.get('narration') or '')[:80]}", ref=f"event:{ev.id}")
+        await self.mem.remember(gid, "", "world", f"《{world.name}》{ev.payload.get('title','')}:{self._narr_plain(data.get('narration'), 80)}", ref=f"event:{ev.id}")
         self.db.append_log(gid, ev.uid or uid, "event",
-                           f"「{ev.payload.get('title')}」选了「{opts[idx]['label']}」:{(data.get('narration') or '')[:90]}",
+                           f"「{ev.payload.get('title')}」选了「{opts[idx]['label']}」:{self._narr_plain(data.get('narration'), 90)}",
                            world.name)
         # 记忆压缩检查
         await self._maybe_compress(gid, mem_owner)
-        echo = await self.mainline_echo(gid, mem_owner, ctx=f"{ev.payload.get('title','')}:「{opts[idx]['label']}」{(data.get('narration') or '')[:60]}")
+        echo = await self.mainline_echo(gid, mem_owner, ctx=f"{ev.payload.get('title','')}:「{opts[idx]['label']}」{self._narr_plain(data.get('narration'), 60)}")
         return {
             "type": "result",
             "echo": echo,
@@ -1244,6 +1252,7 @@ class Game:
         r = await self.brain.resolve_life_event(
             world=world, chars=chars, event=ev.payload, choice_idx=idx, rels=rels,
             material=await self._kb_ctx(gid, "日常 交集 结果 羁绊"),
+            avatars=self._avatar_names(gid),
         )
         data = r.data
         changes: list[str] = []
@@ -1269,7 +1278,7 @@ class Game:
         for c in chars:
             await self.mem.remember(gid, c.uid, "char", mem_text, ref=f"life:{ev.id}")
         await self.mem.remember(gid, "", "world",
-                                f"《{world.name}》{ev.payload.get('title','')}:{(data.get('narration') or '')[:90]}",
+                                f"《{world.name}》{ev.payload.get('title','')}:{self._narr_plain(data.get('narration'), 90)}",
                                 ref=f"life:{ev.id}")
         self.db.append_log(gid, uid, "event",
                            f"{ev.payload.get('title','')} 选了「{pick['label']}」:{'、'.join(c.name for c in chars)}共同经历",
@@ -1390,6 +1399,7 @@ class Game:
             previous=prev, state_note=b_state,
             rep_note=self._rep_note(gid, uid_a, world),
             material=await self._kb_ctx(gid, f"互动 对话 {mode}"),
+            avatars=self._avatar_names(gid),
         )
         data = r.data
         changes = self._apply_effects(a, data.get("a_effects") or {})
@@ -1426,7 +1436,8 @@ class Game:
                 proposer, receiver = (a, b) if random.choice([a, b]) is a else (b, a)
                 cr = await self.brain.confess(world=world, a=proposer, b=receiver,
                                               score=rel, outcome=c_outcome,
-                                              material=await self._kb_ctx(gid, "告白 恋爱 心动"))
+                                              material=await self._kb_ctx(gid, "告白 恋爱 心动"),
+                                              avatars=self._avatar_names(gid))
                 if c_outcome == "success":
                     self.db.set_rel_state(gid, uid_a, uid_b, "lovers")
                     self.db.bump_rel(gid, uid_a, uid_b, 10, "告白成功")
@@ -1461,7 +1472,8 @@ class Game:
                 and random.random() < 0.35 and not _fate_locked(uid_a, uid_b):
             proposer, receiver = (a, b) if random.random() < 0.5 else (b, a)
             pr = await self.brain.propose(world=world, a=proposer, b=receiver, score=rel,
-                                          material=await self._kb_ctx(gid, "求婚 结婚 伴侣"))
+                                          material=await self._kb_ctx(gid, "求婚 结婚 伴侣"),
+                                          avatars=self._avatar_names(gid))
             self.db.set_rel_state(gid, uid_a, uid_b, "married")
             self.db.bump_rel(gid, uid_a, uid_b, 5, "结为伴侣")
             await self.mem.remember(gid, uid_a, "char", f"与{b.name}结为伴侣!", ref=f"marry:{uid_b}")
@@ -1489,14 +1501,14 @@ class Game:
         await self.mem.remember(gid, uid_a, "char",
                                 data.get("memory") or f"{a.name}对{b.name}「{mode}」", ref="inter")
         self.db.append_log(gid, uid_a, "interaction",
-                           f"{a.name} 对 {b.name}「{mode}」:{(data.get('narration') or '')[:90]}(羁绊{rel})",
+                           f"{a.name} 对 {b.name}「{mode}」:{self._narr_plain(data.get('narration'), 90)}(羁绊{rel})",
                            world.name)
         # 任务进度:群友互动(social)/生活角色互动(life)
         if is_npc_uid(uid_b):
             self._quest_progress(gid, uid_a, "life", name=b.name)
         else:
             self._quest_progress(gid, uid_a, "social")
-        echo = await self.mainline_echo(gid, uid_a, ctx=f"与{b.name}「{mode}」{(data.get('narration') or '')[:60]}")
+        echo = await self.mainline_echo(gid, uid_a, ctx=f"与{b.name}「{mode}」{self._narr_plain(data.get('narration'), 60)}")
         return {
             "type": "interact",
             "echo": echo,
@@ -1562,6 +1574,7 @@ class Game:
             world=world, a=a, b=b, label=label,
             rel_score=pre["score"], rel_stage=C.rel_stage_label(pre["score"], pre["state"]),
             material=await self._kb_ctx(gid, f"关系 提案 {label}"),
+            avatars=self._avatar_names(gid),
         )
         data = r.data
         agree = bool(data.get("agree"))
@@ -1640,7 +1653,8 @@ class Game:
         r = await self.brain.npc_chat(world=world, npc=npc, char=ch, action=action,
                                       memories=mems, previous=prev, state_note=state_note,
                                       rep_note=self._rep_note(gid, uid, world),
-                                      material=await self._kb_ctx(gid, "NPC构图 对话 人物"))
+                                      material=await self._kb_ctx(gid, "NPC构图 对话 人物"),
+                                      avatars=self._avatar_names(gid))
         data = r.data
         self._count_interaction(ch)
         changes = self._apply_effects(ch, data.get("effects") or {})
@@ -1775,7 +1789,8 @@ class Game:
         offer["team_note"] = "、".join(team) or "暂无(你是第一位同行者)"
         r = await self.brain.expedition_invite(
             world=world, char=ch, target=tch, offer=offer,
-            rel_score=pre["score"], rel_stage=C.rel_stage_label(pre["score"], pre["state"]))
+            rel_score=pre["score"], rel_stage=C.rel_stage_label(pre["score"], pre["state"]),
+            avatars=self._avatar_names(gid))
         d = r.data
         agree = bool(d.get("agree"))
         changes: list[str] = []
@@ -2169,7 +2184,8 @@ class Game:
         exp_snap = dict(flags["_exp"], progress=0)
         r = await self.brain.expedition_report(world=world, char=ch, exp=exp_snap,
                                                phase="誓师出发",
-                                               supplies_note=prep_note) if world is not None else None
+                                               supplies_note=prep_note,
+                                               avatars=self._avatar_names(gid)) if world is not None else None
         offer["rate"] = self._exp_success_rate(ch, {"danger": int(offer.get("danger") or 3)}, len(team))
         if r is not None and r.ok:
             narration = str(r.data["narration"])
@@ -2232,7 +2248,8 @@ class Game:
                          "请按剧情判断本轮消耗哪些:至少一份食物/饮水,受伤可用治疗物品;"
                          "items_lose 每项写成『成员名:物品名』,从该成员自己的行囊取出(只能消耗清单里存在的)。")
         r = await self.brain.expedition_report(world=world, char=ch, exp=exp, phase=phase,
-                                               supplies_note=supplies_note) if world is not None else None
+                                               supplies_note=supplies_note,
+                                               avatars=self._avatar_names(gid)) if world is not None else None
         llm_lose = [str(x).strip() for x in (r.data.get("items_lose") or []) if str(x).strip()] \
             if (r is not None and r.ok) else []
         consumed: list[tuple[Char, str]] = []   # (谁, 物品名)
@@ -2409,7 +2426,8 @@ class Game:
                     changes.append(f"💞 与{t}羁绊+4")
         self.db.upsert_char(ch)
         r = await self.brain.expedition_settle(world=world, char=ch, exp=exp, outcome=outcome,
-                                               reward_line=reward_line) if world is not None else None
+                                               reward_line=reward_line,
+                                               avatars=self._avatar_names(gid)) if world is not None else None
         if r is not None and r.ok:
             narration = str(r.data["narration"])
             dialogues = r.data.get("dialogues") or []
@@ -2652,6 +2670,7 @@ class Game:
             heal_note=self._backpack_heal_note(gid, uid, world),
             zone_note=zone_note,
             material=await self._kb_ctx(gid, f"主动行动 {name} 进展"),
+            avatars=self._avatar_names(gid),
         )
         effects = dict(r.data.get("effects") or {})
         # 概率机缘:一小部分概率额外捡到金币彩蛋
@@ -2681,14 +2700,14 @@ class Game:
         if name in ("冒险", "打怪"):
             lead = "讨伐" if name == "打怪" else ""
             self._quest_progress(gid, uid, "act", name=name,
-                                 text=f"{lead} {ch.name} {detail[:60]} {(r.data.get('narration') or '')[:80]}")
+                                 text=f"{lead} {ch.name} {detail[:60]} {self._narr_plain(r.data.get('narration'), 80)}")
         mem_text = r.data.get("memory") or f"{ch.name}在《{world.name}》「{name}」:{detail[:30]}"
         await self.mem.remember(gid, uid, "char", mem_text, ref=f"act:{_now():.0f}")
         await self.mem.remember(gid, "", "world",
-                                f"《{world.name}》{ch.name}「{name}」:{(r.data.get('narration') or '')[:60]}")
+                                f"《{world.name}》{ch.name}「{name}」:{self._narr_plain(r.data.get('narration'), 60)}")
         self.db.append_log(gid, uid, "act",
-                           f"{ch.name}「{name}」:{(r.data.get('narration') or '')[:90]} ", world.name)
-        echo = await self.mainline_echo(gid, uid, ctx=f"「{name}」{(r.data.get('narration') or '')[:70]}")
+                           f"{ch.name}「{name}」:{self._narr_plain(r.data.get('narration'), 90)} ", world.name)
+        echo = await self.mainline_echo(gid, uid, ctx=f"「{name}」{self._narr_plain(r.data.get('narration'), 70)}")
         return {
             "type": "act",
             "echo": echo,
@@ -2998,7 +3017,8 @@ class Game:
         # 让 LLM 结算这一步
         r = await self.brain.resolve_mainline(
             world=w, char=ch, stage=cur, goal_note=goal_note, weight=weight,
-            material=await self._kb_ctx(gid, "世界主线 剧情 推进"))
+            material=await self._kb_ctx(gid, "世界主线 剧情 推进"),
+            avatars=self._avatar_names(gid))
         d = r.data
         changes = self._apply_effects(ch, d.get("effects") or {})
         cur["done"] = True
@@ -3121,7 +3141,8 @@ class Game:
             try:
                 r = await self.brain.settle_work(
                     world=w, char=ch, spot=spot, job=job, hours=hours,
-                    colleague=colleague, material=await self._kb_ctx(gid, "下班 收工 兼职"))
+                    colleague=colleague, material=await self._kb_ctx(gid, "下班 收工 兼职"),
+                    avatars=self._avatar_names(gid))
             except Exception:
                 r = None
         else:
@@ -3320,7 +3341,8 @@ class Game:
         self._attach_rep_line(gid, uid, w)
         r = await self.brain.facility_event(
             world=w, char=ch, facility=it, action=action, memories=mems,
-            material=await self._kb_ctx(gid, f"设施 社交 娱乐 {it['name']}"))
+            material=await self._kb_ctx(gid, f"设施 社交 娱乐 {it['name']}"),
+            avatars=self._avatar_names(gid))
         data = r.data
         changes = self._apply_effects(ch, data.get("effects") or {})
         changes += self._apply_items(gid, uid, data.get("items_gain"), data.get("items_lose"))
@@ -3329,14 +3351,14 @@ class Game:
                                 data.get("memory") or f"{ch.name}去{it['name']}消磨了时光",
                                 ref=f"fac:{_now():.0f}")
         await self.mem.remember(gid, "", "world",
-                                f"《{w.name}》{ch.name}光顾「{it['name']}」:{(data.get('narration') or '')[:40]}",
+                                f"《{w.name}》{ch.name}光顾「{it['name']}」:{self._narr_plain(data.get('narration'), 40)}",
                                 ref=f"fac:{_now():.0f}")
         self.db.append_log(gid, uid, "act",
-                           f"{ch.name} 光顾「{it['name']}」:{(data.get('narration') or '')[:80]}", w.name)
+                           f"{ch.name} 光顾「{it['name']}」:{self._narr_plain(data.get('narration'), 80)}", w.name)
         # 任务需要时推进「去该设施」步骤(facility 类型)
         if task_wants:
             self._quest_progress(gid, uid, "facility", name=it["name"])
-        echo = await self.mainline_echo(gid, uid, ctx=f"在{it['name']} {(data.get('narration') or '')[:60]}")
+        echo = await self.mainline_echo(gid, uid, ctx=f"在{it['name']} {self._narr_plain(data.get('narration'), 60)}")
         return {
             "type": "facility",
             "echo": echo,
@@ -3460,7 +3482,8 @@ class Game:
                 r = await self.brain.home_event(
                     world=w, char=ch, plot=p,
                     memories=await self.mem.related(gid, f"{ch.name} 回家 家居", uid=uid, k=2),
-                    material=await self._kb_ctx(gid, "回家 家居 日常"))
+                    material=await self._kb_ctx(gid, "回家 家居 日常"),
+                    avatars=self._avatar_names(gid))
                 if r.ok and r.data.get("narration"):
                     ev_eff = dict(r.data.get("effects") or {})
                     ev_eff.pop("gold", None); ev_eff.pop("stamina", None)
@@ -3573,7 +3596,8 @@ class Game:
         mems = await self.mem.related(gid, f"{ch.name} 交付 {q['text']} {giver}", uid=uid, k=2)
         r = await self.brain.finish_quest(world=world, char=ch, quest=q["text"], giver=giver,
                                           place=place, steps_desc=steps_desc, memories=mems,
-                                          material=await self._kb_ctx(gid, "交付 委托 报酬"))
+                                          material=await self._kb_ctx(gid, "交付 委托 报酬"),
+                                          avatars=self._avatar_names(gid))
         changes = self._apply_effects(ch, r.data.get("effects") or {})
         changes += self._apply_items(gid, uid, r.data.get("items_gain"), [])
         # 全群累计完成任务数(主线 quest 门槛用)
@@ -3582,8 +3606,8 @@ class Game:
         await self.mem.remember(gid, "", "world",
                                 f"《{world.name}》{ch.name}完成了委托「{q['text']}」", ref=f"quest:{q['id']}")
         self.db.append_log(gid, uid, "quest",
-                           f"完成委托「{q['text']}」:{(r.data.get('narration') or '')[:80]}", world.name)
-        echo = await self.mainline_echo(gid, uid, ctx=f"交付委托「{q['text']}」{(r.data.get('narration') or '')[:60]}")
+                           f"完成委托「{q['text']}」:{self._narr_plain(r.data.get('narration'), 80)}", world.name)
+        echo = await self.mainline_echo(gid, uid, ctx=f"交付委托「{q['text']}」{self._narr_plain(r.data.get('narration'), 60)}")
         return {
             "type": "result",
             "echo": echo,
@@ -3842,7 +3866,7 @@ class Game:
             r = await self.brain.mainline_echo(world=w, char=ch, stage=undone[0], ctx=ctx)
             if r.ok and r.data.get("narration"):
                 self.db.append_log(gid, uid, "misc",
-                                   f"【主线回响】{str(r.data['narration'])[:90]}", w.name)
+                                   f"【主线回响】{self._narr_plain(r.data.get('narration'), 90)}", w.name)
                 return str(r.data["narration"])
         except Exception:
             return ""
@@ -3851,6 +3875,10 @@ class Game:
     def _avatar_map(self, gid: str) -> dict:
         """群内所有 OC 的名字→头像路径(仅已设置头像者),供 IM 对话气泡使用。"""
         return {c.name: c.avatar for c in self.db.list_chars(gid) if c.avatar}
+
+    def _avatar_names(self, gid: str) -> list[str]:
+        """本群可用头像名单(名字),注入 LLM 供 <d> 标签 av 属性借用。"""
+        return list(self._avatar_map(gid).keys())
 
     async def world_memory_panel(self, gid: str, world_name: str, k: int = 5) -> list[str]:
         """世界记忆面板:世界范畴(world/npc 等)的最近大事记,供「分身 世界」展示。"""
@@ -3894,7 +3922,8 @@ class Game:
                   and not self._on_expedition(c) and not self._exp_companion_of(gid, c.uid)]
         other = random.choice(others) if others and random.random() < 0.5 else None
         mems = await self.mem.related(gid, f"{ch.name} 日常 生活", uid=ch.uid, k=3)
-        r = await self.brain.life_char_story(world=world, char=ch, other=other, memories=mems)
+        r = await self.brain.life_char_story(world=world, char=ch, other=other, memories=mems,
+                                             avatars=self._avatar_names(gid))
         d = r.data
         changes = self._apply_effects(ch, d.get("effects") or {})
         changes += self._apply_items(gid, ch.uid, d.get("items_gain"), d.get("items_lose"))
@@ -3904,10 +3933,10 @@ class Game:
                 self.db.bump_rel(gid, ch.uid, other.uid, delta, "日常交集")
                 changes.append(f"💞 与{other.name}好感{'+' if delta > 0 else ''}{delta}")
         await self.mem.remember(gid, ch.uid, "char",
-                                d.get("memory") or f"{ch.name}度过了日常的一天:{(d.get('narration') or '')[:50]}",
+                                d.get("memory") or f"{ch.name}度过了日常的一天:{self._narr_plain(d.get('narration'), 50)}",
                                 ref=f"lifestory:{_now():.0f}")
         self.db.append_log(gid, ch.uid, "event",
-                           f"【日常】{ch.name}:{(d.get('narration') or '')[:80]}", world.name)
+                           f"【日常】{ch.name}:{self._narr_plain(d.get('narration'), 80)}", world.name)
         return {
             "type": "result",
             "gid": gid,

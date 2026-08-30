@@ -10,12 +10,13 @@ import time
 from PIL import Image
 
 from . import markdown as md
-from .engine import ChatRenderer
+from .engine import ChatRenderer, lookup_avatar
 from .rows import (
     AvatarHeadRow,
     ChoiceRow,
     DialogueRow,
     EmptyRow,
+    HrRow,
     PanelRow,
     PillRow,
     RichTextRow,
@@ -58,6 +59,11 @@ def _para(r, text, color=None, size=None, margin=(0, 4, 0, 4), bold=False):
     return RichTextRow(r, [md.Span(text)], font_size=size, color=color, margin=margin, bold=bold)
 
 
+def _match_avatar(avatars: dict | None, sp: str):
+    """按说话人挂头像:复用引擎的容错匹配(精确 → 去空格括号全等 → 包含 → 子序列)。"""
+    return lookup_avatar(avatars, sp)
+
+
 def _dialogue_rows(r, dialogues, self_name: str = "", avatars: dict | None = None) -> list:
     """IM 聊天体多轮对话气泡(轻小说式你来我往)。
     self_name 为 POV 角色名:匹配到的发言者气泡靠右(自己),其余靠左(对方)。
@@ -73,18 +79,91 @@ def _dialogue_rows(r, dialogues, self_name: str = "", avatars: dict | None = Non
         return []
     rows = []
     for sp, tx in dlg:
-        av = (avatars or {}).get(sp)
-        if not av:  # 宽松匹配:说话人名带括号/前缀时仍能挂上头像
-            for k, v in (avatars or {}).items():
-                if k and (k in sp or sp in k):
-                    av = v
-                    break
         rows.append(DialogueRow(
             r, speaker=sp, spans=[md.Span(tx)],
             is_self=bool(self_name and sp == self_name),
-            avatar=av or None,
+            avatar=_match_avatar(avatars, sp),
         ))
     return rows
+
+
+def _script_rows(r, text, *, avatars: dict | None = None, self_name: str = "",
+                 extra_dialogues=None) -> list:
+    """把『演出脚本』文本渲染为行序列——叙述自然段、短状态胶囊、对白气泡
+    严格按文本里出现的顺序自由穿插(不再叙述在上、对话在下地生硬拼接)。
+
+    - 文本含 <c>…</c>(胶囊)与 <d name=… me>…</d>(对白)标签时逐块解析渲染;
+      对白自动按说话人挂头像,self_name/me 命中的发言者靠右(自己);
+    - 文本里没有任何对白标签时,自动把 extra_dialogues(旧版对话数组)拼接在
+      叙述之后,保证 LLM 未按新格式输出时卡片依旧完整(向后兼容)。
+    """
+    text = (text or "").strip()
+    if not text and not extra_dialogues:
+        return []
+    rows: list = []
+    blocks = md.parse_blocks(text) if text else []
+    dlg_n = 0
+    for blk in blocks:
+        if blk.type == "paragraph":
+            rows.append(RichTextRow(r, blk.spans, font_size=r.font_size,
+                                    color=r.t.text, margin=(0, 6, 0, 6)))
+        elif blk.type == "capsule":
+            plain = md.plain_text(blk.spans).strip()
+            if plain:
+                rows.append(PillRow(r, plain))
+        elif blk.type == "dialogue":
+            sp = getattr(blk, "speaker", "")
+            av_attr = getattr(blk, "avatar", None)
+            # av 属性优先:LLM 显式指定借用名单里某张头像;
+            # 指定的名字不在名单时回退按发言者本名匹配
+            avatar = _match_avatar(avatars, av_attr) if av_attr else _match_avatar(avatars, sp)
+            rows.append(DialogueRow(
+                r, speaker=sp, spans=blk.spans,
+                is_self=bool(getattr(blk, "protagonist", False)
+                             or (self_name and sp == self_name)),
+                avatar=avatar,
+            ))
+            dlg_n += 1
+        elif blk.type == "heading":
+            rows.append(RichTextRow(r, blk.spans, font_size=int(r.font_size * 0.95),
+                                    bold=True, color=r.t.text, margin=(4, 4, 0, 4)))
+        elif blk.type == "list":
+            for i, item in enumerate(blk.items, 1):
+                rows.append(RichTextRow(r, [md.Span("\u00b7 ")] + item,
+                                        font_size=int(r.font_size * 0.9),
+                                        color=r.t.text_secondary, margin=(0, 2, 0, 2)))
+        elif blk.type == "quote":
+            rows.append(RichTextRow(r, blk.spans, font_size=int(r.font_size * 0.9),
+                                    color=r.t.text_secondary, margin=(6, 4, 6, 4)))
+        elif blk.type == "hr":
+            rows.append(HrRow(r))
+        elif blk.type == "code":
+            rows.append(RichTextRow(r, [md.Span(blk.code)], font_size=int(r.font_size * 0.85),
+                                    color=r.t.text_secondary, margin=(0, 4, 0, 4)))
+        else:
+            if hasattr(blk, "spans"):
+                rows.append(RichTextRow(r, blk.spans, font_size=r.font_size,
+                                        color=r.t.text, margin=(0, 6, 0, 6)))
+    # 兜底:脚本里没有对白标签,但带了旧版对话数组 → 拼在叙述后面
+    if dlg_n == 0 and extra_dialogues:
+        dlg = _dialogue_rows(r, extra_dialogues, self_name or "", avatars)
+        if dlg:
+            if rows:
+                rows.append(EmptyRow(r, 2))
+            rows.extend(dlg)
+    return rows
+
+
+def _script_block(r, view: dict) -> list:
+    """从 view 里取 narration 与 dialogues,渲染成交错演出行(统一入口)。
+    POV 角色优先用 char_name(互动类卡片用 a_name 兜底)。"""
+    return _script_rows(
+        r,
+        view.get("narration", ""),
+        avatars=view.get("avatars"),
+        self_name=view.get("char_name", "") or view.get("a_name", "") or "",
+        extra_dialogues=view.get("dialogues"),
+    )
 
 
 def _hr(r, pad=(0, 2, 0, 2)):
@@ -212,11 +291,7 @@ def result_card(view: dict, cfg: dict) -> list[Image.Image]:
     r = _mk(cfg)
     rows = []
     rows.append(PillRow(r, f"「{view.get('event_title', '')}」→ {view.get('chosen', '')}"))
-    rows.append(_para(r, view.get("narration", ""), color=r.t.text, margin=(6, 8, 0, 6)))
-    dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), view.get("avatars"))
-    if dlg:
-        rows.append(EmptyRow(r, 4))
-        rows.extend(dlg)
+    rows += _script_block(r, view)
     changes = view.get("changes") or []
     if changes:
         rows.append(EmptyRow(r, 4))
@@ -232,11 +307,7 @@ def mainline_card(view: dict, cfg: dict) -> list[Image.Image]:
     rows = []
     stage = str(view.get("stage") or "主线")
     rows.append(PillRow(r, f"📜 主线 · {stage}"))
-    rows.append(_para(r, view.get("narration", ""), color=r.t.text, margin=(6, 8, 0, 6)))
-    dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), view.get("avatars"))
-    if dlg:
-        rows.append(EmptyRow(r, 4))
-        rows.extend(dlg)
+    rows += _script_block(r, view)
     changes = view.get("changes") or []
     if changes:
         rows.append(EmptyRow(r, 4))
@@ -271,40 +342,24 @@ def expedition_card(view: dict, cfg: dict) -> list[Image.Image]:
                           size=int(r.font_size * 0.72), color=r.t.text_muted))
     elif phase == "depart":
         rows.append(PillRow(r, f"⚔ 出征 · {view.get('title', '远征')}"))
-        rows.append(_para(r, view.get("narration", ""), color=r.t.text, margin=(6, 8, 0, 6)))
-        dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), view.get("avatars"))
-        if dlg:
-            rows.append(EmptyRow(r, 4))
-            rows.extend(dlg)
+        rows += _script_block(r, view)
         rows.append(EmptyRow(r, 4))
         rows.append(TagRow(r, view.get("changes") or []))
     elif phase == "invite":
         ok = bool(view.get("agree"))
         rows.append(PillRow(r, ("🛡 邀约成功 · " if ok else "🚫 邀约被婉拒 · ") + str(view.get("target_name", ""))))
-        rows.append(_para(r, view.get("narration", ""), color=r.t.text, margin=(6, 8, 0, 6)))
-        dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), view.get("avatars"))
-        if dlg:
-            rows.append(EmptyRow(r, 4))
-            rows.extend(dlg)
+        rows += _script_block(r, view)
         rows.append(EmptyRow(r, 4))
         rows.append(TagRow(r, view.get("changes") or []))
     elif phase == "report":
         rows.append(PillRow(r, f"⚔ 远征 · {view.get('phase_name', '行军')} {view.get('progress', 0)}% · {view.get('title', '')}"))
-        rows.append(_para(r, view.get("narration", ""), color=r.t.text, margin=(6, 8, 0, 6)))
-        dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), view.get("avatars"))
-        if dlg:
-            rows.append(EmptyRow(r, 4))
-            rows.extend(dlg)
+        rows += _script_block(r, view)
         rows.append(EmptyRow(r, 4))
         rows.append(TagRow(r, view.get("changes") or []))
     elif phase == "return":
         ok = view.get("outcome") == "success"
         rows.append(PillRow(r, ("🏆 远征凯旋 · " if ok else "💀 远征折戟 · ") + str(view.get("title", ""))))
-        rows.append(_para(r, view.get("narration", ""), color=r.t.text, margin=(6, 8, 0, 6)))
-        dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), view.get("avatars"))
-        if dlg:
-            rows.append(EmptyRow(r, 4))
-            rows.extend(dlg)
+        rows += _script_block(r, view)
         rows.append(EmptyRow(r, 4))
         rows.append(TagRow(r, view.get("changes") or []))
     else:  # abort
@@ -528,11 +583,7 @@ def interact_card(view: dict, cfg: dict) -> list[Image.Image]:
     r = _mk(cfg)
     rows = []
     rows.append(PillRow(r, f"{view.get('a_name', '?')} ⇄ {view.get('b_name', '?')} ·「{view.get('mode', '互动')}」"))
-    rows.append(_para(r, view.get("narration", ""), color=r.t.text, margin=(6, 8, 0, 6)))
-    dlg = _dialogue_rows(r, view.get("dialogues"), view.get("a_name", ""), view.get("avatars"))
-    if dlg:
-        rows.append(EmptyRow(r, 4))
-        rows.extend(dlg)
+    rows += _script_block(r, view)
     changes = view.get("changes") or []
     if changes:
         rows.append(EmptyRow(r, 4))
@@ -549,13 +600,8 @@ def npc_card(view: dict, cfg: dict) -> list[Image.Image]:
     npc = view.get("npc") or {}
     rows = []
     rows.append(PillRow(r, f"{view.get('char_name', '?')} ☂ {npc.get('name', 'NPC')}"))
-    rows.append(_para(r, view.get("narration", ""), color=r.t.text_secondary, margin=(6, 6, 0, 6),
-                      size=int(r.font_size * 0.85)))
-    dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), view.get("avatars"))
-    if dlg:
-        rows.append(EmptyRow(r, 4))
-        rows.extend(dlg)
-    elif view.get("reply"):
+    rows += _script_block(r, view)
+    if not any(isinstance(x, DialogueRow) for x in rows) and view.get("reply"):
         rows.append(DialogueRow(r, speaker=str(npc.get("name", "NPC")), spans=[md.Span(view.get("reply"))]))
     changes = view.get("changes") or []
     if changes:
@@ -569,12 +615,7 @@ def act_card(view: dict, cfg: dict) -> list[Image.Image]:
     r = _mk(cfg)
     rows = []
     rows.append(PillRow(r, view.get("action_pill", "行动")))
-    rows.append(_para(r, view.get("narration", ""), color=r.t.text,
-                      margin=(6, 8, 0, 6)))
-    dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), view.get("avatars"))
-    if dlg:
-        rows.append(EmptyRow(r, 4))
-        rows.extend(dlg)
+    rows += _script_block(r, view)
     changes = view.get("changes") or []
     if changes:
         rows.append(EmptyRow(r, 4))
@@ -600,11 +641,7 @@ def work_card(view: dict, cfg: dict) -> list[Image.Image]:
     wn = view.get("world_name", "")
     if phase == "done":
         rows.append(PillRow(r, f"⚒ 下班收工 · {spot}"))
-        rows.append(_para(r, view.get("narration", ""), color=r.t.text, margin=(6, 8, 0, 6)))
-        dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), view.get("avatars"))
-        if dlg:
-            rows.append(EmptyRow(r, 4))
-            rows.extend(dlg)
+        rows += _script_block(r, view)
         changes = view.get("changes") or []
         earn = view.get("earn", 0)
         if earn:
@@ -645,11 +682,7 @@ def home_card(view: dict, cfg: dict) -> list[Image.Image]:
     rows.append(_para(r, str(plot.get("desc") or ""), color=r.t.text_secondary,
                       size=int(r.font_size * 0.78), margin=(4, 4, 0, 4)))
     if view.get("narration"):
-        rows.append(_para(r, view["narration"], color=r.t.text, margin=(6, 8, 0, 6)))
-        dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), view.get("avatars"))
-        if dlg:
-            rows.append(EmptyRow(r, 2))
-            rows.extend(dlg)
+        rows += _script_block(r, view)
     changes = view.get("changes") or []
     if changes:
         rows.append(EmptyRow(r, 4))
@@ -666,11 +699,7 @@ def facility_card(view: dict, cfg: dict) -> list[Image.Image]:
     r = _mk(cfg)
     rows = []
     rows.append(PillRow(r, view.get("title", "去光顾")))
-    rows.append(_para(r, view.get("narration", ""), color=r.t.text, margin=(6, 8, 0, 6)))
-    dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), view.get("avatars"))
-    if dlg:
-        rows.append(EmptyRow(r, 4))
-        rows.extend(dlg)
+    rows += _script_block(r, view)
     changes = view.get("changes") or []
     if changes:
         rows.append(EmptyRow(r, 4))

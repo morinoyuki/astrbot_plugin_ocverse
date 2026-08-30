@@ -51,6 +51,59 @@ def _rgba(c, a=255):
     return (r, g, b, a)
 
 
+def lookup_avatar(av: dict | None, speaker: str) -> object | None:
+    """按说话人查找头像,支持角色名变体的模糊匹配(模块级,渲染两条路径共用)。
+
+    模型可能输出简称(如「小亚」→ 头像存「汐见小亚」),这里依次尝试:
+    1. 精确匹配
+    2. 去半角/全角空格、括号注释(如「汐见小亚(老板)」→「汐见小亚」)后全等
+    3. 包含:短者完全被子串包含(如「小亚」⊆「汐见小亚」)
+    4. 子序列:按顺序逐字出现在对方中(如「凯伊」⊆「天童凯伊」,≥2 字才做,避免单字歧义)
+    """
+    if not speaker or not av:
+        return None
+    sp = speaker.strip()
+    # 1. 精确
+    if sp in av:
+        return av[sp]
+    # 归一化:去空格、括号注释(如「汐见小亚(老板)」→「汐见小亚」)
+    sp_norm = re.sub(r"[\s　]", "", sp).split("(")[0].split("（")[0].strip()
+    if not sp_norm:
+        return None
+    # 2. 去空格/括号后全等
+    for k, v in av.items():
+        if not k:
+            continue
+        kn = re.sub(r"[\s　]", "", k).split("(")[0].split("（")[0].strip()
+        if sp_norm == kn:
+            return v
+    # 3+. 模糊匹配:说话人 ≥2 字且头像名 ≥2 字才做包含/子序列,避免单字歧义
+    if len(sp_norm) < 2:
+        return None
+    best_key, best_v = None, None
+    for k, v in av.items():
+        if not k:
+            continue
+        kn = re.sub(r"[\s　]", "", k).split("(")[0].split("（")[0].strip()
+        if len(kn) < 2:
+            continue  # 头像名单字不参与模糊,防误配
+        # 3. 包含
+        if sp_norm in kn or kn in sp_norm:
+            if best_key is None or len(kn) > len(best_key):
+                best_key, best_v = kn, v
+            continue
+        # 4. 子序列
+        def is_subseq(small: str, big: str) -> bool:
+            it = iter(big)
+            return all(any(c == ch for c in it) for ch in small)
+
+        if (is_subseq(sp_norm, kn) or is_subseq(kn, sp_norm)) and (
+            best_key is None or len(kn) > len(best_key)
+        ):
+            best_key, best_v = kn, v
+    return best_v
+
+
 @dataclass
 class ChatRenderer:
     """渲染配置。所有尺寸单位为像素。"""
@@ -179,59 +232,8 @@ class ChatRenderer:
 
     # ── 头像匹配(容错:精确 → 前缀 → 包含 → 首字)──────────────
     def resolve_avatar(self, speaker: str) -> object | None:
-        """按说话人查找头像,支持角色名变体的模糊匹配。
-
-        模型可能输出简称(如「小亚」→ 头像存「汐见小亚」),这里依次尝试:
-        1. 精确匹配
-        2. 头像名以说话人开头(说话人是头像名的前缀省略,如「小亚」匹配「汐见小亚」不适用这里,见3)
-        3. 说话人包含头像名 / 头像名包含说话人(去括号后)
-        4. 说话人的每个字出现在头像名中(顺序匹配 ≥2 字)
-        """
-        if not speaker:
-            return None
-        av = self.avatars
-        if not av:
-            return None
-        sp = speaker.strip()
-        # 1. 精确(含空头像占位)
-        if sp in av:
-            return av[sp]
-        # 归一化:去半角/全角空格、括号注释(如「汐见小亚(老板)」→「汐见小亚」)
-        sp_norm = re.sub(r"[\s　]", "", sp).split("(")[0].split("（")[0].strip()
-        # 2. 去空格/括号后全等
-        for k, v in av.items():
-            if not k:
-                continue
-            kn = re.sub(r"[\s　]", "", k).split("(")[0].split("（")[0].strip()
-            if sp_norm == kn:
-                return v
-        # 3+. 模糊匹配:说话人 ≥2 字且头像名 ≥2 字才做包含/子序列,避免单字歧义
-        if len(sp_norm) >= 2:
-            best_key, best_v = None, None
-            for k, v in av.items():
-                if not k:
-                    continue
-                kn = re.sub(r"[\s　]", "", k).split("(")[0].split("（")[0].strip()
-                if len(kn) < 2:
-                    continue  # 头像名单字不参与模糊,防误配
-                # 3. 包含:短者完全被子串包含(如「小亚」⊆「汐见小亚」)
-                if sp_norm in kn or kn in sp_norm:
-                    if best_key is None or len(kn) > len(best_key):
-                        best_key, best_v = kn, v
-                    continue
-
-                # 4. 子序列:按顺序逐字出现在对方中(如「凯伊」⊆「天童凯伊」)
-                def is_subseq(small: str, big: str) -> bool:
-                    it = iter(big)
-                    return all(any(c == ch for c in it) for ch in small)
-
-                if (is_subseq(sp_norm, kn) or is_subseq(kn, sp_norm)) and (
-                    best_key is None or len(kn) > len(best_key)
-                ):
-                    best_key, best_v = kn, v
-            if best_v is not None:
-                return best_v
-        return None
+        """按说话人查找头像,支持角色名变体的模糊匹配。"""
+        return lookup_avatar(self.avatars, speaker)
 
     # ── 块 → 行 ──────────────────────────────────────────────
     def _layout_block(self, blk: md.Block) -> None:

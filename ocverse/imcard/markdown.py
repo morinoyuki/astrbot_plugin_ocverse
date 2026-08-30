@@ -17,6 +17,7 @@ __all__ = [
     "Span",
     "parse_blocks",
     "plain_text",
+    "strip_script",
 ]
 
 # ═════════════════════════════════════════════════════════════════════
@@ -253,13 +254,17 @@ _DLG_TAG_RE = re.compile(
 _CAP_TAG_RE = re.compile(
     r"^<\s*c\b[^>]*>\s*(.*?)\s*</\s*c\s*>\s*$", re.IGNORECASE | re.DOTALL
 )
-_ATTR_NAME_RE = re.compile(r'name\s*=\s*"([^"]*)"', re.IGNORECASE)
-_ATTR_AV_RE = re.compile(r'av\s*=\s*"([^"]*)"', re.IGNORECASE)
+# name/av 属性支持带引号与不带引号两种写法(name=老板 / name="老板"),
+# 不带引号对 LLM 的 JSON 转义更友好,不会因遗漏反斜杠导致整段解析失败
+_ATTR_NAME_RE = re.compile(r'name\s*=\s*"?([^"\s>]+)"?', re.IGNORECASE)
+_ATTR_AV_RE = re.compile(r'av\s*=\s*"?([^"\s>]+)"?', re.IGNORECASE)
 # 主角标记:独立的 me 属性(me 或 me=true);\b 保证不会匹配到 name 里的 me
 _ATTR_ME_RE = re.compile(r"\bme\b(?=\s|$|=)", re.IGNORECASE)
 
 # 兑底清理:未闭合 / 残缺的标签不允许原样漏进画面
 _STRAY_TAG_RE = re.compile(r"</?\s*(?:dlg|d|c)\b[^>]*>", re.IGNORECASE)
+# 提取脚本文字时移除标签(仅去标签,保留内容)
+_SCRIPT_STRIP_RE = re.compile(r"</?\s*(?:dlg|d|c)\b[^>]*>", re.IGNORECASE)
 
 
 def _parse_dialogue_tag(line: str) -> Dialogue | None:
@@ -424,9 +429,12 @@ def parse_blocks(text: str) -> list[Block]:
             except (ValueError, IndexError):
                 pass  # 表格解析失败则按普通段落处理
 
-        # 普通段落:收集到空行
+        # 普通段落:收集到空行,或遇到独占一行的胶囊/对白标签(演出脚本穿插用,
+        # 不能让标签行被并进整段文字里而丢失)
         para_spans: list[Span] = []
         while i < n and lines[i].strip():
+            if _is_script_line(lines[i]):
+                break
             if not para_spans:
                 para_spans.extend(parse_inline(lines[i].strip()))
             else:
@@ -436,6 +444,19 @@ def parse_blocks(text: str) -> list[Block]:
         blocks.append(Block("paragraph", _merge(para_spans)))
 
     return blocks
+
+
+def _is_script_line(line: str) -> bool:
+    """该行是否是独占一行的演出标签(对白/胶囊);是则令前一自然段在此处断开。"""
+    s = line.strip()
+    return bool(_DLG_TAG_RE.match(s) or _CAP_TAG_RE.match(s))
+
+
+def strip_script(text: str) -> str:
+    """去掉『演出脚本』中的胶囊/对白标签,只保留文字内容(记忆/日志存档时用)。"""
+    if not text:
+        return ""
+    return _SCRIPT_STRIP_RE.sub("", text)
 
 
 def _split_table_row(line: str) -> list[str]:

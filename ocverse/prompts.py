@@ -29,6 +29,38 @@ STYLE_BASE = (
     "所有输出必须是严格的 JSON,不要 markdown 代码围栏,不要解释。"
 )
 
+# ═══════════════════════════ 演出脚本排版(所有含对白的剧情共用)═══════════════════════════
+# 让 LLM 把叙述段、短状态胶囊与对白气泡写成交错排布的演出脚本,
+# 不再「上面一整段叙述、下面才排对话」的生硬拼接。
+SCRIPT_SPEC = (
+    "\n【演出脚本排版法——务必遵守】禁止把叙述与对话生硬地分成上下两大块(先大段叙述、再统一排对话)。"
+    "请把这一幕写成一条『演出脚本』,让叙述文字、短状态胶囊、对白气泡按剧情节奏自由穿插(顺序与次数任意):\n"
+    "・场景/动作/心理/过渡的叙述:直接写普通文字(一句一行或一段皆可,拆成多段夹在对话之间更好);\n"
+    "・短动作/短神态/短心理(一句话,尽量≤16字):单独一行写成胶囊 <c>内容</c>;\n"
+    "・对白:单独一行写成气泡 <d name=角色本名>台词</d>;若发言者是主角(本幕做行动、被结算视角的人),"
+    "加主角标记 <d name=主角本名 me>台词</d>;\n"
+    "胶囊与对白必须各自独占一行(可夹在叙述段之间,建议用空行隔开);对白角色名用在场人物本名,不写代号;\n"
+    "name 属性不要加引号,直接写名字即可。\n"
+    "示例(仅演示排版,内容勿照抄;其中的「老板/主角」只是举例,实际必须用在场角色本名):\n"
+    "<c>她放下茶杯,指尖在桌沿敲了两下。</c>\n"
+    "<d name=老板>这单生意,你真要接?</d>\n"
+    "<d name=主角 me>总得有人去做。</d>\n"
+    "雨下大了,街上很快没了人。\n"
+    "对白也可用 av 属性借用某张现有头像: <d name=发言者 av=头像名字>台词</d>(av 值从下方『本群头像名单』里选,一般不需要写)。\n"
+)
+
+# ═══ 头像名单注入:让 LLM 知道本群有哪些可用头像,供 <d> 标签 av 属性借用 ═══
+def avatar_note(names: list[str] | None) -> str:
+    """可用头像名单注入块(游戏层按当前群组装;空则返回空串)。"""
+    names = [str(n).strip() for n in (names or []) if str(n).strip()]
+    if not names:
+        return ""
+    return (
+        "\n【本群头像名单】以下角色配了头像,<d> 标签的 av 属性可从中借用(av 值必须原样用名单里的名字):"
+        + "、".join(names[:12])
+        + "。名单外或这场戏没出场的人不要写 av;对白默认按 name 自动匹配头像,av 只在特殊需求时用。"
+    )
+
 # 世界生成 JSON 结构模板(gen_world / enrich_user_world 共用)
 WORLD_SCHEMA = (
     '{"name":不超过8字,"genre":题材标签,"atmosphere":氛围一句话,'
@@ -332,12 +364,13 @@ def resolve_event(*, world, char=None, event: dict, choice_idx: int,
         "【连贯性铁律】结算必须紧接上面这场遭遇续写:同一时间、同一地点、同一批在场人物,"
         "从做出选择之后的下一秒写起。严禁跳跃到新的时间/地点,严禁引入遭遇场景里没有的新人物;"
         "dialogues 的 speaker 必须使用遭遇中出现过的角色本名(禁止「少女」「神秘人」之类代称)。\n"
-        "请结算:叙述结果(轻小说式,120~220字:画面感+心理细节+结果交代清楚——"
-        "这次选择带来了什么、落点在哪里都写明白,不许含糊收尾),并给出数值变化。"
+        "请结算:结果按『演出脚本』写成(轻小说式,合计120~220字:画面感+心理细节+结果交代清楚"
+        "——这次选择带来了什么、落点在哪里都写明白,不许含糊收尾),并给出数值变化。"
         "属性键:" + attr_names_line() + "。\n"
-        '"dialogues":事件中人物的多轮对话(2~5轮,IM聊天体,每条"speaker"≤8字、"text"≤60字,可含(动作)小注)。'
-        "禁止独角戏:至少 2 个不同说话人,事件人物必须开口回应,不能只有主角一人自说自话。\n"
-        '严格输出 JSON:{"narration":"结果叙述","dialogues":[{"speaker":"","text":""}],"effects":{"stamina":±,"mood":±,"gold":±,"exp":0-25,'
+        + SCRIPT_SPEC +
+        "事件中至少 2 个不同说话人要开口回应(禁止独角戏),对白角色用遭遇中的本名。\n"
+        "『dialogues』字段只是兜底:对白已写进脚本的,填空数组 [] 即可。\n"
+        '严格输出 JSON:{"narration":"演出脚本","dialogues":[{"speaker":"","text":""}],"effects":{"stamina":±,"mood":±,"gold":±,"exp":0-25,'
         '"attrs":{"force":0},"reputation":-10~10}, "memory":"第三人称一句话记忆存档", "state":{"type":"囚禁|束缚|被困...","reason":"一句原因"}, "state_lift":true, '
         '"items_gain":[{"name":"获得物品≤12字","note":"来历≤20字"}],"items_lose":["失去/消耗的物品名"]}\n'
         "effects.reputation:此事传开后角色在本世界的声望变化(-10~10):善行/英勇/慷慨为正,恶行/怯懦/背信为负;寻常小事可不输出。\n"
@@ -376,13 +409,14 @@ def resolve_life_event(*, world, chars, event: dict, choice_idx: int,
         f"大家共同选择了「{pick['label']}」({pick.get('hint','')})。\n"
         "【连贯性铁律】结算必须紧接这场交集续写:同一时间、同一地点、同一批在场角色,"
         "严禁跳到新的时间/地点或引入场景里没有的新人物;dialogues 的 speaker 用角色本名。\n"
-        "请结算这段共同经历的结果:轻小说式叙述(110~200字:画面感+心理细节+结果交代清楚),"
+        "请结算这段共同经历的结果:结果按『演出脚本』写成(轻小说式,合计110~200字:画面感+心理细节+结果交代清楚),"
         "并分别给出各角色的效果与彼此羁绊的变化。\n"
-        '"dialogues":这场交集里 2~5 轮的简短对话(IM聊天体,每条 speaker ≤8字、text ≤60字),需有至少 2 个不同说话人。\n'
+        + SCRIPT_SPEC +
+        "这场交集至少 2 个不同说话人开口;『dialogues』只是兜底,对白已入脚本则填 []。\n"
         '"effects":每个参与角色的效果(体力/心情/金币/exp/attrs,克制:大部分±3~10),可逐个给不同角色不同起伏。\n'
         '"rel_delta":-10~15 整数(本次交集对彼此关系的整体影响)。\n'
         "memory:一句话存档(涉及哪几个人、发生了什么)。\n"
-        '严格输出 JSON:{"narration":"叙述","dialogues":[{"speaker":"","text":""}],'
+        '严格输出 JSON:{"narration":"演出脚本","dialogues":[{"speaker":"","text":""}],'
         '"effects":{[角色名或编号]: {"mood":±,"gold":±,"exp":0-12,"stamina":±,"attrs":{}}}, "rel_delta":0, "memory":"一句话"}'
         "(effects 的键用角色名即可,尽量给每人一个条目;数值克制,日常生活不必大起大落)"
     )
@@ -421,13 +455,13 @@ def resolve_interaction(*, world, a, b=None, npc=None, mode: str, detail: str,
         "严禁跑题:不得凭空插入与互动无关的遭遇/战斗/陌生人物/超展开;"
         "知识库素材只作风味点缀,不得改变本次互动的主题、场景与人物关系。\n"
         "dialogues 的 speaker 必须用 A/B 的本名,禁止「少女」「神秘人」之类代称。\n"
-        "写出这段互动的走向与结果(轻小说式,120~220字:画面感+心理细节+结果交代清楚"
+        "写出这段互动的走向与结果:结果按『演出脚本』写成(轻小说式,合计120~220字:画面感+心理细节+结果交代清楚"
         "——聊了/做了/关系有何变化都明白写出来)。\n"
-        '"dialogues":A与B你来我往的多轮对话(3~6轮,IM聊天体,每条"speaker"用角色名,'
-        '"text"≤60字,口语化,可含(动作/神态)小注),要能看出性格碰撞。'
-        "禁止独角戏:A 与 B 都必须开口,不能只有一人说个不停。\n"
+        + SCRIPT_SPEC +
+        "A 与 B 都必须开口(禁止独角戏),对白用双方本名、口语化,可含自然的句间小注,要能看出性格碰撞;"
+        "『dialogues』只是兜底,对白已入脚本则填 []。\n"
         "若是消费类互动(请客/送礼),务必扣 A 的金币并给 B 心情。\n"
-        '严格输出 JSON:{"narration":"互动叙述","a_effects":{"mood":±,"gold":±,"exp":0-10,'
+        '严格输出 JSON:{"narration":"演出脚本","a_effects":{"mood":±,"gold":±,"exp":0-10,'
         '"stamina":±,"hp":±,"attrs":{}}, "b_effects":{"mood":±,"gold":±},'
         ' "rel_delta":-20~20整数, "reputation":-5~5整数, "memory":"一句话存档", "state":{...}, "state_lift":true}'
         "(state/state_lift 仅在救援场景、且B的处境发生变化时按上面的规则输出,否则不要出现)"
@@ -526,13 +560,12 @@ def resolve_action(*, world, char, action_name: str, detail: str, kind: str = "s
         f"角色:{char.persona_line()},背景:{char.backstory[:600] or '未详'},"
         f"当前生命{char.hp}/100、体力{char.stamina}/心情{char.mood}/金币{char.gold}\n"
         f"今日于《{world.name}》执行行动:「{action_name}」{detail[:80]}\n{risk_line}\n{mem}\n"
-        "请写出这次行动的经过与结果(轻小说式,100~200字:画面感+心理细节+结果交代清楚"
-        "——做成了什么/收获什么/付出什么代价,都写明白),"
-        "结合世界设定与角色性格。\n"
-        '"dialogues":行动中与场景人物的简短对话(2~4轮,IM聊天体,每条"speaker"≤8字、"text"≤60字)。'
-        "禁止独角戏:至少 2 个不同说话人,场景人物必须回应,不能只有角色自说自话。\n"
+        "请写出这次行动的经过与结果:结果按『演出脚本』写成(轻小说式,合计100~200字:画面感+心理细节+结果交代清楚"
+        "——做成了什么/收获什么/付出什么代价,都写明白),结合世界设定与角色性格。\n"
+        + SCRIPT_SPEC +
+        "行动中至少 2 个不同说话人开口(禁止独角戏),场景人物必须回应;『dialogues』只是兜底,对白已入脚本则填 []。\n"
         "属性键:" + attr_names_line() + "。日常型行动要消耗的体力由系统扣除,效果表里不要写体力。\n"
-        '严格输出 JSON:{"narration":"行动叙述",'
+        '严格输出 JSON:{"narration":"演出脚本",'
         '"effects":{"mood":±,"gold":±,"exp":0-25,"stamina":±(仅风险型可写),"hp":±,"attrs":{"force":0},"reputation":-10~15},"memory":"一句话存档", "state":{"type":"...","reason":"..."}, "state_lift":true, '
         '"items_gain":[{"name":"获得物品≤12字","note":"来历≤20字"}],"items_lose":["失去/消耗的物品名"]}\n'
         "effects.reputation:此事传开后在本世界的声望变化(-10~15):讨伐建功/义举为正,劫掠/怯逃为负;日常行动可不输出。\n"
@@ -557,12 +590,12 @@ def facility_event(*, world, char, facility: dict, action: str,
         f"角色:{char.persona_line()},背景:{char.backstory[:600] or '未详'},体力{char.stamina}/心情{char.mood}/金币{char.gold}\n"
         f"角色去《{world.name}》的「{fac_name}」({fac_kind}——{fac_desc})"
         f"[想做的事:{action[:60]}],想在这里打发时光。\n{mem}\n"
-        "写一段在这家场所里的经历(轻小说式,100~200字:环境氛围+与场内人物的互动"
+        "写一段在这家场所里的经历:结果按『演出脚本』写成(轻小说式,合计100~200字:环境氛围+与场内人物的互动"
         "+一件小事或小插曲+结果交代清楚——这段时光过得怎样、有没有收获都写明)。\n"
-        '"dialogues":场内与人的简短对话(2~4轮,IM聊天体,每条"speaker"≤8字、"text"≤60字)。'
-        "禁止独角戏:至少 2 个不同说话人,不能只有角色自说自话。\n"
+        + SCRIPT_SPEC +
+        "场内至少 2 个不同说话人开口(禁止独角戏);『dialogues』只是兜底,对白已入脚本则填 []。\n"
         "属性键:" + attr_names_line() + "。\n"
-        '严格输出 JSON:{"narration":"经历叙述","effects":{"mood":±,"gold":±,"exp":0-10,"attrs":{"force":0}},"memory":"一句话存档", "items_gain":[{"name":"可选≤12字","note":"≤20字"}]}\n'
+        '严格输出 JSON:{"narration":"演出脚本","effects":{"mood":±,"gold":±,"exp":0-10,"attrs":{"force":0}},"memory":"一句话存档", "items_gain":[{"name":"可选≤12字","note":"≤20字"}]}\n'
         "数值克制(大部分±3~12);items_gain 只在自然得到时才给(如买到的纪念品),通常为空;不要输出体力。"
     )
 
@@ -574,11 +607,11 @@ def home_event(*, world, char, plot_name: str, memories: list[str] | None = None
         f"{_world_line(world)}\n"
         f"角色:{char.persona_line()}\n"
         f"角色回到《{world.name}》的「{plot_name}」家中,打算歇一歇。\n{mem}\n"
-        "写一段回到家里的小剧情(轻小说式,80~150字:归家的画面感+一件温馨的小事或小插曲"
+        "写一段回到家里的小剧情:结果按『演出脚本』写成(轻小说式,合计80~150字:归家的画面感+一件温馨的小事或小插曲"
         "+结果交代清楚——这趟回家歇好了没、发生了什么小事都写明)。\n"
-        '"dialogues":到家后与家人/邻居/生活角色的简短对话(1~3轮,IM聊天体,每条"speaker"≤8字、"text"≤40字)。'
-        "禁止独角戏:至少 2 个不同说话人。\n"
-        '严格输出 JSON:{"narration":"家居剧情","dialogues":[{"speaker":"","text":""}],"effects":{"mood":±,"exp":0~6},"memory":"一句话"}\n'
+        + SCRIPT_SPEC +
+        "到家后至少 2 个不同说话人开口(禁止独角戏);『dialogues』只是兜底,对白已入脚本则填 []。\n"
+        '严格输出 JSON:{"narration":"演出脚本","dialogues":[{"speaker":"","text":""}],"effects":{"mood":±,"exp":0~6},"memory":"一句话"}\n'
         "数值克制(mood/exp ±0~6),不要输出金币和体力。"
     )
 
@@ -594,11 +627,11 @@ def settle_work(*, world, char, spot: str, job: str, hours: float,
         f"角色:{char.persona_line()}\n"
         f"角色刚结束了在「{spot}」的兼职(职业:{job}),干了约 {hours} 小时。\n"
         f"{colleague_line}\n"
-        "写一段下班收工的叙述(轻小说式,100~180字:劳动的画面感+一段小插曲或同事互动"
+        "写一段下班收工的叙述:结果按『演出脚本』写成(轻小说式,合计100~180字:劳动的画面感+一段小插曲或同事互动"
         "+下班时的结果交代清楚——拿了什么、累不累、明天还来不来都写明)。\n"
-        '"dialogues":在场者与角色的道别对话'
-        "(1~3轮,IM聊天体,每条 speaker≤8字、text≤40字),至少 2 个不同说话人。\n"
-        '严格输出 JSON:{"narration":"下班叙述","dialogues":[{"speaker":"","text":""}],'
+        + SCRIPT_SPEC +
+        "在场者与角色要有道别对话(至少 2 个不同说话人);『dialogues』只是兜底,对白已入脚本则填 []。\n"
+        '严格输出 JSON:{"narration":"演出脚本","dialogues":[{"speaker":"","text":""}],'
         '"effects":{"mood":±,"exp":0~8,"attrs":{}},'
         '"items_gain":[{"name":"可选:雇主塞的小谢礼≤12字","note":"≤20字"}]}'
         "数值克制(mood/exp ±0~8);items_gain 只在剧情自然时给一件,通常为空;不要输出金币(工钱另算)。"
@@ -609,19 +642,19 @@ def resolve_mainline(*, world, char, stage: dict, goal_note: str = "",
                      weight: str = "major") -> str:
     """结算世界主线一小节(user prompt)。goal_note: 门槛达成说明;weight: 剧情权重。"""
     goal_line = (f"\n【阶段门槛已达成】{goal_note}" if goal_note else "")
-    narr_spec, dlg_spec = story_spec(weight, "90~180", "1~3")
-    dlg_cap = {"normal": 50, "major": 60, "climax": 80}.get(weight, 50)
+    narr_spec, _ = story_spec(weight, "90~180", "1~3")
     return (
         f"{_world_line(world)}\n"
         f"主角:{char.persona_line()},{_rep_short(world, char)}\n"
         f"\n当前主线小节:{stage.get('stage','')} —— {stage.get('desc','')}{goal_line}\n"
-        "角色主动去推进这段世界主线。请写出这一步的经过与结果(轻小说式,"
-        f"{narr_spec}字):"
-        "要扣住主线目标、有画面感、结果交代清楚(这一步达成与否、拿到的线索或代价都写明),并给出数值变化(克制:±3~10);"
+        "角色主动去推进这段世界主线。请写出这一步的经过与结果:按『演出脚本』写成(轻小说式,"
+        f"{narr_spec}字),"
+        "扣住主线目标、有画面感、结果交代清楚(这一步达成与否、拿到的线索或代价都写明),并给出数值变化(克制:±3~10);"
         "主线推进有广泛影响,reputation 可在 -5~10 之间。\n"
-        f'"dialogues":这段推进中的对话({dlg_spec}轮,IM聊天体,speaker≤8字、text≤{dlg_cap}字,至少2个说话人)。\n'
+        + SCRIPT_SPEC +
+        "这段推进中至少 2 个不同说话人开口;『dialogues』只是兜底,对白已入脚本则填 []。\n"
         + story_weight_line(weight) +
-        '严格输出 JSON:{"narration":"推进叙述","dialogues":[{"speaker":"","text":""}],'
+        '严格输出 JSON:{"narration":"演出脚本","dialogues":[{"speaker":"","text":""}],'
         '"effects":{"mood":±,"gold":±,"exp":0-15,"hp":±,"attrs":{},"reputation":-5~10}, "memory":"一句话存档"}'
     )
 
@@ -689,12 +722,12 @@ def npc_chat(*, world, npc: dict, char, action: str,
         f"【切题铁律】这段对话演的必须就是角色的「{action[:40]}」这个行为,只涉及角色与该NPC两人;"
         "严禁跑题:不得凭空插入与行为无关的遭遇/战斗/陌生人物/超展开;"
         "知识库素材只作风味点缀,不得改变本次互动的主题、场景与人物关系。\n"
-        "与角色进行多轮对话(3~6轮,IM聊天体:dialogues 数组,每条 speaker ≤8字、text ≤60字,"
-        "口语化,说话直白有信息量、不故作神秘、不玩谜语,把该说的说清楚),再用旁白收尾(60~120字),可给微小奖励。\n"
+        "与角色进行多轮对话(NPC 与角色都必须开口,禁止独角戏),再用旁白收尾(60~120字),可给微小奖励。\n"
         "让NPC像有自己生活的人:带上TA的行踪、习惯、语气与情绪,别念模板台词。\n"
-        "禁止独角戏:NPC 与角色都必须开口,不能只有角色一人说个不停。\n"
+        "对话/状态/旁白请按下面的排版交错展开:\n"
+        + SCRIPT_SPEC +
         '严格输出 JSON:{"reply":"NPC最核心的一句台词","dialogues":[{"speaker":"","text":""}],'
-        '"narration":"旁白收尾",'
+        '"narration":"演出脚本",'
         '"effects":{"mood":±,"gold":±,"exp":0-8,"hp":±,"reputation":-5~5}, "memory":"一句话存档", "state":{...}, "state_lift":true}'
         "(reputation/hp 仅在剧情明显涉及时输出,一般可不输出)"
     ) + previous_block(previous)
@@ -859,11 +892,11 @@ def finish_quest(*, world, char, quest: str, giver: str = "", place: str = "",
         "【出场铁律】这是交付场景:只允许角色与委托人两方出场,"
         "严禁出现其他群友/生活角色/无关NPC/凭空新人物,严禁把交付成果交给或送给别人。\n"
         "【声望】声望高的角色委托人更信任、酬劳更爽快;声望低则被防备、要价或扣除押金。交付叙述要体现这一点。\n"
-        "写一段交付场景(轻小说式,80~150字:委托人的验收反应+简短交代+结果说明——酬劳拿到没、"
+        "写一段交付场景:按『演出脚本』写成(轻小说式,合计80~150字:委托人的验收反应+简短交代+结果说明——酬劳拿到没、"
         "事情如何收尾都写明),并给一点委托酬劳。\n"
-        f'"dialogues":角色与「{giver}」的交割对话(1~3轮,IM聊天体,每条"speaker"≤8字、"text"≤40字)。'
-        "禁止独角戏:至少 2 个不同说话人,不能只有角色一人说话。\n"
-        '严格输出 JSON:{"narration":"交付叙述","effects":{"exp":5~12,"gold":0~25,"mood":0~3,"reputation":0~8},'
+        + SCRIPT_SPEC +
+        f"角色与「{giver}」要有交割对话(至少 2 个不同说话人);『dialogues』只是兜底,对白已入脚本则填 []。\n"
+        '严格输出 JSON:{"narration":"演出脚本","effects":{"exp":5~12,"gold":0~25,"mood":0~3,"reputation":0~8},'
         '"items_gain":[{"name":"可选:委托人额外送的谢礼≤12字","note":"≤20字(可为世界治疗物品)"}]}'
         "items_gain 只在委托人明确会给实物谢礼时才输出,通常为空;reputation 为完成任务后的声望上升(1~8)。"
     )
@@ -910,12 +943,12 @@ def life_char_story(*, world, char, other=None, memories=None) -> str:
         "写一段TA自己的日常小剧场(120~220字,轻小说式):贴合TA的人设与世界观,"
         "有画面、有小事件、有落点(做成了什么/心情如何/日子往前挪了一步);"
         "不超展开,像真实生活里的一帧。对话与叙述必须贴合该世界的题材与时代。\n"
-        '"dialogues":1~3轮对话(IM聊天体,speaker≤8字、text≤50字;'
-        "有在场者时至少2人开口,无在场者时可与路人交谈或自言自语)。\n"
+        + SCRIPT_SPEC +
+        "有在场者时至少2人开口,无在场者时可与路人交谈或自言自语;『dialogues』只是兜底,对白已入脚本则填 []。\n"
         "effects:TA自己的变化(exp 0~8,mood ±5,gold ±5,attrs 偶尔±1,克制)。\n"
         "rel_delta:与在场者的好感变化(-3~4;无在场者时输出0)。\n"
         "items_gain/items_lose:仅在自然涉及时输出一件(捡到/买了个小东西/用掉了什么),通常为空。\n"
-        '严格输出 JSON:{"narration":"日常小剧场","dialogues":[{"speaker":"","text":""}],'
+        '严格输出 JSON:{"narration":"演出脚本","dialogues":[{"speaker":"","text":""}],'
         '"effects":{"exp":0-8,"mood":±,"gold":±,"attrs":{}},"rel_delta":0,'
         '"items_gain":[{"name":"","note":""}],"items_lose":[""],"memory":"一句话"}'
     )
@@ -935,9 +968,10 @@ def expedition_invite(*, world, char, target, offer: dict,
         "发起人诚邀被邀请者同行远征。请以被邀请者的性格、两人交情与远征风险判断是否同意(agree),"
         "并写出这段邀约交锋:对方可能爽快答应、提条件讨价还价、谨慎婉拒(危险/有要事/交情不够),"
         "结果要落到实处。\n"
-        '"dialogues":双方你来我往的邀约对话(2~4轮,IM聊天体,speaker用双方本名,text≤50字),禁止独角戏。\n'
+        + SCRIPT_SPEC +
+        "邀约对话与叙述交错展开(双方都开口,禁止独角戏);『dialogues』只是兜底,对白已入脚本则填 []。\n"
         + WORLDVIEW_LAW +
-        '严格输出 JSON:{"agree":true,"narration":"邀约场景90~150字",'
+        '严格输出 JSON:{"agree":true,"narration":"演出脚本",'
         '"dialogues":[{"speaker":"","text":""}],"rel_delta":-3~5}'
     )
 
@@ -958,9 +992,10 @@ def expedition_report(*, world, char, exp: dict, phase: str, supplies_note: str)
         "叙述与归属必须一致(谁出的就从谁的行囊拿出),严禁张冠李戴、严禁取用清单外的物品;"
         "未列出的队友/NPC 的私有物品不得混入。"
         + (f"\n{supplies_note}" if supplies_note else "")
-        + "\n\"dialogues\":片段中队友/敌人的简短对话(1~3轮,IM聊天体,speaker用队友本名或敌人称谓,text≤50字)。"
+        + SCRIPT_SPEC +
+        "片段中队友/敌人的简短对话(1~3轮,IM聊天体,speaker用队友本名或敌人称谓,text≤50字,禁止独角戏);"
         + WORLDVIEW_LAW +
-        '严格输出 JSON:{"narration":"剧情片段","dialogues":[{"speaker":"","text":""}],"items_lose":["本轮消耗的补给名"]}'
+        '严格输出 JSON:{"narration":"演出脚本","dialogues":[{"speaker":"","text":""}],"items_lose":["本轮消耗的补给名"]}'
         "(items_lose 按上方物资指示填写;指示要求不要消耗时输出空数组)"
     )
 
@@ -982,9 +1017,10 @@ def expedition_settle(*, world, char, exp: dict, outcome: str, reward_line: str)
         f"同行:{teammates},历时约 {exp.get('duration_h', '?')} 小时。\n"
         f"结局走向:{outcome_line}。\n"
         f"系统结算结果(叙述中自然提及,不要改动):{reward_line}\n"
-        "dialogues 6~12轮:最终一战/撤离途中队友与强敌的多轮对话(轮番开口、有呐喊有诀别或虚脱后的相视而笑)。"
+                + SCRIPT_SPEC +
+        "最终一战/撤离途中队友与强敌的多轮对话(6~12轮,轮番开口、有呐喊有诀别或虚脱后的相视而笑)与叙述交错展开。"
         + story_weight_line(weight) + WORLDVIEW_LAW +
-        '严格输出 JSON:{"narration":"结算叙述","dialogues":[{"speaker":"","text":""}],"memory":"一句话存档"}'
+        '严格输出 JSON:{"narration":"演出脚本","dialogues":[{"speaker":"","text":""}],"memory":"一句话存档"}'
     )
 
 

@@ -22,12 +22,14 @@ from .cards import (
     world_card,
     world_list_card,
 )
+from .markdown import strip_script
 
 __all__ = [
     "ChatRenderer",
     "Row",
     "TooManyPages",
     "render_narrative",
+    "strip_script",
     "render_views",
     "profile_card",
     "event_card",
