@@ -635,18 +635,20 @@ class Game:
                 self.db.append_log(gid, "", "misc", f"《{w.name}》{note}", w.name)
 
     def _ensure_zones_baseline(self, world: World, zones: list) -> list[dict]:
-        """危险区域保底:缺失/不足 2 个时按题材风格补齐模板区域。"""
+        """危险区域保底:不足 ZONES_MIN(5)片时按题材风格补齐模板区域(上限 ZONES_MAX)。"""
         zones = [dict(z) for z in (zones or []) if isinstance(z, dict) and str(z.get("name", "")).strip()]
-        if len(zones) >= 2:
+        if len(zones) >= C.ZONES_MIN:
             return zones
         pack = C.zone_style_for(world.genre, world.desc)
         used = {z.get("name") for z in zones}
-        for tpl in pack:
-            if len(zones) >= 3:
+        guard = 0
+        while len(zones) < C.ZONES_MIN and guard < 16:
+            guard += 1
+            tpl = next((dict(t) for t in pack if t.get("name") not in used), None)
+            if tpl is None:
                 break
-            if tpl.get("name") in used:
-                continue
-            zones.append(dict(tpl))
+            zones.append(tpl)
+            used.add(tpl.get("name"))
         return zones
 
     def _ensure_heal_items_baseline(self, world: World, items: list) -> list[dict]:
@@ -680,8 +682,8 @@ class Game:
                 _fire_remember(self.mem, gid, "", "world",
                                f"《{w.name}》出现新危险区域「{tpl.get('name')}」", ref=f"zone:{_now():.0f}")
                 changed = True
-        # 2) 区域平息(至少保留 2 片)
-        if random.random() < self.ZONE_CALM_P and len(zones) > 2:
+        # 2) 区域平息(至少保留 ZONES_MIN 片)
+        if random.random() < self.ZONE_CALM_P and len(zones) > C.ZONES_MIN:
             victim = random.choice(zones)
             zones.remove(victim)
             self.db.append_log(gid, "", "misc",
@@ -1702,7 +1704,7 @@ class Game:
             return None
         changed = False
         zones = [z for z in (w.zones or []) if isinstance(z, dict) and str(z.get("name", "")).strip()]
-        if len(zones) < 2:
+        if len(zones) < C.ZONES_MIN:
             w.zones = self._ensure_zones_baseline(w, zones)
             changed = True
         heals = [h for h in (w.heal_items or []) if isinstance(h, dict) and str(h.get("name", "")).strip()]

@@ -157,7 +157,7 @@ async def main():
     # 世界初始化(带 zones/heal_items)
     await game.init_world(gid, "末世废土", "admin")
     w = db.cur_world(gid)
-    check("世界生成带危险区域", len(w.zones) >= 2)
+    check("世界生成带危险区域(不足5片自动补齐)", len(w.zones) >= C.ZONES_MIN)
     check("世界生成带治疗物品", len(w.heal_items) >= 2)
 
     # 角色
@@ -274,7 +274,7 @@ async def main():
     game.ZONE_MUTATE_P = 1.0
     game._zones_turnover(gid)
     w4 = db.get_world(w.id)
-    check("区域流转后仍有基线", len(w4.zones) >= 2)
+    check("区域流转后仍不低于保底", len(w4.zones) >= C.ZONES_MIN)
 
     # ── 日切苏醒:昏迷→第二天 ──
     game._apply_effects(db.get_char(gid, "u1"), {"hp": -200})
@@ -360,7 +360,7 @@ async def main():
     # ── 查漏补缺:旧世界数据补齐 / 随队锁定 / 过期委托作废 ──
     db.update_world(w.id, zones=[], heal_items=[])
     w5 = game.ensure_world_content(gid)
-    check("旧世界 zones/heal_items 自动补齐", w5 is not None and len(w5.zones) >= 2
+    check("旧世界 zones/heal_items 自动补齐(区域保底5片)", w5 is not None and len(w5.zones) >= C.ZONES_MIN
           and len(w5.heal_items) >= 1 and db.get_world(w.id).heal_items)
 
     # 随队锁定:构造一场带生活角色队友的远征(zones 被重置过 → 刷新今日委托缓存)
@@ -407,7 +407,8 @@ async def main():
     # ── 管理员重绘 zones/heal_items ──
     msg, rz, rh = await game.regen_zones_heals(gid)
     w6 = db.get_world(w.id)
-    check("AI 重绘危险区域/治疗物品(落库)", "荧光沼泽" in {z["name"] for z in w6.zones}
+    check("AI 重绘危险区域/治疗物品(落库,重绘后仍保底5片)", "荧光沼泽" in {z["name"] for z in w6.zones}
+          and len(w6.zones) >= C.ZONES_MIN
           and "止血喷剂" in {h["name"] for h in w6.heal_items} and rz and rh)
     check("重绘总结文本", "舆图已重绘" in msg)
 
