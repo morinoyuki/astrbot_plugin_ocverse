@@ -67,6 +67,7 @@ WORLD_JSON = {
 
 DIALOGUE = [{"speaker": "自己", "text": "先这样。"}, {"speaker": "对方", "text": "嗯,回头见。"}]
 INVITE_PROMPTS: list[str] = []   # 记录远征邀约 prompt(验证任务信息注入)
+REPORT_PROMPTS: list[str] = []   # 记录远征播报 prompt(验证物资归属规则)
 
 
 def llm_fake(system, user):
@@ -109,6 +110,7 @@ def llm_fake(system, user):
                                          {"speaker": "绫波", "text": "老身见过的浪比你吃过的盐多。"}]},
                           ensure_ascii=False)
     if "远征途中的剧情片段" in user:
+        REPORT_PROMPTS.append(user)
         return json.dumps({"narration": "队伍在废墟间推进,轮流探路,暂时平安。",
                            "dialogues": [{"speaker": "老周", "text": "跟紧点。"},
                                          {"speaker": "自己", "text": "明白。"}],
@@ -357,6 +359,9 @@ async def main():
     check("途中消耗补给(LLM 判断,背包--)", (db.item_get(gid, "u1", "罐头") or {}).get("count", 0) == canned_before - 1
           and any("罐头" in c for c in rv["changes"]))
     check("有补给维持则生命无损", db.get_char(gid, "u1").hp == hp_before)
+    _rp = REPORT_PROMPTS[-1] if REPORT_PROMPTS else ""
+    check("播报 prompt 含物资归属铁律(角色本人随身,严禁他人背包)", "物资归属铁律" in _rp
+          and "角色本人随身携带的补给" in _rp and "严禁写成从其他角色/NPC的背包" in _rp)
     check("播报对话带头像", rv["avatars"].get("阿灰") == "fake_avatar.png")
     # 强制归来结算
     ch = db.get_char(gid, "u1")
@@ -486,6 +491,19 @@ async def main():
     check("缓存委托区域失效后自动作废重生成", ov3["offer"]["zone_name"] != stale_zone
           and ov3["offer"]["zone_name"] in {z["name"] for z in db.get_world(w.id).zones}
           and len(db.get_world(w.id).zones) >= C.ZONES_MIN)
+
+    # ── 物品归属规则注入(事件/行动/远征)──
+    from ocverse.prompts import resolve_action as _ra, resolve_event as _re, expedition_report as _er
+    _w = db.get_world(w.id)
+    check("行动 prompt 含物品归属规则", "物品归属" in _ra(world=_w, char=db.get_char(gid, "u1"),
+          action_name="冒险", detail="测试"))
+    check("事件 prompt 含物品归属规则", "物品归属" in _re(world=_w, char=db.get_char(gid, "u1"),
+          event={"title": "t", "scene": "s", "options": [{"label": "a"}]}, choice_idx=0))
+    check("远征播报含物资归属铁律", "物资归属铁律" in _er(world=_w, char=db.get_char(gid, "u1"),
+          exp={"title": "t", "zone": "z", "danger": 3, "teammates": ["老周"], "progress": 10},
+          phase="行军", supplies_note="角色本人随身携带的补给:罐头×2。"))
+    _bn = game._backpack_heal_note(gid, "u1", _w)
+    check("治疗物品提示归属角色本人(有药时)", ("角色本人" in _bn) if _bn else True)
 
     # ── 剧情权重:主线终章=高潮 ──
     from ocverse.prompts import resolve_mainline as _rm, story_weight_line

@@ -77,7 +77,7 @@ def _zone_line(world) -> str:
 
 
 def _heal_line(world, inventory_note: str = "") -> str:
-    """治疗物品提示:世界通名 + (可选)角色背包里的治疗物品。"""
+    """治疗物品提示:世界通名 + (可选)角色本人背包里的治疗物品。"""
     items = [h for h in (getattr(world, "heal_items", None) or []) if isinstance(h, dict) and h.get("name")]
     line = ""
     if items:
@@ -86,6 +86,14 @@ def _heal_line(world, inventory_note: str = "") -> str:
     if inventory_note:
         line += "\n" + inventory_note
     return line
+
+
+ITEM_OWNERSHIP_RULE = (
+    "\n【物品归属】items_gain/items_lose 结算的都是『角色本人』的随身物品:"
+    "消耗必须写明是从角色自己的背包/行囊里取出,严禁写成从其他角色/NPC的背包里拿出"
+    "(他们的物品不归系统结算);队友/NPC 的物品只能在他们自己的台词与动作里出现,"
+    "不得计入角色的得失。"
+)
 
 
 def _material_tail(user: str, material: str) -> str:
@@ -323,6 +331,7 @@ def resolve_event(*, world, char=None, event: dict, choice_idx: int,
         "items_gain/items_lose 只在剧情自然涉及物品得失时输出(拾获/受赠/被拢/消耗/击败敌人拾获战利品),"
         "通常为空数组;物品名要贴合世界观(治疗物品用世界通名)。\n"
         "若角色受伤且背包有治疗物品,可让TA在剧情中自然使用(items_lose 该物品 + effects.hp 正值)。\n"
+        + ITEM_OWNERSHIP_RULE + "\n"
         "数值克制:大部分±5~15,exp 5~20;负反馈不要毁灭性。memory 一句话,30字内。"
         "state 与 state_lift 只在处境发生变化时才输出(见上),否则两字段都不要出现。"
     )
@@ -515,6 +524,7 @@ def resolve_action(*, world, char, action_name: str, detail: str, kind: str = "s
         "effects.hp:生命值变化(-100~30):受伤为负、服用治疗物品/疗伤为正;归零会重伤昏迷,负值要克制。"
         "若角色受伤且背包有治疗物品,可让TA在行动中自然使用(items_lose 该物品 + effects.hp 正值)。"
         "items_gain/items_lose 只在行动自然涉及物品得失时输出(拾获/缴获/受赠/消耗/损坏/讨伐掉落),通常为空数组;物品名要贴合世界观。"
+        + ITEM_OWNERSHIP_RULE +
         "数值克制:日常型大部分±5~15、exp 5~18、金币±0~40;风险型可到 exp 5~30、金币 0~80,失败时给负反馈但不要毁灭性打击。"
         "state 与 state_lift 只在处境变化时输出(见规则说明),否则两字段都不要出现。"
     ) + _heal_line(world, heal_note)
@@ -903,6 +913,10 @@ def expedition_report(*, world, char, exp: dict, phase: str, supplies_note: str)
         f"当前阶段:{phase}——写一段远征途中的剧情片段(120~220字):"
         "行军写风物与队伍氛围,遭遇战写一场短促交手,险境写困境与代价,决战前夜写肃杀与决心;"
         "片段要有画面、有进展、有落点,像连载中的一章。"
+        "\n【物资归属铁律】背包物资清单是『角色本人』随身携带的物品(队伍补给由TA统一背管);"
+        "items_lose 结算的是从角色自己行囊中取出的消耗——叙述必须写明是从TA自己的背包/行囊里拿出,"
+        "严禁写成从其他角色/NPC的背包或口袋里拿出(他们的物品不归系统结算);"
+        "队友/NPC 若要帮忙,用他们自己的台词动作表现即可,不得借用他们的名字消耗清单物品。"
         + (f"\n{supplies_note}" if supplies_note else "")
         + "\n\"dialogues\":片段中队友/敌人的简短对话(1~3轮,IM聊天体,speaker用队友本名或敌人称谓,text≤50字)。"
         + WORLDVIEW_LAW +

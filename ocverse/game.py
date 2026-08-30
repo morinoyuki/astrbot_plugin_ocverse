@@ -2175,9 +2175,9 @@ class Game:
         heal_names = {h["name"] for h in self.heal_items_of(gid, world)}
         supply_names = [str(s) for s in (exp.get("supply_names") or [])]
         inv_line = "、".join(f"{it['name']}×{it['count']}" for it in inv[:8]) or "空"
-        supplies_note = (f"背包物资:{inv_line}。"
-                         "请按剧情判断本轮消耗哪些补给:至少消耗一份食物/饮水,受伤时可改用/并用治疗物品;"
-                         "把消耗的物品名放进 items_lose(只能消耗背包里存在的东西)。")
+        supplies_note = (f"角色本人随身携带的补给(队伍由TA统一背管):{inv_line}。"
+                         "请按剧情判断本轮消耗哪些:至少一份食物/饮水,受伤可用治疗物品;"
+                         "消耗写明从角色自己行囊取出,放进 items_lose(只能消耗这些物品)。")
         r = await self.brain.expedition_report(world=world, char=ch, exp=exp, phase=phase,
                                                supplies_note=supplies_note) if world is not None else None
         llm_lose = [str(x).strip() for x in (r.data.get("items_lose") or []) if str(x).strip()] \
@@ -3565,13 +3565,15 @@ class Game:
         return items
 
     def _backpack_heal_note(self, gid: str, uid: str, world: World) -> str:
-        """角色背包中的治疗物品清单(注入 prompt,让 LLM 在剧情中自主使用)。"""
+        """角色本人背包中的治疗物品清单(注入 prompt,让 LLM 在剧情中自主使用)。"""
         names = {h["name"] for h in self.heal_items_of(gid, world)}
         inv = [it for it in self.db.items_list(gid, uid) if it.get("name") in names]
         if not inv:
             return ""
         info = "、".join(f"{it['name']}×{it['count']}" for it in inv[:4])
-        return f"背包中的治疗物品:{info}(若剧情自然需要,可让角色使用其中之一:items_lose 该物品名 + effects.hp 恢复)"
+        return (f"角色本人背包中的治疗物品(随身携带):{info}"
+                "(若剧情自然需要,可让TA从自己行囊取出使用:items_lose 该物品名 + effects.hp 恢复;"
+                "严禁写成从其他角色/NPC的背包里拿取)")
 
     def buy_item(self, gid: str, uid: str, item_name: str, facility: str = "") -> dict:
         """在店铺/医疗类设施购买治疗物品(去命令:/分身 去 <设施> 买治疗药 / 分身 购买 <物品名>)。
