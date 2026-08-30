@@ -693,6 +693,22 @@ class Brain:
             })
         return BrainResult(False, {})
 
+    async def expedition_invite(self, *, world, char, target, offer: dict,
+                                rel_score: int, rel_stage: str = "") -> BrainResult:
+        """远征邀约:LLM 以被邀请者性格与双方关系判断是否同行。"""
+        sys = self.style
+        user = prompts.expedition_invite(world=world, char=char, target=target, offer=offer,
+                                         rel_score=rel_score, rel_stage=rel_stage)
+        d = await self._ask_fixed_dialogues(sys, user, counterpart=target.name, limit=4)
+        if d and isinstance(d.get("agree"), bool) and d.get("narration"):
+            return BrainResult(True, {
+                "agree": bool(d["agree"]),
+                "narration": str(d["narration"])[:240],
+                "dialogues": self._norm_dialogues(d.get("dialogues"), 4),
+                "rel_delta": _clamp(d.get("rel_delta", 0), -3, 5),
+            })
+        return BrainResult(False, dict(FB_EXP_INVITE))
+
     async def expedition_report(self, *, world, char, exp: dict, phase: str,
                                 supplies_note: str = "") -> BrainResult:
         """远征途中的剧情片段(120~220字 + 队友对话1~3轮)。"""
@@ -1260,6 +1276,13 @@ FB_EXP_OFFER = {
     "title": "远征令",
     "briefing": "征召勇毅之士,向险地进发:清剿威胁、带回见闻与战利品。行程有险,量力而行。",
     "teaser": "酬金与战利品丰厚",
+}
+
+FB_EXP_INVITE = {
+    "agree": True,
+    "narration": "对方听完成行安排,掂量了一下风险,点头应下——正好也想出去走走。",
+    "dialogues": [],
+    "rel_delta": 1,
 }
 
 FB_EXP_REPORT = {

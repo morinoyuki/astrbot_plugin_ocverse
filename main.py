@@ -1066,6 +1066,7 @@ class OcversePlugin(Star):
         elif t == "expedition":
             ph = v.get("phase", "")
             lead = {"offer": "📜 远征委托", "depart": "⚔ 出征", "report": f"⚔ 远征·{v.get('phase_name', '')} {v.get('progress', 0)}%",
+                    "invite": f"🛡 远征邀约 · {v.get('target_name', '')}",
                     "return": ("🏆 远征凯旋" if v.get("outcome") == "success" else "💀 远征折戟"),
                     "abort": "🏳 中途撤离"}.get(ph, "⚔ 远征")
             if v.get("title"):
@@ -1662,6 +1663,20 @@ class OcversePlugin(Star):
                 return self.game.expedition_status(gid, uid)
             else:
                 v = await self.game.ensure_expedition_offer(gid, uid)
+        return self._view_text(v)
+
+    @_guard_tool
+    async def ocverse_expedition_invite(self, event: AstrMessageEvent, target_name: str):
+        """邀请某位玩家分身/生活角色加入你的远征队伍(需今日远征委托,会自动生成;
+        对方是否同意由 AI 按性格与交情判断)。"""
+        gid = self._need_gid(event)
+        uid = self._uid(event)
+        self._char_of(event)
+        t = self._char_by_name(gid, (target_name or "").strip())
+        if t is None:
+            return f"找不到叫「{target_name}」的角色。"
+        async with self._glock(gid):
+            v = await self.game.expedition_invite(gid, uid, t.uid)
         return self._view_text(v)
 
     @_guard_tool
@@ -2791,6 +2806,19 @@ class OcversePlugin(Star):
             return
         if target_char.uid == uid:
             yield event.plain_result("不能和自己互动哦(对着镜子练吧)。")
+            return
+        # 远征邀约:接受前拉人同行(「找 阿澈 我要去远征你要不要跟我一起」)
+        mode_text_l = (mode_text or "")
+        if any(kw in mode_text_l for kw in ("远征", "组队", "同行")):
+            yield event.plain_result("⏳ 正在向对方发出远征邀约…")
+            async with self._glock(gid):
+                v = await self.game.expedition_invite(gid, uid, target_char.uid)
+            imgs = render_views([v], self._card_cfg())
+            chain = self._chain(imgs)
+            if chain:
+                yield event.chain_result(chain)
+            else:
+                yield event.plain_result(v.get("narration", "……"))
             return
         mode, detail = "打招呼", self._default_mode_hint["打招呼"]
         if mode_text:

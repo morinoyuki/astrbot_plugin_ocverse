@@ -100,6 +100,12 @@ def llm_fake(system, user):
         return json.dumps({"title": "深坑清剿令", "teaser": "酬金与战利品丰厚",
                            "briefing": "据点议会征召远征队:目标归零深坑,清剿畸变体,带回样本。行程艰险,报酬从优,量力而行。"},
                           ensure_ascii=False)
+    if "诚邀被邀请者同行远征" in user:
+        return json.dumps({"agree": True, "rel_delta": 2,
+                           "narration": "绫波听完行程,把烟杆在鞋底磕了磕:正好,老身也想再去看看那条船。",
+                           "dialogues": [{"speaker": "自己", "text": "路上危险。"},
+                                         {"speaker": "绫波", "text": "老身见过的浪比你吃过的盐多。"}]},
+                          ensure_ascii=False)
     if "远征途中的剧情片段" in user:
         return json.dumps({"narration": "队伍在废墟间推进,轮流探路,暂时平安。",
                            "dialogues": [{"speaker": "老周", "text": "跟紧点。"},
@@ -443,6 +449,28 @@ async def main():
     check("管理员重建主线(落库+含门槛)", len(db.get_world(w.id).mainline) >= 3
           and "主线已重铸" in msg
           and any(m.get("goal_type") == "reputation" for m in db.get_world(w.id).mainline))
+
+    # ── 远征邀约:接受前拉人入队 ──
+    db.update_char(gid, "u1", stamina=100)
+    await game.ensure_expedition_offer(gid, "u1")
+    life2 = db.get_char(gid, "npc:g1:绫波")
+    iv = await game.expedition_invite(gid, "u1", life2.uid)
+    check("远征邀约(LLM 判定同行)", iv["phase"] == "invite" and iv["agree"] is True
+          and "绫波" in iv["narration"])
+    check("受邀者入招募名单", "绫波" in game._exp_recruited(gid, "u1"))
+    iv2 = await game.expedition_invite(gid, "u1", life2.uid)
+    check("重复邀请短路(不重复编入)", iv2["agree"] is True and game._exp_recruited(gid, "u1").count("绫波") == 1)
+    dv = await game.accept_expedition(gid, "u1")
+    ch = db.get_char(gid, "u1")
+    team_now = game._on_expedition(ch).get("teammates") or []
+    check("接受时招募者优先编入队伍(含生活角色)", "绫波" in team_now
+          and life2.uid in (game._on_expedition(ch).get("life_teammates") or []))
+    check("出发变更栏显示队伍", any("同行" in c and "绫波" in c for c in dv["changes"]))
+    # 收尾:终止这场远征以便后续测试
+    fl = dict(ch.flags); fl["_exp"]["until"] = 1; db.update_char(gid, "u1", flags=fl)
+    await game.settle_expedition(gid, "u1")
+    ch = db.get_char(gid, "u1")
+    ch.hp = C.HP_MAX; ch.flags.pop("_state", None); db.upsert_char(ch)
 
     # ── 剧情权重:主线终章=高潮 ──
     from ocverse.prompts import resolve_mainline as _rm, story_weight_line

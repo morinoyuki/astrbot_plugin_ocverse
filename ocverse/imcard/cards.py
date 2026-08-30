@@ -278,6 +278,16 @@ def expedition_card(view: dict, cfg: dict) -> list[Image.Image]:
             rows.extend(dlg)
         rows.append(EmptyRow(r, 4))
         rows.append(TagRow(r, view.get("changes") or []))
+    elif phase == "invite":
+        ok = bool(view.get("agree"))
+        rows.append(PillRow(r, ("🛡 邀约成功 · " if ok else "🚫 邀约被婉拒 · ") + str(view.get("target_name", ""))))
+        rows.append(_para(r, view.get("narration", ""), color=r.t.text, margin=(6, 8, 0, 6)))
+        dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), view.get("avatars"))
+        if dlg:
+            rows.append(EmptyRow(r, 4))
+            rows.extend(dlg)
+        rows.append(EmptyRow(r, 4))
+        rows.append(TagRow(r, view.get("changes") or []))
     elif phase == "report":
         rows.append(PillRow(r, f"⚔ 远征 · {view.get('phase_name', '行军')} {view.get('progress', 0)}% · {view.get('title', '')}"))
         rows.append(_para(r, view.get("narration", ""), color=r.t.text, margin=(6, 8, 0, 6)))
@@ -756,6 +766,7 @@ def help_card(cfg: dict, sub_prefix: str = "/分身") -> list[Image.Image]:
             f"{sub_prefix} 远征 — 查看今日远征委托(由公会/据点等按世界观颁布,目标危险区域)",
             f"{sub_prefix} 远征 接受 — 签下委托出发:期间无法其他操作,每几小时播报剧情,自动消耗背包补给",
             f"{sub_prefix} 远征 状态 · {sub_prefix} 远征 放弃 — 进度简报 / 中途撤离(声望重挫)",
+            f"出发前:{sub_prefix} 找 <名字> 我要去远征你要不要跟我一起 — 拉同伴入队(最多3人,是否同行由AI按交情与性格判定)",
             "归来结算:成功=大量金币/道具/经验+小幅属性提升(高潮剧情);失败=重伤与损失(属性过低易失败)",
         ]),
         sec("🧩 其他", [

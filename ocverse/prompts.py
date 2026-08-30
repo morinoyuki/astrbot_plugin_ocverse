@@ -871,6 +871,27 @@ def expedition_offer(*, world, char, zone: dict, issuer: str, teammates: list[st
     )
 
 
+def expedition_invite(*, world, char, target, offer: dict,
+                      rel_score: int, rel_stage: str = "") -> str:
+    """远征邀约:发起人邀请对方同行,由被邀请者的性格与两人关系判断是否同意。"""
+    return (
+        f"{_world_line(world)}\n"
+        f"发起人:{char.persona_line()},{_rep_short(world, char)}\n"
+        f"被邀请者:{target.persona_line()},背景:{target.backstory[:400] or '未详'}\n"
+        f"两人关系:{rel_score}({rel_stage})\n"
+        f"远征委托:「{offer.get('title')}」目标「{offer.get('zone_name')}」"
+        f"(危险度★{offer.get('danger')}),行程约 {offer.get('duration_h')} 小时,"
+        f"预估成功率 {offer.get('rate')}%,发布方:{offer.get('issuer')}\n"
+        "发起人诚邀被邀请者同行远征。请以被邀请者的性格、两人交情与远征风险判断是否同意(agree),"
+        "并写出这段邀约交锋:对方可能爽快答应、提条件讨价还价、谨慎婉拒(危险/有要事/交情不够),"
+        "结果要落到实处。\n"
+        '"dialogues":双方你来我往的邀约对话(2~4轮,IM聊天体,speaker用双方本名,text≤50字),禁止独角戏。\n'
+        + WORLDVIEW_LAW +
+        '严格输出 JSON:{"agree":true,"narration":"邀约场景90~150字",'
+        '"dialogues":[{"speaker":"","text":""}],"rel_delta":-3~5}'
+    )
+
+
 def expedition_report(*, world, char, exp: dict, phase: str, supplies_note: str) -> str:
     """远征途中的剧情片段(播报)。phase: 行军/遭遇战/险境/决战前夜。"""
     teammates = "、".join(exp.get("teammates") or []) or "队友们"

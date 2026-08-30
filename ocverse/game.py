@@ -1688,6 +1688,110 @@ class Game:
                 return exp
         return None
 
+    EXP_TEAM_RECRUIT_MAX = 3   # 接受前最多可拉入的同行者数量
+
+    def _exp_recruited(self, gid: str, uid: str, day: str | None = None) -> list[str]:
+        """当日已邀请成功的同行者名单(接受远征时优先编入队伍)。"""
+        day = day or self._day_key()
+        raw = self.db.kv_get(gid, f"exp_team:{day}:{uid}")
+        try:
+            return [str(x) for x in json.loads(raw or "[]")]
+        except Exception:
+            return []
+
+    def _exp_recruit_add(self, gid: str, uid: str, name: str) -> list[str]:
+        day = self._day_key()
+        cur = self._exp_recruited(gid, uid, day)
+        if name not in cur and len(cur) < self.EXP_TEAM_RECRUIT_MAX:
+            cur.append(name)
+        self.db.kv_set(gid, f"exp_team:{day}:{uid}", json.dumps(cur, ensure_ascii=False))
+        return cur
+
+    async def expedition_invite(self, gid: str, uid: str, target_uid: str) -> dict:
+        """远征邀约:接受前与玩家分身/生活角色互动拉人,LLM 判定对方是否同行。
+        已在队伍/队伍已满时直接短路,不耗 LLM。"""
+        ch = self.db.get_char(gid, uid)
+        if not ch:
+            raise GameError("你还没有创建分身")
+        if self._on_expedition(ch):
+            raise GameError(f"⚔ 你{self._exp_note(ch)},先等远征归来。")
+        tch = self.db.get_char(gid, target_uid)
+        if not tch:
+            raise GameError("对方还没有创建分身,邀不了。")
+        if tch.uid == ch.uid:
+            raise GameError("不能邀请自己。")
+        if is_npc_uid(tch.uid):
+            comp = self._exp_companion_of(gid, tch.uid)
+            if comp:
+                cexp, leader = comp
+                raise GameError(f"⚔ {tch.name} 正跟随「{leader.name}」的远征队在外。")
+        if self._exp_npc_on_march(gid, tch.name):
+            raise GameError(f"⚔ {tch.name} 正随远征队在外。")
+        # 确保今日委托存在(接受前拉人:还没看过布告也会现场生成)
+        offer = await self.ensure_expedition_offer(gid, uid)
+        team = self._exp_recruited(gid, uid)
+        if tch.name in team:
+            return {
+                "type": "expedition", "phase": "invite", "gid": gid, "uid": uid,
+                "char_name": ch.name, "target_name": tch.name,
+                "world_name": world.name if (world := self.db.cur_world(gid)) else "",
+                "title": str(offer.get("title") or "远征"),
+                "agree": True,
+                "narration": f"{tch.name} 早就在你的远征队伍里了,随时可以出发。",
+                "dialogues": [], "avatars": self._avatar_map(gid),
+                "changes": [f"🛡 同行者 {len(team)}/{self.EXP_TEAM_RECRUIT_MAX}"],
+                "ok_llm": False,
+            }
+        if len(team) >= self.EXP_TEAM_RECRUIT_MAX:
+            return {
+                "type": "expedition", "phase": "invite", "gid": gid, "uid": uid,
+                "char_name": ch.name, "target_name": tch.name,
+                "world_name": world.name if (world := self.db.cur_world(gid)) else "",
+                "title": str(offer.get("title") or "远征"),
+                "agree": False,
+                "narration": (f"队伍已经满员({'、'.join(team) or '—'})"
+                              f"——{tch.name} 摆摆手:下回一定。"),
+                "dialogues": [], "avatars": self._avatar_map(gid),
+                "changes": [f"🛡 同行者 {len(team)}/{self.EXP_TEAM_RECRUIT_MAX}(已满)"],
+                "ok_llm": False,
+            }
+        world = self.db.cur_world(gid)
+        if not world:
+            raise GameError("世界尚未初始化")
+        pre = self.db.get_rel_full(gid, uid, target_uid)
+        self._attach_rep_line(gid, uid, world)
+        r = await self.brain.expedition_invite(
+            world=world, char=ch, target=tch, offer=offer,
+            rel_score=pre["score"], rel_stage=C.rel_stage_label(pre["score"], pre["state"]))
+        d = r.data
+        agree = bool(d.get("agree"))
+        changes: list[str] = []
+        if agree:
+            team = self._exp_recruit_add(gid, uid, tch.name)
+            changes.append(f"🛡 {tch.name} 加入了你的远征队伍({len(team)}/{self.EXP_TEAM_RECRUIT_MAX})")
+            self.db.bump_rel(gid, uid, target_uid, int(d.get("rel_delta") or 1) + 1, "受邀远征")
+            changes.append(f"💞 羁绊+{int(d.get('rel_delta') or 1) + 1}")
+        else:
+            changes.append(f"{tch.name} 婉拒了这次远征邀请")
+        await self.mem.remember(gid, uid, "char",
+                                f"邀请{tch.name}同行远征「{offer.get('title')}」:{'答应' if agree else '被婉拒'}",
+                                ref=f"expinv:{target_uid}")
+        self.db.append_log(gid, uid, "interaction",
+                           f"{ch.name} 邀 {tch.name} 同行远征「{offer.get('title')}」 —— {'同行' if agree else '婉拒'}",
+                           world.name)
+        return {
+            "type": "expedition", "phase": "invite", "gid": gid, "uid": uid,
+            "char_name": ch.name, "target_name": tch.name,
+            "world_name": world.name,
+            "title": str(offer.get("title") or "远征"),
+            "agree": agree,
+            "narration": str(d.get("narration") or ""),
+            "dialogues": d.get("dialogues") or [],
+            "avatars": self._avatar_map(gid),
+            "changes": changes,
+            "ok_llm": r.ok,
+        }
+
     def _exp_note(self, ch: Char) -> str:
         exp = self._on_expedition(ch)
         if not exp:
@@ -1851,6 +1955,9 @@ class Game:
         return int(round(max(0.08, min(0.95, rate)) * 100))
 
     def _exp_offer_view(self, gid: str, uid: str, ch: Char, world: World | None, offer: dict) -> dict:
+        recruited = self._exp_recruited(gid, uid)
+        recruit_line = f"\n用「/分身 找 <名字> 我要去远征…」邀请同伴(还可邀 {self.EXP_TEAM_RECRUIT_MAX - len(recruited)} 人)" \
+            if len(recruited) < self.EXP_TEAM_RECRUIT_MAX else ""
         return {
             "type": "expedition",
             "phase": "offer",
@@ -1858,11 +1965,12 @@ class Game:
             "char_name": ch.name,
             "world_name": world.name if world else "",
             "offer": offer,
-            "narration": str(offer.get("briefing") or ""),
+            "narration": str(offer.get("briefing") or "") + recruit_line,
             "changes": [
                 f"⚔ 目标:{offer.get('zone_name')}(危险度★{offer.get('danger', '?')})",
                 f"⏱ 行程:约 {offer.get('duration_h', '?')} 小时",
-                "🛡 同行:" + ("、".join(offer.get("teammates") or []) or "待定"),
+                ("🛡 已邀请:" + "、".join(recruited) + "(出发时自动补足同伴)") if recruited
+                else ("🛡 同行:" + ("、".join(offer.get("teammates") or []) or "待定(可自行邀请)")),
                 f"🎯 预估成功率:{offer.get('rate', '?')}%(属性过低可能失败)",
                 f"💰 {offer.get('teaser') or '报酬从优'}",
             ],
@@ -1956,12 +2064,16 @@ class Game:
         report_every_h = max(1, self._cfgi("expedition_report_hours", C.EXPEDITION_REPORT_HOURS))
         flags = dict(ch.flags or {})
         life_uids = {c.name: c.uid for c in self.db.list_chars(gid) if is_npc_uid(c.uid)}
+        # 队伍编成:接受前邀请的同行者优先,自动选取的补足(去重,总人数上限 5)
+        recruited = self._exp_recruited(gid, uid, day)
+        auto_team = [str(t) for t in (offer.get("teammates") or []) if t not in recruited]
+        team = (recruited + auto_team)[:5]
         flags["_exp"] = {
             "title": str(offer.get("title") or "远征"), "zone": str(offer.get("zone_name") or "未知之地"),
             "kind": str(offer.get("zone_kind") or ""), "danger": int(offer.get("danger") or 3),
             "duration_h": duration_h, "issuer": str(offer.get("issuer") or ""),
-            "teammates": [str(t) for t in (offer.get("teammates") or [])],
-            "life_teammates": [life_uids[t] for t in (offer.get("teammates") or []) if t in life_uids],
+            "teammates": team,
+            "life_teammates": [life_uids[t] for t in team if t in life_uids],
             "started": started, "until": started + duration_h * 3600,
             "report_every_h": report_every_h, "next_report": started + report_every_h * 3600,
             "reports": 0, "supplies_used": 0,
@@ -2002,6 +2114,7 @@ class Game:
         r = await self.brain.expedition_report(world=world, char=ch, exp=exp_snap,
                                                phase="誓师出发",
                                                supplies_note=prep_note) if world is not None else None
+        offer["rate"] = self._exp_success_rate(ch, {"danger": int(offer.get("danger") or 3)}, len(team))
         if r is not None and r.ok:
             narration = str(r.data["narration"])
             dialogues = r.data.get("dialogues") or []
@@ -2023,7 +2136,8 @@ class Game:
             "narration": narration,
             "dialogues": dialogues,
             "avatars": self._avatar_map(gid),
-            "changes": prep_changes + ["体力-15", f"⏱ 预计 {duration_h:.0f} 小时后归来",
+            "changes": prep_changes + [f"🛡 同行:{'、'.join(team) or '独自一人'}",
+                                       "体力-15", f"⏱ 预计 {duration_h:.0f} 小时后归来",
                                        f"🎯 成功率约 {offer.get('rate', '?')}%",
                                        "⚔ 远征期间无法进行其他操作,途中每几小时播报一次"],
             "ok_llm": r.ok if r else False,
