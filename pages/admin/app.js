@@ -75,7 +75,7 @@
   let CURRENT = "overview";
   const TAB_LOADERS = {
     overview: loadOverview, chars: loadChars, world: loadWorld,
-    events: loadEvents, logs: loadLogs, mems: loadMems,
+    events: loadEvents, logs: loadLogs, mems: loadMems, kb: loadKb,
     config: loadConfig, ops: () => {},
   };
   function switchTab(name) {
@@ -123,7 +123,7 @@
     CHARS = d.chars || [];
     $("#chars-tbl tbody").innerHTML = CHARS.map((c) => `
       <tr><td>${esc(c.name)}</td><td><code>${esc(c.uid)}</code></td><td>${esc(c.gender)}</td>
-      <td>${c.level}</td><td>${c.gold}</td><td>${c.stamina}/${c.mood}</td><td>${esc(c.title)}</td>
+      <td>${c.level}</td><td>${c.gold}</td><td>${c.stamina}/${c.mood}</td><td>${c.hp ?? 100}</td><td>${esc(c.title)}</td>
       <td><button class="btn tiny" data-uid="${esc(c.uid)}">编辑</button></td></tr>`).join("");
     $$("#chars-tbl tbody button").forEach((b) => {
       b.onclick = () => editChar(b.dataset.uid).catch((e) => toast("❌ " + e.message));
@@ -150,6 +150,7 @@
         <label>金币 <input type="number" class="w" id="ce-gold" value="${c.gold}"></label>
         <label>体力 <input type="number" class="w" id="ce-stamina" value="${c.stamina}"></label>
         <label>心情 <input type="number" class="w" id="ce-mood" value="${c.mood}"></label>
+        <label>生命 <input type="number" class="w" id="ce-hp" value="${c.hp ?? 100}"></label>
       </div>
       <label>六维(力量/敏捷/智力/魅力/幸运/精神)</label>
       <div class="toolbar">${["force", "agility", "intellect", "charm", "luck", "sanity"].map((k) =>
@@ -177,7 +178,7 @@
         title: $("#ce-title").value, backstory: $("#ce-back").value,
         tags: $("#ce-tags").value.split(/[,，、]/).map((s) => s.trim()).filter(Boolean),
         level: vn("#ce-level"), exp: vn("#ce-exp"), gold: vn("#ce-gold"),
-        stamina: vn("#ce-stamina"), mood: vn("#ce-mood"),
+        stamina: vn("#ce-stamina"), mood: vn("#ce-mood"), hp: vn("#ce-hp"),
         attrs: { force: vn("#ce-force"), agility: vn("#ce-agility"), intellect: vn("#ce-intellect"),
                  charm: vn("#ce-charm"), luck: vn("#ce-luck"), sanity: vn("#ce-sanity") },
         flags,
@@ -208,6 +209,8 @@
   let WID = null;
   let NPCS = [];
   let INFRA = [];
+  let ZONES = [];
+  let HEALS = [];
   async function loadWorld() {
     const d = await apiGet("/admin/api/world", { gid: GID });
     WORLDS = d.worlds || [];
@@ -221,6 +224,8 @@
     if (!cur) return;
     NPCS = cur.npcs || [];
     INFRA = cur.infra || [];
+    ZONES = cur.zones || [];
+    HEALS = cur.heal_items || [];
     const opts = WORLDS.map((w) =>
       `<option value="${w.id}"${w.id === WID ? " selected" : ""}>${w.visited ? "✅" : "🔒"} ${esc(w.name)} [${esc(w.genre)}]</option>`).join("");
     const npcRow = (n, i) => `
@@ -241,6 +246,24 @@
         <td><input value="${esc(f.work)}" data-fi="${i}" data-k="work" style="width:130px" placeholder="打工职业(可空)"></td>
         <td><button class="btn tiny danger" data-f="${i}">删</button></td>
       </tr>`;
+    const zoneRow = (z, i) => `
+      <tr>
+        <td><input value="${esc(z.kind)}" data-zi="${i}" data-zk="kind" style="width:80px" placeholder="类型"></td>
+        <td><input value="${esc(z.name)}" data-zi="${i}" data-zk="name" style="width:100px" placeholder="名字"></td>
+        <td><input value="${esc(z.desc)}" data-zi="${i}" data-zk="desc" style="width:180px" placeholder="描述"></td>
+        <td><input type="number" min="1" max="5" value="${z.danger ?? 1}" data-zi="${i}" data-zk="danger" style="width:56px"></td>
+        <td><input value="${esc((z.enemies || []).map((e) => e.name).join(", "))}" data-zi="${i}" data-zk="enemies" style="width:150px" placeholder="敌人1, 敌人2"></td>
+        <td><input value="${esc((z.loot || []).join(", "))}" data-zi="${i}" data-zk="loot" style="width:130px" placeholder="素材1, 素材2"></td>
+        <td><button class="btn tiny danger" data-z="${i}">删</button></td>
+      </tr>`;
+    const healRow = (h, i) => `
+      <tr>
+        <td><input value="${esc(h.name)}" data-hi="${i}" data-hk="name" style="width:110px" placeholder="名字"></td>
+        <td><input value="${esc(h.note)}" data-hi="${i}" data-hk="note" style="width:220px" placeholder="功效一句话"></td>
+        <td><input type="number" value="${h.price ?? 30}" data-hi="${i}" data-hk="price" style="width:80px"></td>
+        <td><input type="number" value="${h.heal ?? 30}" data-hi="${i}" data-hk="heal" style="width:80px"></td>
+        <td><button class="btn tiny danger" data-h="${i}">删</button></td>
+      </tr>`;
     $("#world-wrap").innerHTML = `
       <div class="toolbar">编辑目标:<select id="w-sel" class="sel">${opts}</select>
         <span class="muted">${cur.visited ? "当前世界" : "沉眠世界(未降临)"} · #${cur.id}</span></div>
@@ -253,7 +276,10 @@
       <label>描述</label><textarea class="w" id="w-desc" rows="5">${esc(cur.desc)}</textarea>
       <label>规则(每行一条,最多 4 条)</label><textarea class="w ta-lg" id="w-rules">${esc((cur.rules || []).join("\n"))}</textarea>
       <label>独特之处(每行一条,最多 5 条)</label><textarea class="w ta-lg" id="w-features">${esc((cur.features || []).join("\n"))}</textarea>
-      <div class="row-end"><button class="btn primary" id="w-save">保存世界档案</button></div></div>
+      <div class="row-end">
+        <button class="btn primary" id="w-save">保存世界档案</button>
+        <button class="btn" id="content-regen">🎲 AI 重绘区域/治疗物品</button>
+      </div></div>
       <div class="card"><h3>基础设施(保存为整表替换;work 非空的设施可兼职)</h3>
       <div class="table-wrap"><table class="tbl" id="infra-tbl">
         <thead><tr><th>类型</th><th>名字</th><th>功能/氛围</th><th>打工职业</th><th></th></tr></thead>
@@ -272,6 +298,24 @@
       <div class="row-end">
         <button class="btn" id="npc-add">+ 添加 NPC</button>
         <button class="btn primary" id="npc-save">保存全部 NPC</button>
+      </div></div>
+      <div class="card"><h3>危险区域(每日自动变动;与讨伐任务/素材联动;敌人/素材用逗号分隔)</h3>
+      <div class="table-wrap"><table class="tbl" id="zone-tbl">
+        <thead><tr><th>类型</th><th>名字</th><th>描述</th><th>危险度1-5</th><th>敌人(逗号分隔)</th><th>素材(逗号分隔)</th><th></th></tr></thead>
+        <tbody>${ZONES.map(zoneRow).join("")}</tbody>
+      </table></div>
+      <div class="row-end">
+        <button class="btn" id="zone-add">+ 添加区域</button>
+        <button class="btn primary" id="zone-save">保存全部区域</button>
+      </div></div>
+      <div class="card"><h3>治疗物品(店铺售卖/掉落/「治疗」使用;低到高三档)</h3>
+      <div class="table-wrap"><table class="tbl" id="heal-tbl">
+        <thead><tr><th>名字</th><th>功效</th><th>售价</th><th>恢复量</th><th></th></tr></thead>
+        <tbody>${HEALS.map(healRow).join("")}</tbody>
+      </table></div>
+      <div class="row-end">
+        <button class="btn" id="heal-add">+ 添加治疗物品</button>
+        <button class="btn primary" id="heal-save">保存全部治疗物品</button>
       </div></div>`;
     $("#w-sel").onchange = () => { WID = parseInt($("#w-sel").value, 10); renderWorldEditor(); };
     const ls = (id) => $(id).value.split(/\n/).map((s) => s.trim()).filter(Boolean);
@@ -298,7 +342,7 @@
       toast("✅ 设施已保存");
     };
     $("#infra-regen").onclick = () => confirmAction("AI 重新生成设施",
-      "将丢弃当前设施清单,由 AI 贴合世界观重新规划(6~10 个,覆盖生存必要设施与打工位)。继续?",
+      "将丢弃当前设施清单,由 AI 贴合世界观重新规划(20~28 个,覆盖生存必要设施、社交娱乐场所与打工位)。继续?",
       async () => {
         toast("⏳ AI 规划中,可能需要一点时间…");
         const r = await apiPost("/admin/api/infra/regen", { gid: GID, world_id: WID });
@@ -321,6 +365,64 @@
       await apiPost("/admin/api/world", { gid: GID, world_id: WID, npcs: NPCS });
       toast("✅ NPC 已保存");
     };
+    $$("#zone-tbl input").forEach((inp) => {
+      inp.onchange = () => {
+        const z = ZONES[parseInt(inp.dataset.zi, 10)];
+        const k = inp.dataset.zk;
+        if (k === "enemies") {
+          z.enemies = inp.value.split(/[,，]/).map((s) => s.trim()).filter(Boolean).map((nm) => ({ name: nm.slice(0, 10), desc: "" }));
+        } else if (k === "loot") {
+          z.loot = inp.value.split(/[,，]/).map((s) => s.trim()).filter(Boolean).slice(0, 3);
+        } else if (k === "danger") {
+          z.danger = Math.max(1, Math.min(5, parseInt(inp.value, 10) || 1));
+        } else {
+          z[k] = inp.value;
+        }
+      };
+    });
+    $$("#zone-tbl [data-z]").forEach((b) => {
+      b.onclick = () => { ZONES.splice(parseInt(b.dataset.z, 10), 1); renderWorldEditor(); };
+    });
+    $("#zone-add").onclick = () => {
+      ZONES.push({ kind: "野外", name: "新区域", desc: "", danger: 1, enemies: [], loot: [] });
+      renderWorldEditor();
+    };
+    $("#zone-save").onclick = async () => {
+      await apiPost("/admin/api/world", { gid: GID, world_id: WID, zones: ZONES });
+      toast("✅ 危险区域已保存");
+    };
+    $$("#heal-tbl input").forEach((inp) => {
+      inp.onchange = () => {
+        const h = HEALS[parseInt(inp.dataset.hi, 10)];
+        const k = inp.dataset.hk;
+        if (k === "price" || k === "heal") {
+          h[k] = Math.max(10, parseInt(inp.value, 10) || 30);
+        } else {
+          h[k] = inp.value;
+        }
+      };
+    });
+    $$("#heal-tbl [data-h]").forEach((b) => {
+      b.onclick = () => { HEALS.splice(parseInt(b.dataset.h, 10), 1); renderWorldEditor(); };
+    });
+    $("#heal-add").onclick = () => {
+      HEALS.push({ name: "新药", note: "", price: 30, heal: 30 });
+      renderWorldEditor();
+    };
+    $("#heal-save").onclick = async () => {
+      await apiPost("/admin/api/world", { gid: GID, world_id: WID, heal_items: HEALS });
+      toast("✅ 治疗物品已保存");
+    };
+    $("#content-regen").onclick = () => confirmAction("AI 重绘区域/治疗物品",
+      "将丢弃当前危险区域与治疗物品名录,由 AI 贴合世界观重新生成(3~6 片区域 + 3 档治疗物品)。继续?",
+      async () => {
+        toast("⏳ AI 规划中,可能需要一点时间…");
+        const r = await apiPost("/admin/api/content/regen", { gid: GID, world_id: WID });
+        const w = WORLDS.find((x) => x.id === WID);
+        if (w) { w.zones = r.zones || []; w.heal_items = r.heal_items || []; }
+        toast("✅ " + String(r.message || "已重绘").split("\n")[0]);
+        renderWorldEditor();
+      });
   }
 
   // ── 事件 ──
@@ -377,6 +479,43 @@
       <td class="muted">${esc(m.uid || "-")}</td><td>${esc(m.scope)}</td><td>${esc(m.text)}</td></tr>`).join("") || '<tr><td colspan="5" class="muted">无</td></tr>';
   }
 
+  // ── 知识库 ──
+  let KB = { source: "", q: "", entries: [] };
+  async function loadKb() {
+    const d = await apiGet("/admin/api/kb", { gid: GID });
+    KB.entries = d.entries || [];
+    $("#kb-total").textContent = `共 ${d.total} 条` + (d.sources?.length ? ` · 来源 ${d.sources.length} 个` : "");
+    const sel = $("#kb-source");
+    const keep = sel.value;
+    sel.innerHTML = `<option value="">全部</option>` +
+      (d.sources || []).map((s) => `<option value="${esc(s)}"${s === keep ? " selected" : ""}>${esc(s)}</option>`).join("");
+    renderKbRows();
+  }
+  function renderKbRows() {
+    const q = KB.q.trim().toLowerCase();
+    const rows = KB.entries.filter((e) =>
+      (!KB.source || e.source === KB.source) &&
+      (!q || [e.source, e.theme, e.kind, e.content].some((v) => String(v || "").toLowerCase().includes(q))));
+    $("#kb-tbl tbody").innerHTML = rows.map((e) => {
+      const brief = e.content.length > 90 ? e.content.slice(0, 90) + "…" : e.content;
+      return `<tr>
+        <td><input type="checkbox" class="kbmk" value="${e.id}"></td><td>${e.id}</td>
+        <td>${esc(e.source || "-")}</td><td>${esc(e.theme || "-")}</td><td>${esc(e.kind || "-")}</td>
+        <td class="kb-content" title="${esc(e.content)}" style="max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer">${esc(brief)}</td>
+        <td class="muted">${fmtTs(e.created_at)}</td></tr>`;
+    }).join("") || '<tr><td colspan="7" class="muted">知识库还是空的(默认每天自动采集一条素材)。</td></tr>';
+    $$("#kb-tbl tbody tr").forEach((tr) => {
+      tr.onclick = (ev) => {
+        if (ev.target.tagName === "INPUT") return;
+        const entry = KB.entries.find((x) => String(x.id) === tr.querySelector(".kbmk").value);
+        if (!entry) return;
+        openModal(`📚 ${entry.source || "未知来源"} · ${entry.theme || ""}`,
+                  `<pre class="code" style="white-space:pre-wrap">${esc(entry.content)}</pre>`,
+                  [{ label: "关闭" }]);
+      };
+    });
+  }
+
   // ── 配置 ──
   async function loadConfig() {
     const d = await apiGet("/admin/api/config", { gid: GID });
@@ -418,6 +557,17 @@
       $("#log-prev").onclick = () => { LOG.offset = Math.max(0, LOG.offset - 50); loadLogs(); };
       $("#log-next").onclick = () => { LOG.offset += 50; loadLogs(); };
       $("#mem-uid").onchange = () => { MEM.uid = $("#mem-uid").value; loadMems(); };
+      $("#kb-source").onchange = () => { KB.source = $("#kb-source").value; renderKbRows(); };
+      $("#kb-search").oninput = () => { KB.q = $("#kb-search").value; renderKbRows(); };
+      $("#kb-del").onclick = () => {
+        const ids = $$(".kbmk:checked").map((x) => parseInt(x.value, 10));
+        if (!ids.length) return toast("未勾选任何条目");
+        confirmAction("删除知识库条目", `将删除 ${ids.length} 条素材,不可恢复。`, async () => {
+          const r = await apiPost("/admin/api/kb/delete", { gid: GID, ids });
+          toast(`✅ 已删除 ${r.deleted} 条`);
+          loadKb();
+        });
+      };
       $("#mem-del").onclick = () => {
         const ids = $$(".mk:checked").map((x) => parseInt(x.value, 10));
         if (!ids.length) return toast("未勾选任何记忆");

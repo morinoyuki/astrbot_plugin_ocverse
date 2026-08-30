@@ -206,6 +206,12 @@
     "default": 4,
     "hint": "练习/健身/打怪/冒险等主动行动会消耗体力且每天限次,防止刷属性(赚金币另有专门的『兼职』世界打工)"
   },
+  "expedition_report_hours": {
+    "description": "远征播报间隔(小时)",
+    "type": "int",
+    "default": 2,
+    "hint": "远征进行中每隔几小时向群里推送一段剧情片段;行程走完自动结算归来。最小 1 小时"
+  },
   "interactions_max_per_day": {
     "description": "每人每日互动次数上限",
     "type": "int",

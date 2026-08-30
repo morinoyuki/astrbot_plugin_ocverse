@@ -21,6 +21,7 @@
   <button class="tab" data-tab="events">🎲 事件</button>
   <button class="tab" data-tab="logs">📜 日志</button>
   <button class="tab" data-tab="mems">🧠 记忆</button>
+  <button class="tab" data-tab="kb">📚 知识库</button>
   <button class="tab" data-tab="config">⚙️ 配置</button>
   <button class="tab" data-tab="ops">🕹 操作</button>
 </nav>
@@ -34,7 +35,7 @@
 
   <section class="panel" id="tab-chars">
     <div class="table-wrap"><table class="tbl" id="chars-tbl">
-      <thead><tr><th>名字</th><th>uid</th><th>性别</th><th>Lv</th><th>金币</th><th>体力/心情</th><th>称号</th><th>操作</th></tr></thead>
+      <thead><tr><th>名字</th><th>uid</th><th>性别</th><th>Lv</th><th>金币</th><th>体力/心情</th><th>生命</th><th>称号</th><th>操作</th></tr></thead>
       <tbody></tbody>
     </table></div>
     <div id="cedit"></div>
@@ -71,6 +72,20 @@
       <thead><tr><th></th><th>id</th><th>角色</th><th>范围</th><th>内容</th></tr></thead>
       <tbody></tbody>
     </table></div>
+  </section>
+
+  <section class="panel" id="tab-kb">
+    <div class="toolbar">
+      <label>来源 <select id="kb-source" class="sel"><option value="">全部</option></select></label>
+      <input id="kb-search" placeholder="搜索主题/来源/内容…" style="flex:1;min-width:160px">
+      <button class="btn danger" id="kb-del">删除选中</button>
+      <span class="muted" id="kb-total"></span>
+    </div>
+    <div class="table-wrap"><table class="tbl" id="kb-tbl">
+      <thead><tr><th></th><th>id</th><th>来源</th><th>主题</th><th>类型</th><th>内容</th><th>入库时间</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+    <p class="hint muted">知识库是群共享的创作素材库(联网/LLM 采集的著作与桥段),注入世界生成、事件、委托、远征等所有生成场景;删除不可恢复。</p>
   </section>
 
   <section class="panel" id="tab-config">

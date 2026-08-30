@@ -1413,9 +1413,13 @@ async def main():
     assert modes <= {"active", "passive"}
     ok += 1; print(f"✓ 当日计划生成({len(plan)}项: {sorted(kinds)})")
 
-    # 3.5.1 每日重置的体力回复量可配置(同日重复调用,不扰动当日计划)
+    # 3.5.1 每日重置的体力回复量可配置(同日重复调用,不扰动当日计划;
+    #        临时关掉人口/设施/区域流转的随机性,保证后续 NPC 名单类断言确定性)
     day0 = game._day_key()
     stamina_before = db.get_char("g1", "u1").stamina  # 还原用,避免影响后续行动测试
+    _noop = lambda *_a, **_k: None
+    _turnovers = (game._npc_turnover, game._infra_turnover, game._zones_turnover)
+    game._npc_turnover, game._infra_turnover, game._zones_turnover = _noop, _noop, _noop
     c = db.get_char("g1", "u1"); c.stamina = 10
     db.upsert_char(c)
     game.cfg = lambda k, d=None: {**CFG, "daily_stamina_recovery": 100}.get(k, d)
@@ -1429,6 +1433,7 @@ async def main():
     c = db.get_char("g1", "u1"); c.stamina = stamina_before  # 还原体力
     db.upsert_char(c)
     game.cfg = lambda k, d=None: CFG.get(k, d)
+    game._npc_turnover, game._infra_turnover, game._zones_turnover = _turnovers
     ok += 1; print("✓ 每日体力回复可配置(100=回满 / 0=不回,默认 40)")
 
     # 3.6 被动事件:埋伏笔 → 群消息引爆(冲着说话者来)

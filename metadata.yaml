@@ -2,6 +2,6 @@ name: astrbot_plugin_ocverse
 display_name: 分身的世界 · OC养成与世界穿越
 desc: 把群聊变成一个会变动的世界——每人创造一个自定义 OC 分身(性格/背景/头像上传),在群世界里生活:每天随机事件、与群友/NPC 互动、小概率世界变动(全员穿越,可用自设世界或 LLM 自动生成)、记忆系统与轻量语义向量检索。纯服务端 Pillow 渲染 IM 聊天卡片,无桌面/无浏览器可用,适配低性能 NAS Docker。
 author: morinoyuki
-version: 1.0.0
+version: 1.2.1
 short_desc: 群聊 OC 养成 · 世界变动与穿越
 repo: https://github.com/morinoyuki/astrbot_plugin_ocverse

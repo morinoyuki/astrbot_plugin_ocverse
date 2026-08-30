@@ -88,9 +88,15 @@ def _clamp_effects(e: dict) -> dict:
     if not isinstance(e, dict):
         return {}
     out = {}
-    for k in ("stamina", "mood", "gold", "exp"):
+    for k in ("stamina", "mood", "gold", "exp", "hp"):
         if k in e:
             out[k] = _clamp(e[k], -100, 100)
+    rep = e.get("reputation")
+    if rep not in (None, ""):
+        try:
+            out["reputation"] = _clamp(rep, -15, 15)
+        except (TypeError, ValueError):
+            pass
     attrs = e.get("attrs") if isinstance(e.get("attrs"), dict) else {}
     ka = {k: _clamp(attrs.get(k, 0), -10, 10) for k, _ in ATTRS}
     if any(v != 0 for v in ka.values()):
@@ -102,6 +108,11 @@ def _clamp_effects(e: dict) -> dict:
 class BrainResult:
     ok: bool
     data: dict
+
+
+# 剧情权重的字数/对话轮上限(结算侧截断,与 prompts.story_weight_line 呼应)
+NARR_CAPS = {"normal": 320, "major": 640, "climax": 1150}
+DLG_LIMITS = {"normal": 6, "major": 10, "climax": 16}
 
 
 class Brain:
@@ -171,14 +182,74 @@ class Brain:
 
     @staticmethod
     def _norm_mainline(d: dict) -> list:
+        from . import config as C
+
         out = []
-        for i, m in enumerate((d.get("mainline") or [])[:8]):
+        for i, m in enumerate((d.get("mainline") or d.get("stages") or [])[:12]):
             if not isinstance(m, dict) or not (m.get("stage") or ""):
                 continue
-            out.append({
+            item = {
                 "stage": str(m.get("stage") or "")[:12],
                 "desc": str(m.get("desc") or "")[:90],
                 "done": bool(m.get("done")),
+            }
+            goal = m.get("goal") if isinstance(m.get("goal"), dict) else {}
+            gt = str(goal.get("type") or "").strip()
+            if gt in ("reputation", "quest", "defeat"):
+                try:
+                    gv = max(1, int(goal.get("value") or 0))
+                except (TypeError, ValueError):
+                    gv = 0
+                if gv:
+                    item["goal_type"] = gt
+                    item["goal_value"] = gv
+                    item["goal_note"] = C.MAINLINE_GOAL_LABEL[gt].format(v=gv)[:40]
+            out.append(item)
+        return out
+
+    @staticmethod
+    def _norm_zones(d: dict) -> list:
+        """规范化危险区域列表(上限 ZONES_MAX)。"""
+        from . import config as C
+
+        out = []
+        for z in (d.get("zones") or [])[:C.ZONES_MAX]:
+            if not isinstance(z, dict) or not str(z.get("name") or "").strip():
+                continue
+            enemies = []
+            for e in (z.get("enemies") or [])[:2]:
+                if isinstance(e, dict) and str(e.get("name") or "").strip():
+                    enemies.append({"name": str(e["name"])[:10], "desc": str(e.get("desc", ""))[:30]})
+            out.append({
+                "kind": str(z.get("kind") or "区域")[:10],
+                "name": str(z.get("name"))[:12],
+                "desc": str(z.get("desc", ""))[:60],
+                "danger": max(1, min(5, int(z.get("danger") or 1))) if str(z.get("danger") or "1").isdigit() else 1,
+                "enemies": enemies,
+                "loot": [str(x)[:10] for x in (z.get("loot") or [])[:3] if str(x).strip()],
+            })
+        return out
+
+    @staticmethod
+    def _norm_heal_items(d: dict) -> list:
+        """规范化世界治疗物品(3 档)。"""
+        out = []
+        for h in (d.get("heal_items") or [])[:4]:
+            if not isinstance(h, dict) or not str(h.get("name") or "").strip():
+                continue
+            try:
+                heal = max(10, min(200, int(h.get("heal") or 30)))
+            except (TypeError, ValueError):
+                heal = 30
+            try:
+                price = max(10, min(500, int(h.get("price") or heal)))
+            except (TypeError, ValueError):
+                price = heal
+            out.append({
+                "name": str(h.get("name"))[:10],
+                "note": str(h.get("note", ""))[:24],
+                "price": price,
+                "heal": heal,
             })
         return out
 
@@ -239,6 +310,24 @@ class Brain:
                 return BrainResult(True, {"infra": self._norm_infra(d2)})
         return BrainResult(False, {"infra": []})
 
+    async def regen_zones_heals(self, *, world, material: str = "") -> BrainResult:
+        """管理员:重新生成世界的危险区域与治疗物品(贴合世界观,避开旧名)。"""
+        sys = self.style
+        user = prompts.regen_zones_heals(world)
+        user = self._with_material(user, material)
+        d = await self._ask_json(sys, user, use_tools=True)
+        zones = self._norm_zones(d) if isinstance(d, dict) else []
+        heals = self._norm_heal_items(d) if isinstance(d, dict) else []
+        if len(zones) >= 2 and len(heals) >= 2:
+            return BrainResult(True, {"zones": zones, "heal_items": heals})
+        # 数量不足:带纠正提示重试一次
+        d2 = await self._ask_json(sys, user + prompts.ZONES_HEALS_CORRECT, use_tools=True)
+        zones2 = self._norm_zones(d2) if isinstance(d2, dict) else []
+        heals2 = self._norm_heal_items(d2) if isinstance(d2, dict) else []
+        if len(zones2) >= 2 and len(heals2) >= 2:
+            return BrainResult(True, {"zones": zones2, "heal_items": heals2})
+        return BrainResult(False, {"zones": [], "heal_items": []})
+
     async def enrich_user_world(self, name: str, desc: str, material: str = "") -> BrainResult:
         """用户自设世界落地时补全细节(失败也能用原始描述)。"""
         sys = self.style
@@ -277,6 +366,8 @@ class Brain:
             "event_ideas": [str(x)[:40] for x in (d.get("event_ideas") or [])][:6],
             "infra": self._norm_infra(d),
             "mainline": self._norm_mainline(d),
+            "zones": self._norm_zones(d),
+            "heal_items": self._norm_heal_items(d),
             "source": source,
         }
 
@@ -300,6 +391,9 @@ class Brain:
             {"stage": "旧物现形", "desc": "灯塔下捡到一件不该存在的东西,顺着它查下去。"},
             {"stage": "钟声十三", "desc": "钟楼的第十三声钟响,据说会把人领到雾散之后的地方。"},
         ])
+        from . import config as C
+        w.setdefault("zones", [dict(z) for z in C.DEFAULT_ZONES[:3]])
+        w.setdefault("heal_items", [dict(h) for h in C.DEFAULT_HEAL_ITEMS])
         w.setdefault("plots", [
             {"kind": "小屋", "name": "转角小屋", "desc": "石板路尽头、旧灯塔能望见的那间", "price": 200},
             {"kind": "平房", "name": "街边平房", "desc": "紧挨着港口集市的一间", "price": 400},
@@ -409,13 +503,15 @@ class Brain:
 
     async def resolve_event(self, *, world, char=None, event: dict, choice_idx: int,
                             previous: list[str] | None = None,
-                        state_note: str = "", material: str = "") -> BrainResult:
+                        state_note: str = "", material: str = "",
+                        heal_note: str = "") -> BrainResult:
         """结算一次选择。char=None(群事件)时叙述群体结果。
-        state_note: 若角色当前被困,提示本次抉择可脱困;输出 state 施加特殊状态 / state_lift 解除。"""
+        state_note: 若角色当前被困,提示本次抉择可脱困;输出 state 施加特殊状态 / state_lift 解除。
+        heal_note: 角色生命与背包治疗物品提示(供 LLM 在剧情中自然使用)。"""
         sys = self.style
         user = prompts.resolve_event(
             world=world, char=char, event=event, choice_idx=choice_idx,
-            state_note=state_note, previous=previous)
+            state_note=state_note, previous=previous, heal_note=heal_note)
         user = self._with_material(user, material)
         d = await self._ask_fixed_dialogues(
             sys, user,
@@ -439,6 +535,13 @@ class Brain:
                 },
             )
         return BrainResult(False, dict(FB_RESOLVE))
+
+    async def mainline_echo(self, *, world, char, stage: dict, ctx: str) -> BrainResult:
+        """主线回响:日常结算后小概率生成一段主线伏笔/呼应叙述(不改任何数值)。"""
+        d = await self._ask_json(self.style, prompts.mainline_echo(world=world, char=char, stage=stage, ctx=ctx))
+        if d and d.get("narration"):
+            return BrainResult(True, {"narration": str(d["narration"])[:200]})
+        return BrainResult(False, {})
 
     async def resolve_life_event(self, *, world, chars, event: dict, choice_idx: int,
                                  rels: str = "", material: str = "") -> BrainResult:
@@ -468,14 +571,16 @@ class Brain:
     async def resolve_interaction(self, *, world, a, b=None, npc=None, mode: str,
                                   detail: str, rel_score: int, rel_stage: str = "",
                                   previous: list[str] | None = None,
-                                  state_note: str = "", material: str = "") -> BrainResult:
+                                  state_note: str = "", material: str = "",
+                                  rep_note: str = "") -> BrainResult:
         from .config import rel_label
 
         sys = self.style
         rel = rel_stage or rel_label(rel_score)
         user = prompts.resolve_interaction(
             world=world, a=a, b=b, npc=npc, mode=mode, detail=detail,
-            rel_score=rel_score, rel_stage=rel, state_note=state_note, previous=previous)
+            rel_score=rel_score, rel_stage=rel, state_note=state_note, previous=previous,
+            rep_note=rep_note)
         user = self._with_material(user, material)
         counterpart = b.name if b else (str(npc.get("name", "")) if npc else "")
         d = await self._ask_fixed_dialogues(
@@ -526,16 +631,19 @@ class Brain:
 
     # ════════════════ 主动行动(练习/健身/打怪/冒险)════════════════
     async def resolve_mainline(self, *, world, char, stage: dict,
-                               material: str = "") -> BrainResult:
-        """结算世界主线一小节:角色推进这一步,LLM 写出进展与结果。"""
+                               material: str = "", goal_note: str = "",
+                               weight: str = "major") -> BrainResult:
+        """结算世界主线一小节:角色推进这一步,LLM 写出进展与结果。
+        weight: major=关键节点(默认), climax=篇章终章决战。"""
         sys = self.style
-        user = prompts.resolve_mainline(world=world, char=char, stage=stage)
+        user = prompts.resolve_mainline(world=world, char=char, stage=stage, goal_note=goal_note,
+                                        weight=weight)
         user = self._with_material(user, material)
-        d = await self._ask_fixed_dialogues(sys, user, limit=3)
+        d = await self._ask_fixed_dialogues(sys, user, limit=DLG_LIMITS.get(weight, 10))
         if d and d.get("narration"):
             return BrainResult(True, {
-                "narration": str(d["narration"])[:280],
-                "dialogues": self._norm_dialogues(d.get("dialogues"), 3),
+                "narration": str(d["narration"])[:NARR_CAPS.get(weight, 640)],
+                "dialogues": self._norm_dialogues(d.get("dialogues"), DLG_LIMITS.get(weight, 10)),
                 "effects": _clamp_effects(d.get("effects") or {}),
                 "memory": str(d.get("memory", ""))[:120],
             })
@@ -543,6 +651,64 @@ class Brain:
             "narration": f"「{stage.get('stage','')}」有了进展——但路还长,先记下这一步。",
             "dialogues": [], "effects": {"exp": 5, "mood": 2},
         })
+
+    async def gen_epilogue(self, *, world) -> BrainResult:
+        """主线全篇完结后续写『尾声』新篇章:过渡叙述 + 2~4 个新小节(可带 goal)。"""
+        d = await self._ask_json(self.style, prompts.gen_epilogue(world=world))
+        if d and (d.get("stages") or d.get("narration")):
+            stages = self._norm_mainline({"mainline": d.get("stages") or []})
+            return BrainResult(True, {
+                "narration": str(d.get("narration") or "旧篇章落幕,新的暗流已在世界深处涌动。")[:300],
+                "stages": stages,
+            })
+        return BrainResult(False, {"narration": "", "stages": []})
+
+    # ════════════════ 远征系统 ════════════════
+    async def expedition_offer(self, *, world, char, zone: dict, issuer: str,
+                               teammates: list[str], duration_h: int, rate: int) -> BrainResult:
+        """远征委托布告(发布方/同伴由系统按世界观给定,布告以其口吻撰写)。"""
+        d = await self._ask_json(self.style, prompts.expedition_offer(
+            world=world, char=char, zone=zone, issuer=issuer,
+            teammates=teammates, duration_h=duration_h, rate=rate))
+        if d and d.get("title") and d.get("briefing"):
+            return BrainResult(True, {
+                "title": str(d["title"])[:14],
+                "briefing": str(d["briefing"])[:240],
+                "teaser": str(d.get("teaser", ""))[:20],
+            })
+        return BrainResult(False, {})
+
+    async def expedition_report(self, *, world, char, exp: dict, phase: str,
+                                supplies_note: str = "") -> BrainResult:
+        """远征途中的剧情片段(120~220字 + 队友对话1~3轮)。"""
+        d = await self._ask_fixed_dialogues(
+            self.style,
+            prompts.expedition_report(world=world, char=char, exp=exp, phase=phase,
+                                      supplies_note=supplies_note),
+            limit=4)
+        if d and d.get("narration"):
+            return BrainResult(True, {
+                "narration": str(d["narration"])[:320],
+                "dialogues": self._norm_dialogues(d.get("dialogues"), 4),
+            })
+        return BrainResult(False, {})
+
+    async def expedition_settle(self, *, world, char, exp: dict, outcome: str,
+                                reward_line: str) -> BrainResult:
+        """远征结算:成功=climax(600~1000字/10~16轮),失败=major(300~600字/6~10轮)。"""
+        weight = "climax" if outcome == "success" else "major"
+        d = await self._ask_fixed_dialogues(
+            self.style,
+            prompts.expedition_settle(world=world, char=char, exp=exp, outcome=outcome,
+                                      reward_line=reward_line),
+            limit=DLG_LIMITS[weight])
+        if d and d.get("narration"):
+            return BrainResult(True, {
+                "narration": str(d["narration"])[:NARR_CAPS[weight]],
+                "dialogues": self._norm_dialogues(d.get("dialogues"), DLG_LIMITS[weight]),
+                "memory": str(d.get("memory", ""))[:120],
+            })
+        return BrainResult(False, {})
 
     async def facility_event(self, *, world, char, facility: dict, action: str,
                              memories: list[str] | None = None, material: str = "") -> BrainResult:
@@ -609,13 +775,16 @@ class Brain:
 
     async def resolve_action(self, *, world, char, action_name: str, detail: str,
                              kind: str = "safe", memories: list[str] | None = None,
-                             state_note: str = "", material: str = "") -> BrainResult:
+                             state_note: str = "", material: str = "",
+                             heal_note: str = "", zone_note: str = "") -> BrainResult:
         """结算一次玩家主动行动。kind: safe | risk(风险型可失败/受伤)。
-        state_note: 若角色被困,本次『冒险』即脱困尝试,由 LLM 判定是否成功脱困。"""
+        state_note: 若角色被困,本次『冒险』即脱困尝试,由 LLM 判定是否成功脱困。
+        heal_note: 角色生命与背包治疗物品提示;zone_note: 讨伐区域锁定(打怪)。"""
         sys = self.style
         user = prompts.resolve_action(
             world=world, char=char, action_name=action_name, detail=detail,
-            kind=kind, memories=memories, state_note=state_note)
+            kind=kind, memories=memories, state_note=state_note, heal_note=heal_note,
+            zone_note=zone_note)
         user = self._with_material(user, material)
         d = await self._ask_fixed_dialogues(sys, user, limit=4)
         if d and d.get("narration"):
@@ -639,11 +808,12 @@ class Brain:
     async def npc_chat(self, *, world, npc: dict, char, action: str,
                        memories: list[str] | None = None,
                        previous: list[str] | None = None,
-                       state_note: str = "", material: str = "") -> BrainResult:
+                       state_note: str = "", material: str = "",
+                       rep_note: str = "") -> BrainResult:
         sys = self.style
         user = prompts.npc_chat(
             world=world, npc=npc, char=char, action=action,
-            memories=memories, state_note=state_note, previous=previous)
+            memories=memories, state_note=state_note, previous=previous, rep_note=rep_note)
         counterpart = str(npc.get("name", ""))
         user = self._with_material(user, material)
         d = await self._ask_fixed_dialogues(sys, user, counterpart=counterpart, limit=6)
@@ -877,7 +1047,7 @@ class Brain:
     async def finish_quest(self, *, world, char, quest: str, giver: str = "", place: str = "",
                            steps_desc: list[str] | None = None,
                            memories: list[str] | None = None,
-                        material: str = "") -> BrainResult:
+                        material: str = "", rep_note: str = "") -> BrainResult:
         """向委托人交付任务:交付场景 + 委托人的反应 + 很小的奖励(数值克制)。
         出场人物锁死:只允许角色与委托人(组织则由当值代理人出面),严禁他人乱入。"""
         giver = (giver or "委托人").strip()
@@ -885,13 +1055,13 @@ class Brain:
         sys = self.style
         user = prompts.finish_quest(
             world=world, char=char, quest=quest, giver=giver, place=place,
-            steps_desc=steps_desc, memories=memories)
+            steps_desc=steps_desc, memories=memories, rep_note=rep_note)
         user = self._with_material(user, material)
         d = await self._ask_fixed_dialogues(sys, user, counterpart=giver, limit=3)
         if d and d.get("narration"):
             eff_in = d.get("effects") if isinstance(d.get("effects"), dict) else {}
             eff = {}
-            for k, lo, hi in (("exp", 0, 15), ("gold", 0, 25), ("mood", 0, 5)):
+            for k, lo, hi in (("exp", 0, 15), ("gold", 0, 25), ("mood", 0, 5), ("reputation", 0, 8)):
                 try:
                     eff[k] = max(lo, min(hi, int(round(float(eff_in.get(k) or 0)))))
                 except (TypeError, ValueError):
@@ -965,24 +1135,24 @@ class Brain:
         sys = self.style
         user = prompts.confess(world=world, a=a, b=b, score=score, outcome=outcome)
         user = self._with_material(user, material)
-        d = await self._ask_fixed_dialogues(sys, user, counterpart=b.name, limit=6)
+        d = await self._ask_fixed_dialogues(sys, user, counterpart=b.name, limit=DLG_LIMITS["major"])
         if d and d.get("narration"):
-            return BrainResult(True, {"narration": str(d["narration"])[:300],
-                                      "dialogues": self._norm_dialogues(d.get("dialogues"), 6)})
+            return BrainResult(True, {"narration": str(d["narration"])[:NARR_CAPS["major"]],
+                                      "dialogues": self._norm_dialogues(d.get("dialogues"), DLG_LIMITS["major"])})
         return BrainResult(False, {"narration": "话到了嘴边,终究是说出口了。结果如何,彼此心里都清楚。",
                                    "dialogues": [{"speaker": a.name, "text": "那个……我喜欢你。"},
                                                  {"speaker": b.name, "text": "……让我想想。"}]})
 
     async def propose(self, *, world, a, b, score: int,
                         material: str = "") -> BrainResult:
-        """求婚/缔结伴侣场景(条件已在游戏层校验,必定成功)。"""
+        """求婚/缔结伴侣场景(重要剧情:300~600字/6~10轮;条件已在游戏层校验,必定成功)。"""
         sys = self.style
         user = prompts.propose(world=world, a=a, b=b, score=score)
         user = self._with_material(user, material)
-        d = await self._ask_fixed_dialogues(sys, user, counterpart=b.name, limit=6)
+        d = await self._ask_fixed_dialogues(sys, user, counterpart=b.name, limit=DLG_LIMITS["major"])
         if d and d.get("narration"):
-            return BrainResult(True, {"narration": str(d["narration"])[:300],
-                                      "dialogues": self._norm_dialogues(d.get("dialogues"), 6)})
+            return BrainResult(True, {"narration": str(d["narration"])[:NARR_CAPS["major"]],
+                                      "dialogues": self._norm_dialogues(d.get("dialogues"), DLG_LIMITS["major"])})
         return BrainResult(False, {"narration": "在那盏灯下,戒指被稳稳戴上。世界仿佛安静了一瞬,然后是彼此的笑声。",
                                    "dialogues": [{"speaker": a.name, "text": "(单膝跪地)嫁给我,好不好?"},
                                                  {"speaker": b.name, "text": "(哽咽)……好。"}]})
@@ -1068,6 +1238,23 @@ FB_QUESTS = {
         {"text": "向一位NPC打听一件小事", "hint": "聊上几句就算数"},
         {"text": "捡一件有趣的小东西", "hint": "路边的、海边的都行"},
     ],
+}
+
+FB_EXP_OFFER = {
+    "title": "远征令",
+    "briefing": "征召勇毅之士,向险地进发:清剿威胁、带回见闻与战利品。行程有险,量力而行。",
+    "teaser": "酬金与战利品丰厚",
+}
+
+FB_EXP_REPORT = {
+    "narration": "队伍在艰难中推进:绕开哨卫,补齐饮水,轮流守夜。前方仍未到头,但每个人都在往前走。",
+    "dialogues": [],
+}
+
+FB_EXP_SETTLE = {
+    "narration": "远征落幕。无论成败,这一程都刻进了每个人的骨头里——幸存者带着故事与伤疤回到了熟悉的地方。",
+    "dialogues": [],
+    "memory": "",
 }
 
 FB_QUEST_DONE = {

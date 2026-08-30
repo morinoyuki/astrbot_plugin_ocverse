@@ -228,6 +228,215 @@ ATTR_HINTS = {
 
 STAMINA_MAX = 100
 MOOD_MAX = 100
+HP_MAX = 100
+
+# 生命值日切苏醒值:重伤昏迷者在日切时会被送到安全处(家/据点/医院)救醒到这个值
+HP_WAKEUP = 30
+# 日切自然恢复(未昏迷者)
+HP_DAILY_RECOVER = 15
+
+# 医院治疗单价(金币/点 HP),声望可折扣
+HEAL_PRICE_PER_HP = 2
+
+# 声望阶梯(分数 → 称号):NPC 对待角色的态度会随声望变化
+REP_LEVELS = [
+    (80, "家喻户晓"),
+    (50, "备受尊敬"),
+    (20, "小有名气"),
+    (0, "默默无闻"),
+    (-30, "不太受待见"),
+    (-100, "臭名昭著"),
+]
+
+def rep_level_label(score: int) -> str:
+    for th, name in REP_LEVELS:
+        if score >= th:
+            return name
+    return "默默无闻"
+
+
+# ── 世界危险区域/敌对阵营:按题材风格的模板池(每日流转、讨伐、素材获取都用它) ──
+ZONE_STYLE_PACKS = [
+    (r"修仙|仙侠|灵气|修真|道法|仙道|功法", [
+        {"kind": "秘境", "name": "落魂谷", "desc": "瘴气弥漫的谷地,灵草与妖物共生", "danger": 3,
+         "enemies": [{"name": "瘴气妖蟒", "desc": "藏于雾潭之下,吐息腐骨"}], "loot": ["瘴胆", "百年灵乳"]},
+        {"kind": "遗迹", "name": "上古剑塚", "desc": "万剑朝宗的废墟,剑灵游荡", "danger": 4,
+         "enemies": [{"name": "戾剑灵", "desc": "由陨落修士的剑意凝成"}], "loot": ["锈剑胚", "剑心碎片"]},
+        {"kind": "妖山", "name": "黑风岭", "desc": "妖魔占山为王,商旅绝迹", "danger": 2,
+         "enemies": [{"name": "黑风狼群", "desc": "趁夜劫道,巡山如风"}], "loot": ["狼妖牙", "黑风草"]},
+        {"kind": "魔渊", "name": "九幽魔渊", "desc": "上古魔修陨落之地,封印松动", "danger": 5,
+         "enemies": [{"name": "渊底魔影", "desc": "形态不定,低语勾人心魔"}], "loot": ["魔晶", "冥河沙"]},
+    ]),
+    (r"科幻|未来|机械|赛博|朋克|星际|机甲|宇宙|太空|殖民|飞艇|柴油", [
+        {"kind": "废墟带", "name": "旧城隔离区", "desc": "系统崩溃的老城区,失控机械游衷", "danger": 3,
+         "enemies": [{"name": "失控工程机兵", "desc": "把一切移动目标当施工废料清除"}], "loot": ["军用伺服电机", "合金板"]},
+        {"kind": "辐射区", "name": "反应堆禁区", "desc": "堆芯泄漏,辐射与变异并存", "danger": 4,
+         "enemies": [{"name": "辐射变异体", "desc": "皮肤下透出幽绿微光"}], "loot": ["辐射核心", "变异组织样本"]},
+        {"kind": "敌对帮派", "name": "锈牙帮地盘", "desc": "盘踞码头南区的武装帮派,过路要交买路财", "danger": 2,
+         "enemies": [{"name": "锈牙帮打手", "desc": "铁管与义体拳套,欺软怕硬"}], "loot": ["帮派令牌", "走私军用芯片"]},
+        {"kind": "深空残骸", "name": "坠舰坟场", "desc": "旧战争坠落的巡洋舰残骸,信号时断时续", "danger": 5,
+         "enemies": [{"name": "舰载防御AI", "desc": "仍在执行三百年前的拦截协议"}], "loot": ["舰载黑匣子", "稀有超导线圈"]},
+    ]),
+    (r"奇幻|魔法|剑与魔法|异世界|魔幻|精灵|恶龙|魔物|冒险者", [
+        {"kind": "森林", "name": "低语森林", "desc": "树影婆娑,魔物在苔藓下窈竒", "danger": 2,
+         "enemies": [{"name": "树精", "desc": "伪装成老树,偷袭迷路者"}], "loot": ["月苔草", "精栟木枝"]},
+        {"kind": "地下城", "name": "碎石地穴", "desc": "古代文明的地底迷宫,三层以下无人归来", "danger": 3,
+         "enemies": [{"name": "哥布林採掘队", "desc": "成群结队,贪婪而狡猾"}], "loot": ["粗糙晶簇", "地精炸药"]},
+        {"kind": "龙巢", "name": "灰烬龙谷", "desc": "火山口里的巨龙领地,焦土千里", "danger": 5,
+         "enemies": [{"name": "幼年火龙", "desc": "雖然年幼,喷吐的火焰足以熔铁"}], "loot": ["龙鳞", "火龙逆鳞碎片"]},
+        {"kind": "邪教领地", "name": "暗月祭坛", "desc": "邪教徒在月圆之夜聚集的荒村", "danger": 4,
+         "enemies": [{"name": "暗月信徒", "desc": "面容藏在闭月面具后"}], "loot": ["邪教典籍残页", "暗月徽记"]},
+    ]),
+    (r"武侠|江湖|武林|镖局|侠客", [
+        {"kind": "匪寨", "name": "黑风寨", "desc": "盘踞山道的马匪,劫镖不劫穷", "danger": 2,
+         "enemies": [{"name": "黑风寨霨众", "desc": "朴刀麻鞋,呼哨为号"}], "loot": ["抢来的镖银", "山寨令牌"]},
+        {"kind": "邪派", "name": "幽冥教坛口", "desc": "江湖闻风丧胆的邪教分坛", "danger": 4,
+         "enemies": [{"name": "幽冥教杀手", "desc": "行事诡谲,专猎落单侠客"}], "loot": ["幽冥令", "毒经残卷"]},
+        {"kind": "荒林", "name": "野狼林", "desc": "官道旁的密林,狼群出没", "danger": 1,
+         "enemies": [{"name": "野狼群", "desc": "饥饿的野狼,单独不足为惧"}], "loot": ["狼皮", "狼牙"]},
+        {"kind": "禁地", "name": "剑冢遗谷", "desc": "百年前武林大战的古战场,兵剘森然", "danger": 5,
+         "enemies": [{"name": "守塚傀儡", "desc": "机关术驱动的铁甲傀儡"}], "loot": ["古剑残片", "玄铁砂"]},
+    ]),
+    (r"末世|废土|丧尸|生存|辐射|灾变|避难", [
+        {"kind": "废墟区", "name": "旧城商场废墟", "desc": "坍塌的商场,拾荒者与危险共存", "danger": 2,
+         "enemies": [{"name": "徘徊者", "desc": "听声辨位的丧尸,成群游荡"}], "loot": ["罐头", "旧电池"]},
+        {"kind": "感染区", "name": "红雾隔离带", "desc": "疫情爆发的封锁区,红雾永不散", "danger": 4,
+         "enemies": [{"name": "变异感染者", "desc": "红雾催生的畸变巨物"}], "loot": ["变异血样", "抗生素"]},
+        {"kind": "匪帮", "name": "剃刀帮营地", "desc": "公路匪帮,把幸存者当资源", "danger": 3,
+         "enemies": [{"name": "剃刀帮掠芬者", "desc": "改装机车与自制利刃"}], "loot": ["弹药", "车用零件"]},
+        {"kind": "禁区", "name": "归零深坑", "desc": "灾变原点,物理法则尚不稳定的深渊", "danger": 5,
+         "enemies": [{"name": "畸变体Alpha", "desc": "灾变之眼注视下的产物"}], "loot": ["奇点碎片", "军用档案"]},
+    ]),
+]
+
+# 未命中题材时的兑底危险区域
+DEFAULT_ZONES = [
+    {"kind": "野外", "name": "雾外荒地", "desc": "镇子外雾最浓的荒地,夜里不太平", "danger": 2,
+     "enemies": [{"name": "雾中影", "desc": "形状模糊,却在追踪行人"}], "loot": ["夜光苔", "旧硬币"]},
+    {"kind": "遗迹", "name": "超古代遗迹", "desc": "远远超出当今文明理解的地底造物", "danger": 5,
+     "enemies": [{"name": "遗迹守望构装体", "desc": "仍在执行万年前的守护协议"}], "loot": ["未知合金", "发光碎片"]},
+    {"kind": "森林", "name": "暗松林", "desc": "松涛如浪,树影里藏着眼睛", "danger": 1,
+     "enemies": [{"name": "野猪群", "desc": "被惊扰时横冲直撞"}], "loot": ["松露", "硬木枝"]},
+    {"kind": "洞穴", "name": "潮鸣洞窟", "desc": "海潮灌入的地底溶洞,深处有异响", "danger": 3,
+     "enemies": [{"name": "洞居蟹魔", "desc": "甲壳坚硬,钳力惊人"}], "loot": ["珍珠", "蓝色珊瑚"]},
+]
+
+ZONES_MAX = 8    # 每世界危险区域上限
+
+# 主线阶段门槛说明(注入 LLM / 展示用)
+MAINLINE_GOAL_LABEL = {
+    "reputation": "推进者在本世界的声望≥{v}",
+    "quest": "全群累计完成任务≥{v}件",
+    "defeat": "全群累计讨伐≥{v}次",
+}
+
+# ── 剧情权重:重要剧情(major)/高潮剧情(climax)的篇幅与对话规格 ──
+# normal = 各场景默认篇幅;major = 主线关键节点/告白求婚/远征凯旋前的恶战;
+# climax = 篇章高潮(主线终章决战、远征决战大凯旋)
+STORY_WEIGHTS = {
+    "major":  {"narr": "300~600", "dlg": "6~10", "dlg_cap": 10, "narr_cap": 640},
+    "climax": {"narr": "600~1000", "dlg": "10~16", "dlg_cap": 16, "narr_cap": 1150},
+}
+
+
+def story_weight_line(weight: str) -> str:
+    """按权重给 LLM 的篇幅要求说明(normal 返回空串走各场景默认)。"""
+    if weight == "climax":
+        return ("\n【高潮剧情】这是篇章级的高潮时刻(终章决战/大凯旋):叙述 600~1000 字,可分层推进——"
+                "前奏蓄势→多回合交锋→逆转与牺牲→尘埃落定;dialogues 10~16 轮,多名角色轮番开口、"
+                "攻防往复、呐喊与诀别,写出史诗感;但克制不堆砌,每个回合都要有信息或情绪推进。")
+    if weight == "major":
+        return ("\n【重要剧情】这是主线关键节点/重要转折:叙述 300~600 字,分层展开——"
+                "铺陈→推进→转折→落点;dialogues 6~10 轮,人物多回合交锋与情感拉扯,信息量大而有推进。")
+    return ""
+
+
+def story_spec(weight: str, base_narr: str, base_dlg: str) -> tuple[str, str]:
+    """按权重返回 (叙述字数区间, 对话轮数区间),未命中权重时用场景默认。"""
+    w = STORY_WEIGHTS.get(weight)
+    if not w:
+        return base_narr, base_dlg
+    return w["narr"], w["dlg"]
+
+
+# ── 远征系统 ──
+EXPEDITION_REPORT_HOURS = 2     # 远征期间每几小时播报一次剧情片段(可被插件配置覆盖)
+# 远征时长(小时)按区域危险度分档:几小时到几天
+EXPEDITION_DURATIONS = {1: (2, 5), 2: (3, 8), 3: (6, 16), 4: (12, 30), 5: (24, 72)}
+# 远征队友人数(从持久生活角色/世界NPC中挑,不足时由 LLM 补临时同伴)
+EXPEDITION_TEAM_MIN = 2
+EXPEDITION_TEAM_MAX = 3
+
+
+def zone_style_for(genre: str, desc: str = "") -> list[dict]:
+    """按世界题材匹配危险区域模板包(未命中用兑底)。"""
+    import re
+
+    text = f"{genre or ''} {desc or ''}"
+    for pattern, pack in ZONE_STYLE_PACKS:
+        if re.search(pattern, text):
+            return pack
+    return DEFAULT_ZONES
+
+
+# ── 世界治疗物品:按题材风格的模板池(世界生成兑底/商店售卖/掉落命名统一) ──
+HEAL_STYLE_PACKS = [
+    (r"修仙|仙侠|灵气|修真|道法|仙道|功法", [
+        {"name": "回春散", "note": "敷上即愈,恢复30点生命", "price": 30, "heal": 30},
+        {"name": "凝元丹", "note": "灵力温养,恢复60点生命", "price": 65, "heal": 60},
+        {"name": "九转还魂丹", "note": "吊命奇药,恢复100点生命", "price": 130, "heal": 100},
+    ]),
+    (r"科幻|未来|机械|赛博|朋克|星际|机甲|宇宙|太空|殖民|飞艇|柴油", [
+        {"name": "创口凝胶", "note": "快速封闭伤口,恢复30点生命", "price": 30, "heal": 30},
+        {"name": "急救针剂", "note": "军用急救,恢复60点生命", "price": 65, "heal": 60},
+        {"name": "纳米修复剂", "note": "体内修复群,恢复100点生命", "price": 130, "heal": 100},
+    ]),
+    (r"奇幻|魔法|剑与魔法|异世界|魔幻|精灵|恶龙|魔物|冒险者", [
+        {"name": "治疗药水", "note": "微光的红色药剂,恢复30点生命", "price": 30, "heal": 30},
+        {"name": "圣愈药剂", "note": "教会祝福,恢复60点生命", "price": 65, "heal": 60},
+        {"name": "贤者之滴", "note": "传说中的万能药,恢复100点生命", "price": 130, "heal": 100},
+    ]),
+    (r"武侠|江湖|武林|镖局|侠客", [
+        {"name": "金创药", "note": "行走江湖必备,恢复30点生命", "price": 30, "heal": 30},
+        {"name": "续命丹", "note": "名贵丹药,恢复60点生命", "price": 65, "heal": 60},
+        {"name": "百年老参", "note": "吊命圣品,恢复100点生命", "price": 130, "heal": 100},
+    ]),
+    (r"末世|废土|丧尸|生存|辐射|灾变|避难", [
+        {"name": "绷带包", "note": "简单包扎,恢复30点生命", "price": 30, "heal": 30},
+        {"name": "抗生素", "note": "防感染救命药,恢复60点生命", "price": 65, "heal": 60},
+        {"name": "急救医疗包", "note": "战前军规品质,恢复100点生命", "price": 130, "heal": 100},
+    ]),
+]
+
+# 未命中题材时的兑底治疗物品
+DEFAULT_HEAL_ITEMS = [
+    {"name": "伤药", "note": "恢复30点生命", "price": 30, "heal": 30},
+    {"name": "特效药", "note": "恢复60点生命", "price": 65, "heal": 60},
+    {"name": "万灵药", "note": "恢复100点生命", "price": 130, "heal": 100},
+]
+
+
+def heal_style_for(genre: str, desc: str = "") -> list[dict]:
+    """按世界题材匹配治疗物品模板包(未命中用兑底)。"""
+    import re
+
+    text = f"{genre or ''} {desc or ''}"
+    for pattern, pack in HEAL_STYLE_PACKS:
+        if re.search(pattern, text):
+            return pack
+    return DEFAULT_HEAL_ITEMS
+
+
+# 医疗性质设施识别关键词(医院泛指这类设施)
+def is_medical_infra(it: dict) -> bool:
+    blob = (str(it.get("kind") or "") + str(it.get("name") or ""))
+    return any(k in blob for k in ("医", "药", "诊", "疗", "病", "医院", "诊所", "药铺", "药房", "药庐", "医务"))
+
+
+def is_shop_infra(it: dict) -> bool:
+    """可售卖治疗物品的店铺类设施(补给/杂货/集市等)。"""
+    blob = (str(it.get("kind") or "") + str(it.get("name") or ""))
+    return any(k in blob for k in ("店", "铺", "市", "集", "商", "杂货", "货", "拍卖", "黑市"))
 
 # 经验曲线: 升到下一级所需
 def exp_need(level: int) -> int:

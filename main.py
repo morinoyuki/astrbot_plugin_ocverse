@@ -132,7 +132,7 @@ def _parse_docstring_tool(docstring: str) -> tuple[str, dict]:
 
 
 AUTHOR = "morinoyuki"
-VERSION = "1.0.0"
+VERSION = "1.2.1"
 PLUGIN_NAME = "astrbot_plugin_ocverse"
 REPO = "https://github.com/morinoyuki/astrbot_plugin_ocverse"
 
@@ -580,6 +580,11 @@ class OcversePlugin(Star):
                     msg, infra = await plugin.game.regen_infra(gid, world_id=world_id)
                 return {"message": msg, "infra": infra}
 
+            async def regen_content(self_, gid: str, world_id: int | None = None) -> dict:
+                async with plugin._glock(gid):
+                    msg, zones, heals = await plugin.game.regen_zones_heals(gid, world_id=world_id)
+                return {"message": msg, "zones": zones, "heal_items": heals}
+
         return _Ops()
 
     async def terminate(self):
@@ -659,6 +664,17 @@ class OcversePlugin(Star):
                 logger.warning(f"ocverse: 群{gid}下班结算失败: {e}")
         if work_views:
             await self._broadcast(work_views)
+        # 远征:到点播报剧情片段/归来结算(每几小时一段,归来是高潮大结算)
+        exp_views = []
+        for g in self.db.list_groups():
+            gid = g["gid"]
+            try:
+                async with self._glock(gid):
+                    exp_views += await self.game._sweep_expeditions(gid)
+            except Exception as e:
+                logger.warning(f"ocverse: 群{gid}远征扫描失败: {e}")
+        if exp_views:
+            await self._broadcast(exp_views)
 
     # ── 知识库定时采集:每天每组入库一条素材(联网/LLM),供所有生成功能注入 ──
     async def _kb_maintenance(self):
@@ -761,8 +777,11 @@ class OcversePlugin(Star):
         # 角色事件只能由本人消息引爆:无分身的群友发言不触发,
         # 事件保持待命等本人发言;绝不把别人的角色卷进来
         # (引爆过程不发「请稍候」类提示,事件卡生成后直接送达)
-        if not self.db.get_char(gid, self._uid(event)):
+        _speaker = self.db.get_char(gid, self._uid(event))
+        if not _speaker:
             return
+        if self.game._on_expedition(_speaker):
+            return  # 远征途中不在群世界"现场",事件伏笔等TA归来再说
         try:
             async with self._glock(gid):
                 # 二次确认(等待锁期间可能已被别的消息引爆)
@@ -917,7 +936,7 @@ class OcversePlugin(Star):
             f"【{ch.name}】{mark} Lv{ch.level} {ch.title} · {ch.gender}",
             f"性格:{'、'.join(ch.tags or []) or '未设定'}",
             f"背景:{str(ch.backstory or '未详')[:150]}",
-            f"体力 {ch.stamina}/100 · 心情 {ch.mood}/100 · 金币 {ch.gold}",
+            f"体力 {ch.stamina}/100 · 心情 {ch.mood}/100 · 生命 {getattr(ch, 'hp', 100)}/100 · 金币 {ch.gold}",
             f"属性: {attrs}",
             f"关系:{rel_line}",
         ]
@@ -927,6 +946,13 @@ class OcversePlugin(Star):
         _st = (ch.flags or {}).get("_state")
         if isinstance(_st, dict) and (_st.get("type") or _st.get("reason")):
             lines.append(f"状态:被{_st.get('type')}困住({_st.get('reason')})")
+        if w is not None and not is_npc_uid(uid):
+            rep = self.game.db.rep_get(gid, uid, w.id)
+            lines.append(f"声望:{rep}({C.rep_level_label(rep)})")
+        items = self.db.items_list(gid, uid)
+        if items:
+            tail = f" 等{len(items)}件" if len(items) > 5 else ""
+            lines.append("背包:" + "、".join(f"{it['name']}×{it['count']}" for it in items[:5]) + tail)
         lines.append(f"所在世界:《{w.name if w else '?'}》")
         return "\n".join(lines)
 
@@ -953,6 +979,25 @@ class OcversePlugin(Star):
             tips = [str(x) for x in (v.get("tips") or [])]
             if tips:
                 parts.append("忠告:" + "、".join(tips))
+        elif t == "expedition":
+            ph = v.get("phase", "")
+            lead = {"offer": "📜 远征委托", "depart": "⚔ 出征", "report": f"⚔ 远征·{v.get('phase_name', '')} {v.get('progress', 0)}%",
+                    "return": ("🏆 远征凯旋" if v.get("outcome") == "success" else "💀 远征折戟"),
+                    "abort": "🏳 中途撤离"}.get(ph, "⚔ 远征")
+            if v.get("title"):
+                parts.append(f"{lead} · {v['title']}")
+            else:
+                parts.append(lead)
+            if v.get("narration"):
+                parts.append(str(v["narration"]).strip())
+            for d in (v.get("dialogues") or [])[:6]:
+                sp = str(d.get("speaker") or "").strip()
+                tx = str(d.get("text") or "").strip()
+                if sp and tx:
+                    parts.append(f"{sp}: {tx}")
+            chg = [str(c) for c in (v.get("changes") or [])[:8]]
+            if chg:
+                parts.append("变化:" + "、".join(chg))
         else:
             if v.get("event_title"):
                 parts.append(str(v["event_title"]).strip())
@@ -972,6 +1017,8 @@ class OcversePlugin(Star):
                 parts.append("变化:" + "、".join(chg))
             if v.get("rel_label"):
                 parts.append(f"关系:{v['rel_label']}")
+            if v.get("echo"):
+                parts.append(f"主线回响:{v['echo']}")
         return "\n".join(x for x in parts if x)
 
     def _mix_view(self, v: dict) -> list[dict]:
@@ -1017,7 +1064,7 @@ class OcversePlugin(Star):
             f"· 本群居民:{names}",
             f"· 你:{ch.name if ch else '还没有分身(直接告诉我想创建什么样的角色即可)'}",
             "· 可以直接对我说:创建/修改分身、看看世界、去某处逛逛、找某人聊天、练技能、"
-            "看看任务、买房子、去别的世界……",
+            "看看任务、买房子、去别的世界、接远征委托、买治疗药、查声望……",
             "· 图文卡片、事件抉择、传图换头像:用「/分身 帮助」看基础指令",
         ])
 
@@ -1142,6 +1189,82 @@ class OcversePlugin(Star):
         for i, it in enumerate(items, 1):
             note = f" — {it['note']}" if it.get("note") else ""
             lines.append(f"{i}. {it['name']} ×{it['count']}{note}")
+        return "\n".join(lines)
+
+    @_guard_tool
+    async def ocverse_heal(self, event: AstrMessageEvent, item_name: str = ""):
+        """治疗自己的分身:使用背包治疗物品(item_name 留空自动选),或去医院付费治疗。
+
+        Args:
+            item_name(string): 可选,要使用的治疗物品名(留空则:有药用要,没药去医院)
+        """
+        gid = self._need_gid(event)
+        uid = self._uid(event)
+        self._char_of(event)
+        async with self._glock(gid):
+            if (item_name or "").strip():
+                v = self.game.use_heal_item(gid, uid, item_name.strip())
+            else:
+                try:
+                    v = self.game.use_heal_item(gid, uid)
+                except GameError:
+                    v = self.game.heal_at_hospital(gid, uid)
+        return self._view_text(v)
+
+    @_guard_tool
+    async def ocverse_buy_item(self, event: AstrMessageEvent, item_name: str, place: str = ""):
+        """在世界的店铺/药铺/诊所购买治疗物品(声望越高折扣越大)。
+
+        Args:
+            item_name(string): 治疗物品名(用「分身 区域/设施」了解;或直接说「买治疗药」)
+            place(string): 可选,在哪家设施买(留空自动就近)
+        """
+        gid = self._need_gid(event)
+        self._char_of(event)
+        async with self._glock(gid):
+            v = self.game.buy_item(gid, self._uid(event), (item_name or "").strip(), (place or "").strip())
+        return self._view_text(v)
+
+    @_guard_tool
+    async def ocverse_show_zones(self, event: AstrMessageEvent):
+        """查看当前世界的危险区域(野外/遗迹/地下城/敌对阵营,含敌人与素材,每日变动)。"""
+        gid = self._need_gid(event)
+        zones = self.game.list_zones(gid)
+        if not zones:
+            return "当前世界没有已探明的危险区域。"
+        lines = ["当前世界的危险区域(每日不定时变动):"]
+        for z in zones:
+            stars = "★" * max(1, min(5, int(z.get("danger") or 1)))
+            en = "、".join(e.get("name", "") for e in (z.get("enemies") or []) if isinstance(e, dict))
+            loot = "、".join(z.get("loot") or [])
+            lines.append(f"· {z.get('name')}({z.get('kind', '')}) 危险度{stars} — {z.get('desc', '')}")
+            if en:
+                lines.append(f"  出没:{en}" + (f" | 素材:{loot}" if loot else ""))
+        lines.append("(打怪/讨伐会进入这些区域;击败敌人可能掉落素材与治疗物品)")
+        return "\n".join(lines)
+
+    @_guard_tool
+    async def ocverse_show_reputation(self, event: AstrMessageEvent, name: str = ""):
+        """查看分身在世界间的声望(声望高 NPC 更友好、买东西有折扣、主线门槛需要它)。"""
+        gid = self._need_gid(event)
+        uid = self._uid(event)
+        if (name or "").strip():
+            t = self._char_by_name(gid, name)
+            if t is None:
+                return f"找不到叫「{name}」的角色。"
+            uid = t.uid
+        else:
+            self._char_of(event)
+        p = self.game.rep_panel(gid, uid)
+        lines = [f"{p['char_name']} 的世界声望:"]
+        if p.get("current"):
+            c = p["current"]
+            lines.append(f"· 当前世界《{c['world']}》:{c['score']}({c['label']})")
+        for r in p.get("list", [])[:8]:
+            lines.append(f"· 《{r['world']}》:{r['score']}({r['label']})")
+        if p.get("top"):
+            top = "、".join(f"{t['name']}({t['score']})" for t in p["top"])
+            lines.append(f"当前世界声望榜:{top}")
         return "\n".join(lines)
 
     @_guard_tool
@@ -1408,14 +1531,15 @@ class OcversePlugin(Star):
         """主动行动一次:练习/健身/打怪/冒险(消耗体力,可能掉血也可能大丰收)。
 
         Args:
-            kind(string): 练习 或 健身 或 打怪 或 冒险
-            detail(string): 可选,想练什么/想做什么(冒险必填)
+            kind(string): 练习 或 健身 或 打怪(讨伐) 或 冒险
+            detail(string): 可选,想练什么/想做什么;打怪可点名危险区域或敌人(留空自动选区)
         """
         gid = self._need_gid(event)
         self._char_of(event)
         kind = (kind or "").strip()
         alias_map = {"练习": "练习", "训练": "练习", "健身": "健身", "锻炼": "健身",
-                     "打怪": "打怪", "狩猎": "打怪", "冒险": "冒险", "探索": "冒险"}
+                     "打怪": "打怪", "狩猎": "打怪", "讨伐": "打怪", "hunt": "打怪",
+                     "冒险": "冒险", "探索": "冒险"}
         act_key = alias_map.get(kind)
         if not act_key:
             return "支持的行动:练习 / 健身 / 打怪 / 冒险。"
@@ -1431,6 +1555,29 @@ class OcversePlugin(Star):
             v = self.game.work_today(gid, self._uid(event))
         if v is None:
             return "现在没有适合你打工的地方。"
+        return self._view_text(v)
+
+    @_guard_tool
+    async def ocverse_expedition(self, event: AstrMessageEvent, action: str = ""):
+        """远征系统:查看今日远征委托并接下(接下后进入数小时~数天的远征,期间无法其他操作,
+        每几小时播报剧情,归来有丰厚奖励;成功率取决于实力与补给)。
+
+        Args:
+            action(string): 可选,查看/接受/状态/放弃(留空=查看今日委托)
+        """
+        gid = self._need_gid(event)
+        uid = self._uid(event)
+        self._char_of(event)
+        act = (action or "").strip()
+        async with self._glock(gid):
+            if any(k in act for k in ("接受", "接下", "出发")):
+                v = await self.game.accept_expedition(gid, uid)
+            elif any(k in act for k in ("放弃", "逃", "撤")):
+                v = self.game.abort_expedition(gid, uid)
+            elif any(k in act for k in ("状态", "进度")):
+                return self.game.expedition_status(gid, uid)
+            else:
+                v = await self.game.ensure_expedition_offer(gid, uid)
         return self._view_text(v)
 
     @_guard_tool
@@ -1695,6 +1842,17 @@ class OcversePlugin(Star):
         yield event.plain_result("⏳ 正在重新规划世界设施…")
         async with self._glock(gid):
             msg, _infra = await self.game.regen_infra(gid)
+        yield event.plain_result(msg)
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @oc.command("重建区域", alias={"regen_zones", "重绘区域", "重建危险区域"})
+    @_guard
+    async def cmd_regen_zones(self, event: AstrMessageEvent):
+        """分身 重建区域 - 管理员让 AI 按世界观重新生成当前世界的危险区域与治疗物品"""
+        gid = self._need_gid(event)
+        yield event.plain_result("⏳ 正在重绘世界舆图(可能联网搜索),请稍候…")
+        async with self._glock(gid):
+            msg, _zones, _heals = await self.game.regen_zones_heals(gid)
         yield event.plain_result(msg)
 
     @oc.command("定义世界", alias={"add_world", "世界书"})
@@ -1999,6 +2157,17 @@ class OcversePlugin(Star):
         _wn = self.game._work_note(ch)
         if _wn:
             badges.append(f"⚒ 上班中·{_wn}")
+        # 远征徽章(队长 / 随队生活角色)
+        _exp = self.game._on_expedition(ch)
+        if _exp:
+            badges.append(f"⚔ 远征中·{_exp.get('title', '')}"
+                          f"(目标「{_exp.get('zone', '')}」,约剩 {self.game._exp_left_h(_exp):.0f} 小时)")
+        else:
+            _comp = self.game._exp_companion_of(gid, uid)
+            if _comp:
+                _cexp, _leader = _comp
+                badges.append(f"⚔ 随「{_leader.name}」远征·{_cexp.get('title', '')}"
+                              f"(约剩 {self.game._exp_left_h(_cexp):.0f} 小时)")
         # 自定义搞怪关系(我是谁的X / 谁是我的X)
         for bd in self.game.bonds_of(gid, uid)[:3]:
             other = name_map.get(bd["target"] if bd["proposer"] == uid else bd["proposer"], "?")
@@ -2006,15 +2175,22 @@ class OcversePlugin(Star):
                 badges.append(f"🤝 我是{other}的{bd['label']}")
             else:
                 badges.append(f"🤝 {other}是我的{bd['label']}")
+        from .ocverse.game import is_npc_uid
+        rep = None
+        if world is not None and not is_npc_uid(uid):
+            _score = self.game.db.rep_get(gid, uid, world.id)
+            rep = {"score": _score, "label": C.rep_level_label(_score)}
+        items = self.db.items_list(gid, uid)
         return {"__profile__": True, "ch": ch, "world": world, "rels": rel_named,
                 "rel_labels": rel_labels,
-                "mems": mems, "badges": badges}
+                "mems": mems, "badges": badges, "rep": rep, "items": items}
 
     def _render_profile(self, v: dict) -> list:
         """把 _profile_view 的 view 渲染成角色卡图片列表(统一渲染入口)。"""
         return profile_card(v["ch"], v["world"], v["rels"], v["mems"], self._card_cfg(),
                             rel_names=v.get("rel_labels"),
-                            extra_badges=v.get("badges") or [])
+                            extra_badges=v.get("badges") or [],
+                            rep=v.get("rep"), items=v.get("items"))
 
     async def _yield_profile(self, event, gid: str, uid: str, extra: str = ""):
         v = await self._profile_view(gid, uid)
@@ -2078,6 +2254,8 @@ class OcversePlugin(Star):
             yield event.plain_result("世界尚未初始化。管理员:「/分身 初始化世界 [世界观描述]」")
             return
         day = self.game._world_day(gid)
+        async with self._glock(gid):
+            w = self.game.ensure_world_content(gid) or w   # 旧世界补齐危险区域/治疗物品
         # 直接取世界范畴(world/npc)近况:以原始记忆行还原标题+片段
         world_mem = await self.game.world_memory_panel(gid, w.name, k=5)
         imgs = world_card(w, self._card_cfg(), is_current=True, day=day, world_mem=world_mem)
@@ -2137,6 +2315,10 @@ class OcversePlugin(Star):
         lines.append("")
         inter = [it.get('name','') for it in w.infra if C.infra_interactable(it)]
         lines.append("可光顾消遣(产生小事件):" + ("、".join(inter[:10]) if inter else "(暂时没有)"))
+        med = [it.get('name','') for it in w.infra if C.is_medical_infra(it)]
+        if med:
+            lines.append("医疗设施(可治病/买药):" + "、".join(med[:6])
+                         + " → 「/分身 治疗」或「/分身 去 " + med[0] + " 买治疗药」")
         lines.append("用「/分身 去 <设施名> [想做什么]」去社交/娱乐/约会场所消磨时光(每天每家1次)。")
         yield event.plain_result("\n".join(lines))
 
@@ -2185,13 +2367,27 @@ class OcversePlugin(Star):
         if not ml:
             yield event.plain_result("这个世界暂时没有主线。")
             return
+        q_done = int(self.db.kv_get(gid, "quests_done_total") or 0)
+        d_done = int(self.db.kv_get(gid, "defeats_total") or 0)
         lines = [f"📜 《{w.name}》世界主线", ""]
         for i, m in enumerate(ml, 1):
             mark = "✅" if m.get("done") else "⬜"
-            lines.append(f"{mark} {i}. {m.get('stage','')}{'⚠已完成' if m.get('done') else ''}")
+            goal = m.get("goal_type") or ""
+            goal_txt = ""
+            if goal and not m.get("done"):
+                gv = m.get("goal_value") or 0
+                have = {"reputation": None, "quest": q_done, "defeat": d_done}.get(goal)
+                cur_txt = ""
+                if goal == "reputation":
+                    cur_txt = f"(你的声望 {self.game.db.rep_get(gid, self._uid(event), w.id)}/{gv})"
+                elif have is not None:
+                    cur_txt = f"(进度 {have}/{gv})"
+                goal_txt = f" ⚑ {m.get('goal_note', '')}{cur_txt}"
+            lines.append(f"{mark} {i}. {m.get('stage','')}{goal_txt}")
             lines.append(f"　 └ {m.get('desc','')}")
         lines.append("")
-        lines.append("用「/分身 主线 推进」推进当前一步,推进完会解锁下一环。")
+        lines.append("用「/分身 主线 推进」推进当前一步:带 ⚑ 的小节需要先达成门槛"
+                     "(声望/完成任务/讨伐),推进完会解锁下一环;全部完结后续写尾声新篇章。")
         yield event.plain_result("\n".join(lines))
 
     @oc.command("兼职", alias={"parttime", "打半天工"})
@@ -2244,6 +2440,147 @@ class OcversePlugin(Star):
         lines.append("")
         lines.append("丢弃:/分身 背包 丢弃 <物品名>")
         yield event.plain_result("\n".join(lines))
+
+    @oc.command("治疗", alias={"heal", "疗伤", "看伤"})
+    @_guard
+    async def cmd_heal(self, event: AstrMessageEvent):
+        """分身 治疗 [物品名] - 用背包治疗物品疗伤(留空自动);没药则去医院付费治疗"""
+        gid = self._need_gid(event)
+        uid = self._uid(event)
+        self._char_of(event)
+        rest = self._rest(event, "治疗", "heal", "疗伤", "看伤").strip()
+        async with self._glock(gid):
+            if rest:
+                v = self.game.use_heal_item(gid, uid, rest)
+            else:
+                try:
+                    v = self.game.use_heal_item(gid, uid)
+                except GameError:
+                    v = self.game.heal_at_hospital(gid, uid)
+        imgs = render_views([v], self._card_cfg())
+        chain = self._chain(imgs)
+        if chain:
+            yield event.chain_result(chain)
+        else:
+            yield event.plain_result(v.get("narration", "处理完毕。"))
+
+    @oc.command("购买", alias={"buy", "买药"})
+    @_guard
+    async def cmd_buy(self, event: AstrMessageEvent):
+        """分身 购买 <物品名> [设施名] - 在店铺/药铺/诊所买治疗物品(声望有折扣)"""
+        gid = self._need_gid(event)
+        self._char_of(event)
+        rest = self._rest(event, "购买", "buy", "买药").strip()
+        parts = rest.split(None, 1)
+        if not rest:
+            w = self.db.cur_world(gid)
+            items = self.game.heal_items_of(gid, w) if w else []
+            names = "、".join(f"{h['name']}({h.get('price', '?')}金)" for h in items) or "无"
+            yield event.plain_result(
+                f"格式:/分身 购买 <物品名> [设施名]\n"
+                f"这个世界能买到的治疗物品:{names}\n"
+                f"也可以:/分身 去 <诊所/药铺/商店名> 买 <物品名>")
+            return
+        yield event.plain_result("⏳ 正在前往店铺…")
+        async with self._glock(gid):
+            v = self.game.buy_item(gid, self._uid(event), parts[0], parts[1].strip() if len(parts) > 1 else "")
+        imgs = render_views([v], self._card_cfg())
+        chain = self._chain(imgs)
+        if chain:
+            yield event.chain_result(chain)
+        else:
+            yield event.plain_result(v.get("narration", "买好了。"))
+
+    @oc.command("区域", alias={"zones", "危险区域"})
+    @_guard
+    async def cmd_zones(self, event: AstrMessageEvent):
+        """分身 区域 - 查看当前世界的危险区域(敌人/素材,每日变动,与讨伐任务联动)"""
+        gid = self._need_gid(event)
+        zones = self.game.list_zones(gid)
+        if not zones:
+            yield event.plain_result("当前世界没有已探明的危险区域。")
+            return
+        lines = [f"⚔ 《{self.db.cur_world(gid).name}》的危险区域(每日不定时变动)", ""]
+        for z in zones:
+            stars = "★" * max(1, min(5, int(z.get("danger") or 1)))
+            en = "、".join(e.get("name", "") for e in (z.get("enemies") or []) if isinstance(e, dict))
+            loot = "、".join(z.get("loot") or [])
+            lines.append(f"· {z.get('name')}({z.get('kind', '')}) 危险度{stars} — {z.get('desc', '')}")
+            if en:
+                lines.append(f"   出没:{en}" + (f" | 素材:{loot}" if loot else ""))
+        lines.append("")
+        lines.append("用「/分身 打怪 <目标/区域>」讨伐;击败敌人可能掉落素材与治疗物品;今日任务可能指向这些区域。")
+        yield event.plain_result("\n".join(lines))
+
+    @oc.command("声望", alias={"reputation", "声誉"})
+    @_guard
+    async def cmd_rep(self, event: AstrMessageEvent):
+        """分身 声望 [名字] - 查看分身在各世界的声望(声望高:NPC友好/购物折扣/主线门槛)"""
+        gid = self._need_gid(event)
+        rest = self._rest(event, "声望", "reputation", "声誉").strip()
+        uid = self._uid(event)
+        if rest:
+            t = self.db.get_char_by_name(gid, rest) or self.db.get_char(gid, npc_uid(gid, rest))
+            if t is None:
+                yield event.plain_result(f"找不到叫「{rest}」的角色。")
+                return
+            uid = t.uid
+        else:
+            self._char_of(event)
+        p = self.game.rep_panel(gid, uid)
+        lines = [f"⚜ {p['char_name']} 的世界声望", ""]
+        if p.get("current"):
+            c = p["current"]
+            lines.append(f"当前世界《{c['world']}》:{c['score']}({c['label']})")
+        for r in p.get("list", [])[:8]:
+            lines.append(f"· 《{r['world']}》:{r['score']}({r['label']})")
+        if not p.get("list") and not p.get("current"):
+            lines.append("(还没有声望记录:完成委托/讨伐/善行会提升声望)")
+        if p.get("top"):
+            top = "、".join(f"{t['name']}({t['score']})" for t in p["top"])
+            lines.append("")
+            lines.append(f"当前世界声望榜:{top}")
+        lines.append("")
+        lines.append("声望越高:NPC 对你越友好、店铺/医院有折扣、主线推进的门槛也需要它。")
+        yield event.plain_result("\n".join(lines))
+
+    @oc.command("远征", alias={"expedition", "远征队"})
+    @_guard
+    async def cmd_expedition(self, event: AstrMessageEvent):
+        """分身 远征 [接受|状态|放弃] - 查看/接下今日远征委托(公会/据点颁布,贴合世界观);
+        远征持续数小时到数天,期间无法其他操作,每几小时播报剧情,归来丰厚结算"""
+        gid = self._need_gid(event)
+        uid = self._uid(event)
+        rest = self._rest(event, "远征", "expedition", "远征队").strip()
+        if any(k in rest for k in ("状态", "进度")):
+            yield event.plain_result(self.game.expedition_status(gid, uid))
+            return
+        if rest and not any(k in rest for k in ("接受", "接下", "出发", "放弃", "逃", "撤", "查看", "布告", "委托")):
+            yield event.plain_result(
+                "用法:/分身 远征 — 查看今日远征委托\n"
+                "　　　/分身 远征 接受 — 签下委托出发(期间无法其他操作)\n"
+                "　　　/分身 远征 状态 — 查看远征进度\n"
+                "　　　/分身 远征 放弃 — 中途撤离(声望重挫+违约金)")
+            return
+        if not rest:
+            ch = self.db.get_char(gid, uid)
+            if ch and self.game._on_expedition(ch):
+                yield event.plain_result(self.game.expedition_status(gid, uid))
+                return
+        yield event.plain_result("⏳ 正在查看远征委托…" if not any(k in rest for k in ("放弃", "逃", "撤")) else "⏳ 正在办理撤离…")
+        async with self._glock(gid):
+            if any(k in rest for k in ("接受", "接下", "出发")):
+                v = await self.game.accept_expedition(gid, uid)
+            elif any(k in rest for k in ("放弃", "逃", "撤")):
+                v = self.game.abort_expedition(gid, uid)
+            else:
+                v = await self.game.ensure_expedition_offer(gid, uid)
+        imgs = render_views([v], self._card_cfg())
+        chain = self._chain(imgs)
+        if chain:
+            yield event.chain_result(chain)
+        else:
+            yield event.plain_result(v.get("narration", "……"))
 
     @oc.command("房产", alias={"住房", "物业", "买楼"})
     @_guard
@@ -2506,11 +2843,12 @@ class OcversePlugin(Star):
         async for r in self._run_act(event, "健身", "健身", "锻炼", "fitness"):
             yield r
 
-    @oc.command("打怪", alias={"fight", "狩猎"})
+    @oc.command("打怪", alias={"fight", "狩猎", "讨伐", "hunt"})
     @_guard
     async def cmd_fight(self, event: AstrMessageEvent):
-        """分身 打怪 <目标…> - 去危险地带猎杀怪物,搏战利品与名声(风险行动)"""
-        async for r in self._run_act(event, "打怪", "打怪", "狩猎", "fight"):
+        """分身 打怪 [区域/敌人] - 进危险区域讨伐:点名区域或敌人则锁定,
+        不点名则自动选区(今日讨伐委托自动对齐);击败掉素材与治疗物品(风险行动)"""
+        async for r in self._run_act(event, "打怪", "打怪", "狩猎", "讨伐", "fight", "hunt"):
             yield r
 
     @oc.command("冒险", alias={"行动"})
@@ -2526,8 +2864,9 @@ class OcversePlugin(Star):
                 "· /分身 练习 <练什么> — 修习技艺,精进属性(耗体力)",
                 "· /分身 健身 — 锻炼体魄(力量/敏捷)",
                 "· /分身 兼职 — 在世界上找份基建活干,赚金币",
-                "· /分身 打怪 - 去危险地带挑战怪物(高风险高回报)",
-                "",
+                "· /分身 打怪 [区域或敌人] — 进危险区域讨伐:如「打怪 树精」或「打怪 低语森林」;"
+                "不点名自动选区(今日讨伐委托会自动对齐),击败掉素材/治疗物品",
+                "· /分身 区域 — 看当前世界有哪些危险区域(每日变动)",
                 "· /分身 冒险 <自由描述> — 比如:去雾夜集市帮绫婆婆看摊 / 溜进灯塔偷看旧笔记",
                 "每次行动消耗体力,一天限次。属性/金币/心情都会随之起落!",
             ]

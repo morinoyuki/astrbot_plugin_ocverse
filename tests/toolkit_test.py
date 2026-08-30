@@ -129,7 +129,22 @@ async def main():
     ts = pl._build_tool_set()
     names = sorted(ts.names())
     print("ToolSet 大小:", len(names))
-    assert len(names) == 30, names
+    required = {
+        "ocverse_help", "ocverse_show_character", "ocverse_roster", "ocverse_show_world",
+        "ocverse_show_worlds", "ocverse_show_facilities", "ocverse_show_quests",
+        "ocverse_inventory", "ocverse_search_memory", "ocverse_log",
+        "ocverse_create_character", "ocverse_edit_character", "ocverse_define_life_character",
+        "ocverse_define_world", "ocverse_add_npc", "ocverse_delete_npc",
+        "ocverse_interact_with_friend", "ocverse_interact_with_life", "ocverse_interact_with_npc",
+        "ocverse_visit_place", "ocverse_do_action", "ocverse_work_parttime",
+        "ocverse_claim_quest", "ocverse_advance_mainline", "ocverse_travel_world",
+        "ocverse_real_estate", "ocverse_propose_bond", "ocverse_init_world",
+        "ocverse_trigger_world_shift", "ocverse_admin_setting",
+        # 生命值 / 治疗物品 / 危险区域 / 声望
+        "ocverse_heal", "ocverse_buy_item", "ocverse_show_zones", "ocverse_show_reputation",
+    }
+    missing = required - set(names)
+    assert not missing, f"缺少工具: {missing}"
     for n in names:
         tool = ts.get_tool(n)
         assert tool.description, f"{n} 缺描述"

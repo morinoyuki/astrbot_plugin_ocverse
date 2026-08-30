@@ -6,7 +6,7 @@ import json
 import time
 from dataclasses import dataclass, field
 
-from .config import ATTR_KEYS
+from .config import ATTR_KEYS, HP_MAX
 
 
 def _loads(s, default):
@@ -43,7 +43,9 @@ class World:
     npcs: list = field(default_factory=list)
     event_ideas: list = field(default_factory=list)
     infra: list = field(default_factory=list)      # 基础设施:商店/杂货铺/旅馆/工作/地标
-    mainline: list = field(default_factory=list)   # 世界主线:{stage,title,desc,done}
+    mainline: list = field(default_factory=list)   # 世界主线:{stage,desc,done,goal_type?,goal_value?}
+    zones: list = field(default_factory=list)      # 危险区域/敌对阵营:{name,kind,desc,danger,enemies,loot}
+    heal_items: list = field(default_factory=list) # 世界治疗物品:{name,note,price,heal}
     source: str = "llm"
     visited: int = 0
     created_by: str = ""
@@ -65,6 +67,8 @@ class World:
             event_ideas=_loads(row["event_ideas"], []),
             infra=_loads(row["infra"], []) if "infra" in row.keys() else [],
             mainline=_loads(row["mainline"], []) if "mainline" in row.keys() else [],
+            zones=_loads(row["zones"], []) if "zones" in row.keys() else [],
+            heal_items=_loads(row["heal_items"], []) if "heal_items" in row.keys() else [],
             source=row["source"] or "llm",
             visited=int(row["visited"] or 0),
             created_by=row["created_by"] or "",
@@ -95,6 +99,7 @@ class Char:
     gold: int = 100
     mood: int = 70
     stamina: int = 90
+    hp: int = HP_MAX
     title: str = "无名之辈"
     flags: dict = field(default_factory=dict)      # {traveler: 1, interactions: n, ...}
     created_at: float = field(default_factory=time.time)
@@ -117,6 +122,7 @@ class Char:
             gold=int(row["gold"] or 0),
             mood=int(row["mood"] or 70),
             stamina=int(row["stamina"] or 90),
+            hp=int(row["hp"]) if ("hp" in row.keys() and row["hp"] is not None) else HP_MAX,
             title=row["title"] or "无名之辈",
             flags=_loads(row["flags"], {}),
             created_at=float(row["created_at"] or 0),

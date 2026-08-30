@@ -116,7 +116,8 @@ class Database:
     def add_world(self, w: World) -> int:
         cur = self._ex(
             "INSERT INTO worlds (gid,name,genre,desc,atmosphere,rules,features,npcs,"
-            "event_ideas,infra,mainline,source,visited,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "event_ideas,infra,mainline,zones,heal_items,source,visited,created_by,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 w.gid, w.name, w.genre, w.desc, w.atmosphere,
                 json.dumps(w.rules, ensure_ascii=False),
@@ -125,16 +126,18 @@ class Database:
                 json.dumps(w.event_ideas, ensure_ascii=False),
                 json.dumps(w.infra, ensure_ascii=False),
                 json.dumps(w.mainline, ensure_ascii=False),
+                json.dumps(getattr(w, "zones", []) or [], ensure_ascii=False),
+                json.dumps(getattr(w, "heal_items", []) or [], ensure_ascii=False),
                 w.source, w.visited, w.created_by, time.time(),
             ),
         )
         return int(cur.lastrowid)
 
     def update_world(self, wid: int, **fields):
-        """fields 允许 rules/features/npcs/event_ideas/infra/mainline(自动 json)。"""
+        """fields 允许 rules/features/npcs/event_ideas/infra/mainline/zones/heal_items(自动 json)。"""
         jsoned = {}
         for k, v in fields.items():
-            if k in ("rules", "features", "npcs", "event_ideas", "infra", "mainline"):
+            if k in ("rules", "features", "npcs", "event_ideas", "infra", "mainline", "zones", "heal_items"):
                 jsoned[k] = json.dumps(v, ensure_ascii=False)
             else:
                 jsoned[k] = v
@@ -166,13 +169,13 @@ class Database:
     def upsert_char(self, ch: Char):
         self._ex(
             "INSERT INTO chars (gid,uid,name,gender,tags,backstory,avatar,attrs,level,"
-            "exp,gold,mood,stamina,title,flags,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "exp,gold,mood,stamina,hp,title,flags,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(gid,uid) DO UPDATE SET "
             "name=excluded.name, gender=excluded.gender, tags=excluded.tags, "
             "backstory=excluded.backstory, avatar=excluded.avatar, attrs=excluded.attrs, "
             "level=excluded.level, exp=excluded.exp, gold=excluded.gold, "
-            "mood=excluded.mood, stamina=excluded.stamina, title=excluded.title, "
+            "mood=excluded.mood, stamina=excluded.stamina, hp=excluded.hp, title=excluded.title, "
             "flags=excluded.flags, updated_at=excluded.updated_at",
             (
                 ch.gid, ch.uid, ch.name, ch.gender,
@@ -180,6 +183,7 @@ class Database:
                 ch.backstory, ch.avatar,
                 json.dumps(ch.attrs, ensure_ascii=False),
                 ch.level, ch.exp, ch.gold, ch.mood, ch.stamina,
+                ch.hp,
                 ch.title,
                 json.dumps(ch.flags, ensure_ascii=False),
                 ch.created_at, time.time(),
@@ -558,6 +562,57 @@ class Database:
         row = self._ex("SELECT value FROM kv WHERE gid=? AND key=?", (gid, key), "one")
         return row["value"] if row else None
 
+    def kv_incr(self, gid: str, key: str, delta: int = 1) -> int:
+        """计数器累加(首次自动从 0 开始),返回累加后的值。"""
+        try:
+            cur = int(self.kv_get(gid, key) or 0)
+        except (TypeError, ValueError):
+            cur = 0
+        cur += int(delta)
+        self.kv_set(gid, key, str(cur))
+        return cur
+
+    # ── 声望(每个世界一份) ────────────────────────────────
+    def rep_get(self, gid: str, uid: str, world_id: int) -> int:
+        row = self._ex(
+            "SELECT score FROM reputations WHERE gid=? AND uid=? AND world_id=?",
+            (gid, uid, int(world_id)), "one",
+        )
+        return int(row["score"] or 0) if row else 0
+
+    def rep_add(self, gid: str, uid: str, world_id: int, delta: int, note: str = "") -> int:
+        """增减声望并钳制在 -100~100,返回最新值。delta=0 时不动也不新建。"""
+        delta = max(-50, min(50, int(delta)))
+        if delta == 0:
+            return self.rep_get(gid, uid, world_id)
+        self._ex(
+            "INSERT INTO reputations (gid,uid,world_id,score,note,updated_at) VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(gid,uid,world_id) DO UPDATE SET "
+            "score=MAX(-100,MIN(100,score+excluded.score)), note=excluded.note, updated_at=excluded.updated_at",
+            (gid, uid, int(world_id), delta, (note or "")[:30], time.time()),
+        )
+        return self.rep_get(gid, uid, world_id)
+
+    def rep_list_for(self, gid: str, uid: str) -> list[dict]:
+        """某角色全部世界声望(带世界名)。"""
+        rows = self._ex(
+            "SELECT r.world_id, r.score, r.updated_at, w.name FROM reputations r "
+            "LEFT JOIN worlds w ON w.id = r.world_id "
+            "WHERE r.gid=? AND r.uid=? ORDER BY r.score DESC",
+            (gid, uid), "all",
+        )
+        return [dict(r) for r in rows]
+
+    def rep_top(self, gid: str, world_id: int, k: int = 5) -> list[dict]:
+        """某世界声望榜(带角色名,角色可能已删)。"""
+        rows = self._ex(
+            "SELECT r.uid, r.score, c.name FROM reputations r "
+            "LEFT JOIN chars c ON c.gid = r.gid AND c.uid = r.uid "
+            "WHERE r.gid=? AND r.world_id=? ORDER BY r.score DESC LIMIT ?",
+            (gid, int(world_id), max(1, int(k))), "all",
+        )
+        return [dict(r) for r in rows]
+
     # ── quests (每日小任务) ────────────────────────────────────
     def add_quest(self, gid: str, uid: str, day: str, text: str, hint: str = "",
                   steps: list | None = None, giver: str = "", place: str = "") -> int:
@@ -675,6 +730,15 @@ class Database:
     def kb_sources(self, gid: str) -> list[str]:
         rows = self._ex("SELECT source FROM kb WHERE gid=?", (gid,), "all")
         return [r["source"] or "" for r in rows]
+
+    def kb_delete_ids(self, ids: list[int]):
+        """按 id 删除知识库条目(后台管理用)。"""
+        ids = [int(i) for i in (ids or []) if str(i).lstrip("-").isdigit()]
+        if not ids:
+            return 0
+        q = ",".join("?" for _ in ids)
+        cur = self._ex(f"DELETE FROM kb WHERE id IN ({q})", tuple(ids))
+        return cur.rowcount
 
     def kb_trim(self, gid: str, keep: int):
         """知识库超上限时,删除最旧的条目,保留最新的 keep 条(按 id 即入库先后)。"""

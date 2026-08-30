@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import random
+import re
 import time
 import zlib
 import json
@@ -105,13 +106,19 @@ class Game:
         )
 
     # ══════════════ 特殊状态(囚禁/束缚等) ══════════════
+    KO_TYPE = "重伤昏迷"   # 生命值归零的强制状态(无法行动,日切时被救醒)
+
     def _state(self, ch: Char) -> dict:
         """当前特殊状态 {type, reason, since},无则空 dict。"""
         s = (ch.flags or {}).get("_state")
         return s if isinstance(s, dict) else {}
 
     def _is_locked(self, ch: Char) -> bool:
-        return bool(self._state(ch))
+        return bool(self._state(ch)) or self._is_ko(ch)
+
+    def _is_ko(self, ch: Char) -> bool:
+        """生命值归零 = 重伤昏迷,无法行动(与特殊状态同等工作)。"""
+        return int(getattr(ch, "hp", C.HP_MAX) or 0) <= 0
 
     # ── 兼职时段制(上工 → 到点自动下班结算) ────────────────
     WORK_SHIFT_H = 2.0  # 一个班次的现实时长(小时),同班同事随机
@@ -135,12 +142,34 @@ class Game:
 
     def _state_note(self, ch: Char) -> str:
         """状态的一句话描述(供注入 LLM),无状态返回空串。"""
+        if self._is_ko(ch) and not self._state(ch):
+            return self.KO_TYPE
         s = self._state(ch)
         if not s:
             return ""
         typ = str(s.get("type") or "特殊状态").strip()
         reason = str(s.get("reason") or "").strip()
         return f"{typ}" + (f"({reason})" if reason else "")
+
+    # ══════════════ 生命值(HP)══════════════
+    def _apply_hp(self, ch: Char, delta: int) -> str:
+        """增减生命值并处理归零昏迷/苏醒。返回人话变更(可能为空)。"""
+        hp = int(getattr(ch, "hp", C.HP_MAX) or 0)
+        if hp <= 0 and delta <= 0:
+            return ""   # 已昏迷,不再叠加伤害
+        ch.hp = max(0, min(C.HP_MAX, hp + int(delta)))
+        if ch.hp <= 0:
+            self._set_state(ch, self.KO_TYPE, "伤势过重,不省人事")
+            self.db.upsert_char(ch)
+            return f"💔 生命归零:{self.KO_TYPE}!(被送到安全处救治,明天在世界设施/医院/家中苏醒)"
+        # 恢复到正数:解除昏迷
+        st = self._state(ch)
+        if st.get("type") == self.KO_TYPE:
+            self._lift_state(ch)
+            self.db.upsert_char(ch)
+            return f"❤ 生命+{delta}(苏醒了)"
+        self.db.upsert_char(ch)
+        return f"生命{'+' if delta > 0 else ''}{delta}"
 
     def _set_state(self, ch: Char, typ: str, reason: str = ""):
         """施加/替换特殊状态。"""
@@ -172,6 +201,9 @@ class Game:
             if self._is_locked(ch):
                 self._lift_state(ch)
                 changes.append("🗝 脱困:特殊状态解除")
+                if int(getattr(ch, "hp", C.HP_MAX)) <= 0:
+                    ch.hp = C.HP_WAKEUP
+                    changes.append(f"❤ 被从鬼门关拉了回来(生命 {ch.hp}/{C.HP_MAX})")
         return changes
 
     # ══════════════ 世界初始化 ══════════════
@@ -224,12 +256,17 @@ class Game:
             event_ideas=wdata.get("event_ideas", []),
             infra=wdata.get("infra", []),
             mainline=wdata.get("mainline", []),
+            zones=wdata.get("zones", []),
+            heal_items=wdata.get("heal_items", []),
             source=source,
             visited=visited,
             created_by=by,
         )
         # 生存必要设施与打工位保底(不足则按世界观风格补齐模板设施)
         w.infra, _notes = self._ensure_infra_baseline(w, w.infra)
+        # 危险区域与治疗物品保底(LLM 没生成或旧数据缺失时按题材风格兜底)
+        w.zones = self._ensure_zones_baseline(w, w.zones)
+        w.heal_items = self._ensure_heal_items_baseline(w, w.heal_items)
         w.id = self.db.add_world(w)
         self.db.update_group(gid, cur_world_id=w.id, init_done=1)
         # 把世界生成时设计的『可购住处』种子进地块表
@@ -449,15 +486,56 @@ class Game:
     def _daily_reset(self, gid: str, day: str):
         # 体力日回复量可配置(钳制非负),0 = 当天不回复
         rec = max(0, self._cfgi("daily_stamina_recovery", 40))
+        w = self.db.cur_world(gid)
         for ch in self.db.list_chars(gid):
             ch.stamina = min(C.STAMINA_MAX, ch.stamina + rec)
             ch.mood = min(C.MOOD_MAX, max(0, ch.mood + (5 if ch.mood < 40 else 0)))
+            self._daily_hp_reset(gid, ch, w)
             self.db.upsert_char(ch)
         # 世界人口流动:当前世界的系统NPC可能来去/换工作
         self._npc_turnover(gid)
         # 世界设施流转:小概率新开/建成/倒闭(贴合同世界题材,保证生存基线)
         self._infra_turnover(gid)
+        # 危险区域每日不定时变动(与讨伐任务/素材联动)
+        self._zones_turnover(gid)
+        # 旧世界数据兜底:zones/heal_items 缺失时按题材补齐
+        self.ensure_world_content(gid)
         self.db.update_group(gid, day_key=day)
+
+    def _daily_hp_reset(self, gid: str, ch: Char, w: World | None):
+        """日切的生命处理:昏迷者被救醒;其余人自然恢复少量生命。
+        昏迷者苏醒地点优先级:自己家 > 医院(医疗设施) > 据点/避难所类设施(泛指安全处)。"""
+        hp = int(getattr(ch, "hp", C.HP_MAX) or 0)
+        st = self._state(ch)
+        is_ko = hp <= 0 or st.get("type") == self.KO_TYPE
+        if is_ko:
+            # 苏醒地点
+            place = "收容所的临时床铺"
+            pid = (ch.flags or {}).get("home_plot")
+            if w is not None and pid:
+                p = self.db.plot_get(int(pid))
+                if p and str(p.get("world_id")) == str(w.id):
+                    place = f"自己的住处「{p.get('name')}」"
+            if w is not None and place.startswith("收容所"):
+                med = next((i for i in (w.infra or []) if C.is_medical_infra(i)), None)
+                base = next((i for i in (w.infra or [])
+                             if any(k in (str(i.get('kind', '')) + str(i.get('name', ''))) for k in ("据点", "基地", "营地", "避难", "驿", "大殿"))), None)
+                if med:
+                    place = f"「{med.get('name')}」的病床"
+                elif base:
+                    place = f"「{base.get('name')}」的角落"
+            ch.hp = C.HP_WAKEUP
+            if st:
+                ch.flags = dict(ch.flags or {})
+                ch.flags.pop("_state", None)
+            self.db.append_log(gid, ch.uid, "misc",
+                               f"{ch.name} 在{place}醒了过来——伤势仍然不轻(生命{ch.hp}/{C.HP_MAX}),记得治疗", w.name if w else "")
+            _fire_remember(self.mem, gid, ch.uid, "char",
+                           f"{ch.name}重伤昏迷后在{place}苏醒(生命{ch.hp})", ref=f"ko:{_now():.0f}")
+            return
+        # 未昏迷:自然恢复少量生命(回家睡的恢复更多,由 回家 指令单独结算)
+        if hp < C.HP_MAX:
+            ch.hp = min(C.HP_MAX, hp + C.HP_DAILY_RECOVER)
 
     # ══════════════ 世界设施:基线保底 / 每日流转 / AI 重新规划 ══════════════
     INFRA_WORK_MIN = 2      # 每个世界至少 2 处可打工的设施
@@ -559,6 +637,84 @@ class Game:
             for note in notes:
                 self.db.append_log(gid, "", "misc", f"《{w.name}》{note}", w.name)
 
+    def _ensure_zones_baseline(self, world: World, zones: list) -> list[dict]:
+        """危险区域保底:缺失/不足 2 个时按题材风格补齐模板区域。"""
+        zones = [dict(z) for z in (zones or []) if isinstance(z, dict) and str(z.get("name", "")).strip()]
+        if len(zones) >= 2:
+            return zones
+        pack = C.zone_style_for(world.genre, world.desc)
+        used = {z.get("name") for z in zones}
+        for tpl in pack:
+            if len(zones) >= 3:
+                break
+            if tpl.get("name") in used:
+                continue
+            zones.append(dict(tpl))
+        return zones
+
+    def _ensure_heal_items_baseline(self, world: World, items: list) -> list[dict]:
+        """治疗物品保底:缺失时按题材风格给 3 档(商店售卖/掉落/使用统一命名)。"""
+        items = [dict(h) for h in (items or []) if isinstance(h, dict) and str(h.get("name", "")).strip()]
+        if items:
+            return items
+        return [dict(h) for h in C.heal_style_for(world.genre, world.desc)]
+
+    ZONE_NEW_P = 0.14      # 每日出现新区域概率
+    ZONE_CALM_P = 0.08     # 每日一片区域平息/消退概率
+    ZONE_MUTATE_P = 0.35   # 每日某区域敌人/危险度变动概率
+
+    def _zones_turnover(self, gid: str):
+        """危险区域每日不定时变动:新区域浮现/旧区域平息/敌人与危险度异动。
+        与任务(讨伐/素材)和打怪场景联动;世界日志与记忆同步沉淀。"""
+        w = self.db.cur_world(gid)
+        if not w:
+            return
+        zones = [dict(z) for z in (w.zones or []) if isinstance(z, dict) and str(z.get("name", "")).strip()]
+        changed = False
+        pack = C.zone_style_for(w.genre, w.desc)
+        # 1) 新区域浮现
+        if random.random() < self.ZONE_NEW_P and len(zones) < C.ZONES_MAX:
+            used = {z.get("name") for z in zones}
+            tpl = next((dict(t) for t in pack if t.get("name") not in used), None)
+            if tpl:
+                zones.append(tpl)
+                self.db.append_log(gid, "", "misc",
+                                   f"《{w.name}》的「{tpl.get('name')}」({tpl.get('kind','')})出现了新的动静——一片危险区域浮现了", w.name)
+                _fire_remember(self.mem, gid, "", "world",
+                               f"《{w.name}》出现新危险区域「{tpl.get('name')}」", ref=f"zone:{_now():.0f}")
+                changed = True
+        # 2) 区域平息(至少保留 2 片)
+        if random.random() < self.ZONE_CALM_P and len(zones) > 2:
+            victim = random.choice(zones)
+            zones.remove(victim)
+            self.db.append_log(gid, "", "misc",
+                               f"《{w.name}》的「{victim.get('name')}」恢复了平静,不再是危险区域", w.name)
+            _fire_remember(self.mem, gid, "", "world",
+                           f"《{w.name}》的「{victim.get('name')}」平息了", ref=f"zone:{_now():.0f}")
+            changed = True
+        # 3) 敌人/危险度异动
+        if zones and random.random() < self.ZONE_MUTATE_P:
+            zi = random.randrange(len(zones))
+            z = dict(zones[zi])
+            pack_used = [t for t in pack if t.get("name") != z.get("name")]
+            src_tpl = random.choice(pack_used) if pack_used else None
+            if src_tpl and src_tpl.get("enemies"):
+                z["enemies"] = src_tpl["enemies"]
+                if src_tpl.get("loot"):
+                    z["loot"] = src_tpl["loot"]
+                old_d = int(z.get("danger") or 1)
+                z["danger"] = max(1, min(5, old_d + random.choice((-1, 1))))
+                zones[zi] = z
+                en = "、".join(e.get("name", "") for e in (z.get("enemies") or []))
+                self.db.append_log(gid, "", "misc",
+                                   f"《{w.name}》的「{z.get('name')}」中的活动异动:出没者变成了{en or '不明'}(危险度{z.get('danger')})", w.name)
+                _fire_remember(self.mem, gid, "", "world",
+                               f"《{w.name}》的「{z.get('name')}」敌人异动:{en}", ref=f"zone:{_now():.0f}")
+                changed = True
+        if changed:
+            zones = self._ensure_zones_baseline(w, zones)
+            self.db.update_world(w.id, zones=zones)
+
     async def regen_infra(self, gid: str, world_id: int | None = None) -> tuple[str, list[dict]]:
         """管理员:让 AI 重新规划世界设施(贴合世界观),并保证生存基线。
         world_id 为空时规划当前世界。返回(给管理员的总结文本, 新设施列表)。"""
@@ -587,6 +743,41 @@ class Game:
         if not new_infra:
             msg = "(AI 规划不可用,保留原设施并补齐生存基线)\n" + msg
         return msg, base
+
+    async def regen_zones_heals(self, gid: str, world_id: int | None = None) -> tuple[str, list[dict], list[dict]]:
+        """管理员:让 AI 按世界观重新生成危险区域与治疗物品(旧数据/生成失败自动兜底)。
+        world_id 为空时重绘当前世界。返回(总结文本, 新zones, 新heal_items)。"""
+        if world_id is not None:
+            w = self.db.get_world(int(world_id))
+            if not w or w.gid != gid:
+                raise GameError("世界不存在或不属于该群")
+        else:
+            w = self.db.cur_world(gid)
+            if not w:
+                raise GameError("世界尚未初始化")
+        r = await self.brain.regen_zones_heals(world=w,
+                                               material=await self._kb_ctx(gid, "危险区域 治疗物品 世界观"))
+        new_zones = r.data.get("zones") if r.ok else None
+        new_heals = r.data.get("heal_items") if r.ok else None
+        base_zones = list(new_zones) if new_zones else list(w.zones or [])
+        base_heals = list(new_heals) if new_heals else list(w.heal_items or [])
+        base_zones = self._ensure_zones_baseline(w, base_zones)
+        base_heals = self._ensure_heal_items_baseline(w, base_heals)
+        self.db.update_world(w.id, zones=base_zones, heal_items=base_heals)
+        self.db.append_log(gid, "", "misc",
+                           f"《{w.name}》的舆图重绘完成:{len(base_zones)} 片危险区域、"
+                           f"{len(base_heals)} 档治疗物品"
+                           + ("" if new_zones and new_heals else "(AI 不可用,保留原名录并补齐基线)"),
+                           w.name)
+        _fire_remember(self.mem, gid, "", "world",
+                       f"《{w.name}》的舆图重绘:危险区域与治疗物品更新了", ref=f"zone:{_now():.0f}")
+        zone_names = "、".join(f"{z.get('name')}({z.get('kind', '')},★{z.get('danger', '?')})" for z in base_zones)
+        heal_names = "、".join(f"{h.get('name')}({h.get('price', '?')}金/+{h.get('heal', '?')})" for h in base_heals)
+        msg = (f"《{w.name}》舆图已重绘。\n危险区域({len(base_zones)}):{zone_names}\n"
+               f"治疗物品({len(base_heals)}):{heal_names}")
+        if not (new_zones and new_heals):
+            msg = "(AI 重绘不可用,保留原名录并补齐基线)\n" + msg
+        return msg, base_zones, base_heals
 
     def _npc_turnover(self, gid: str):
         """世界NPC不定时流动:每天小概率让系统NPC变更或迎来新面孔,让世界活起来。
@@ -698,7 +889,7 @@ class Game:
     # ══════════════ 事件触发/结算 ══════════════
     def _pick_char(self, gid: str) -> Char | None:
         """公平挑选单人事件主角(仅真人玩家,生活角色无真人可抉择)。"""
-        chars = self._player_chars(gid)
+        chars = [c for c in self._player_chars(gid) if not self._on_expedition(c)]
         if not chars:
             return None
         rec = self.db.char_recency(gid)
@@ -720,6 +911,7 @@ class Game:
         chars = self.db.list_chars(gid)
         if not world or not chars:
             return None
+        world = self.ensure_world_content(gid) or world
         # 定时推送且无人被点名时:可触发『群像生活事件』(多名玩家角色偶遇/结伴)
         multi = None
         if char_uid is None and random.random() < LIFE_MULTI_PROB and len(chars) >= 2:
@@ -806,7 +998,9 @@ class Game:
     def _pick_life_group(self, gid: str) -> list[Char]:
         """随机选 2~LIFE_MULTI_MAX 名未被囚禁的角色组成生活群像(玩家+生活角色共演)。
         保证至少一名真人玩家(事件由真人抉择),生活角色作为共演增添鲜活感。"""
-        free = [c for c in self.db.list_chars(gid) if not self._is_locked(c)]
+        free = [c for c in self.db.list_chars(gid)
+                if not self._is_locked(c) and not self._on_expedition(c)
+                and not self._exp_companion_of(gid, c.uid)]
         players = [c for c in free if not is_npc_uid(c.uid)]
         if not players:
             return free[:LIFE_MULTI_MAX]  # 无玩家全日真假死,退回原有(理论极难)
@@ -840,11 +1034,17 @@ class Game:
         return "\n".join(lines) if lines else ""
 
     def _apply_effects(self, ch: Char, effects: dict) -> list[str]:
-        """应用效果表,返回人话变更列表;处理升级。"""
+        """应用效果表,返回人话变更列表;处理升级/生命/声望。"""
         if not effects:
             return []
         before_lv = ch.level
         changes: list[str] = []
+        m = effects.get("hp")
+        if m:
+            self.db.upsert_char(ch)   # 先落盘当前值,再走 HP 变更(内部含昏迷/苏醒处理)
+            hp_chg = self._apply_hp(ch, int(m))
+            if hp_chg:
+                changes.append(hp_chg)
         m = effects.get("stamina")
         if m:
             ch.stamina = max(0, min(C.STAMINA_MAX, ch.stamina + int(m)))
@@ -866,6 +1066,12 @@ class Game:
             if v:
                 ch.attrs[k] = max(1, min(100, ch.attrs[k] + int(v)))
                 changes.append(f"{_name}{'+' if v > 0 else ''}{v}")
+        rep = effects.get("reputation")
+        if rep:
+            w = self.db.cur_world(ch.gid)
+            if w is not None and not is_npc_uid(ch.uid):
+                new_rep = self.db.rep_add(ch.gid, ch.uid, w.id, int(rep), "事件/行动")
+                changes.append(f"声誉{'+' if int(rep) > 0 else ''}{int(rep)}({C.rep_level_label(new_rep)})")
         while ch.exp >= C.exp_need(ch.level):
             ch.exp -= C.exp_need(ch.level)
             ch.level += 1
@@ -925,6 +1131,10 @@ class Game:
         ch = self.db.get_char(gid, uid)
         if not ch:
             raise GameError("你还没有创建分身,先「/分身 创建 名字」")
+        exp = self._on_expedition(ch)
+        if exp:
+            raise GameError(f"⚔ 你正在「{exp.get('title')}」远征途中,无暇他顾"
+                            f"(约还需 {self._exp_left_h(exp):.1f} 小时归来)。")
         if ev is None:
             for cand in self.db.pending_sent_events(gid, uid):
                 if not self.choose_locked(cand, uid):
@@ -962,9 +1172,10 @@ class Game:
         prev = self.db.recent_similar_logs(
             gid, ev.uid or uid, [str(ev.payload.get("title", "")), pick_label], k=2)
         state_note = self._state_note(target_char) if target_char else ""
+        heal_note = self._backpack_heal_note(gid, target_char.uid, world) if target_char else ""
         r = await self.brain.resolve_event(
             world=world, char=target_char, event=ev.payload, choice_idx=idx, previous=prev,
-            state_note=state_note,
+            state_note=state_note, heal_note=heal_note,
             material=await self._kb_ctx(gid, "事件结算 结果 剧情 氛围"))
         data = r.data
         changes: list[str] = []
@@ -980,6 +1191,8 @@ class Game:
             ge.pop("gold", None)
             parts = []
             for c in self.db.list_chars(gid):
+                if self._on_expedition(c) or self._exp_companion_of(gid, c.uid):
+                    continue   # 远征者与其随队队友不在现场
                 parts += self._apply_effects(c, ge)[:2]
             changes = ["全体: "] + parts[:6]
         mem_owner = ev.uid or uid  # 全员事件的记忆记在抉择者名下
@@ -991,8 +1204,10 @@ class Game:
                            world.name)
         # 记忆压缩检查
         await self._maybe_compress(gid, mem_owner)
+        echo = await self.mainline_echo(gid, mem_owner, ctx=f"{ev.payload.get('title','')}:「{opts[idx]['label']}」{(data.get('narration') or '')[:60]}")
         return {
             "type": "result",
+            "echo": echo,
             "gid": gid,
             "uid": ev.uid or uid,
             "char_name": target_char.name if target_char else ch.name,
@@ -1130,6 +1345,24 @@ class Game:
         if a_wn:
             raise GameError(f"⚒ 你正{a_wn},上班摸鱼被老板盯上可就不好啦——下班再找「{b.name}」吧。")
         # 特殊状态:被困者不能主动与群友互动(等别人来救/脱困后再说)
+        if self._is_ko(a):
+            raise GameError(
+                "💔 你已重伤昏迷,没法主动找人。等群友来救你(让 TA「/分身 与 你」互动即可),"
+                "或等日切时被救醒。"
+            )
+        a_exp = self._on_expedition(a)
+        if a_exp:
+            raise GameError(f"⚔ 你正在「{a_exp.get('title')}」远征途中,联系不上你"
+                            f"(约还需 {self._exp_left_h(a_exp):.1f} 小时归来)。")
+        b_exp = self._on_expedition(b)
+        if b_exp:
+            raise GameError(f"⚔ {b.name} 正在「{b_exp.get('title')}」远征途中,联系不上TA"
+                            f"(约还需 {self._exp_left_h(b_exp):.1f} 小时归来)。")
+        comp = self._exp_companion_of(gid, uid_b)
+        if comp:
+            cexp, leader = comp
+            raise GameError(f"⚔ {b.name} 正跟随「{leader.name}」的「{cexp.get('title')}」远征队在外,"
+                            f"联系不上TA(约还需 {self._exp_left_h(cexp):.1f} 小时归来)。")
         a_state = self._state_note(a)
         if a_state:
             raise GameError(
@@ -1145,6 +1378,7 @@ class Game:
             world=world, a=a, b=b, npc=None, mode=mode, detail=detail,
             rel_score=pre["score"], rel_stage=C.rel_stage_label(pre["score"], pre["state"]),
             previous=prev, state_note=b_state,
+            rep_note=self._rep_note(gid, uid_a, world),
             material=await self._kb_ctx(gid, f"互动 对话 {mode}"),
         )
         data = r.data
@@ -1252,8 +1486,10 @@ class Game:
             self._quest_progress(gid, uid_a, "life", name=b.name)
         else:
             self._quest_progress(gid, uid_a, "social")
+        echo = await self.mainline_echo(gid, uid_a, ctx=f"与{b.name}「{mode}」{(data.get('narration') or '')[:60]}")
         return {
             "type": "interact",
+            "echo": echo,
             "gid": gid,
             "a_name": a.name, "b_name": b.name,
             "world_name": world.name,
@@ -1294,6 +1530,9 @@ class Game:
             raise GameError("对方还没有创建分身")
         if uid == target_uid:
             raise GameError("不能和自己确立关系哦")
+        a_exp = self._on_expedition(a)
+        if a_exp:
+            raise GameError(f"⚔ 你正在「{a_exp.get('title')}」远征途中,没法提这事。")
         label = label.strip()[:12]
         if not label:
             raise GameError("请写上想要的称谓,如:/分身 关系 @群友 爸爸")
@@ -1364,6 +1603,16 @@ class Game:
         wn = self._work_note(ch)
         if wn:
             raise GameError(f"⚒ 你正{wn},上班时间还是先把活干完吧——下班再来找「{npc_name}」。")
+        if self._is_ko(ch):
+            raise GameError("💔 你已重伤昏迷,没法去找 NPC。等日切时被救醒,或等群友来救。")
+        exp = self._on_expedition(ch)
+        if exp:
+            raise GameError(f"⚔ 你正在「{exp.get('title')}」远征途中,没法去找 NPC"
+                            f"(约还需 {self._exp_left_h(exp):.1f} 小时归来)。")
+        march = self._exp_npc_on_march(gid, npc_name)
+        if march:
+            raise GameError(f"⚔ 「{npc_name}」正随「{march.get('title')}」远征队在外,"
+                            f"不在世界里(约还需 {self._exp_left_h(march):.1f} 小时归来)。")
         npc = None
         for n in world.npcs:
             if n.get("name") == npc_name:
@@ -1377,8 +1626,10 @@ class Game:
         prev = self.db.recent_similar_logs(gid, uid, [npc_name], k=3)
         # 被困玩家找NPC:是否为能帮上忙的『特殊NPC』,由 LLM 判断
         state_note = self._state_note(ch)
+        self._attach_rep_line(gid, uid, world)
         r = await self.brain.npc_chat(world=world, npc=npc, char=ch, action=action,
                                       memories=mems, previous=prev, state_note=state_note,
+                                      rep_note=self._rep_note(gid, uid, world),
                                       material=await self._kb_ctx(gid, "NPC构图 对话 人物"))
         data = r.data
         self._count_interaction(ch)
@@ -1391,8 +1642,10 @@ class Game:
                            f"{ch.name} 与 {npc_name}:{(data.get('reply') or '')[:60]}…", world.name)
         # 任务进度:世界NPC互动
         self._quest_progress(gid, uid, "npc", name=npc_name)
+        echo = await self.mainline_echo(gid, uid, ctx=f"与{npc_name}:{action[:40]} {(data.get('reply') or '')[:40]}")
         return {
             "type": "npc",
+            "echo": echo,
             "gid": gid,
             "char_name": ch.name,
             "npc": npc,
@@ -1406,6 +1659,592 @@ class Game:
         }
 
     # ══════════════ 主动行动(练习/健身/打怪/冒险)══════════════
+    # ══════════════ 远征系统(世界观内的大队远征)══════════════
+    EXP_ISSUER_KEYS = ("公会", "据点", "基地", "议会", "宗门", "门派", "仙盟", "驿站", "大殿",
+                       "公司", "总部", "哨站", "哨所", "补给", "营", "队", "所", "殿", "盟",
+                       "阁", "府", "站", "社", "署", "部")
+
+    def _on_expedition(self, ch: Char) -> dict | None:
+        """当前远征状态(flags._exp),未在远征返回 None。"""
+        f = (ch.flags or {}).get("_exp")
+        return f if isinstance(f, dict) and f.get("until") else None
+
+    def _exp_left_h(self, exp: dict) -> float:
+        return max(0.0, (float(exp.get("until") or 0) - _now()) / 3600.0)
+
+    def _exp_companion_of(self, gid: str, uid: str) -> tuple[dict, Char] | None:
+        """uid(生活角色)是否正作为队友跟随某场远征:返回 (远征快照, 队长)。"""
+        for c in self.db.list_chars(gid):
+            exp = self._on_expedition(c)
+            if exp and uid in (exp.get("life_teammates") or []):
+                return exp, c
+        return None
+
+    def _exp_npc_on_march(self, gid: str, npc_name: str) -> dict | None:
+        """世界 NPC 是否正随某场远征在外:返回远征快照。"""
+        for c in self.db.list_chars(gid):
+            exp = self._on_expedition(c)
+            if exp and npc_name in (exp.get("teammates") or []):
+                return exp
+        return None
+
+    def _exp_note(self, ch: Char) -> str:
+        exp = self._on_expedition(ch)
+        if not exp:
+            return ""
+        return f"「{exp.get('title', '')}」远征中(目标「{exp.get('zone', '')}」,约还需 {self._exp_left_h(exp):.1f} 小时归来)"
+
+    def ensure_world_content(self, gid: str) -> World | None:
+        """确保当前世界的危险区域/治疗物品存在(旧数据自动按题材补齐并落库)。
+
+        v1.1 之前的世界没有 zones/heal_items 字段——在事件/打怪/远征/查看等
+        入口调用本方法,保证旧世界平滑获得新内容,叙事不缺席。"""
+        w = self.db.cur_world(gid)
+        if not w:
+            return None
+        changed = False
+        zones = [z for z in (w.zones or []) if isinstance(z, dict) and str(z.get("name", "")).strip()]
+        if len(zones) < 2:
+            w.zones = self._ensure_zones_baseline(w, zones)
+            changed = True
+        heals = [h for h in (w.heal_items or []) if isinstance(h, dict) and str(h.get("name", "")).strip()]
+        if not heals:
+            w.heal_items = self._ensure_heal_items_baseline(w, heals)
+            changed = True
+        if changed:
+            self.db.update_world(w.id, zones=w.zones, heal_items=w.heal_items)
+            self.db.append_log(gid, "", "misc",
+                               f"《{w.name}》的舆图被重新勘绘:危险区域与治疗物品名录补齐了", w.name)
+            _fire_remember(self.mem, gid, "", "world",
+                           f"《{w.name}》补齐了危险区域与治疗物品的名录", ref=f"zone:{_now():.0f}")
+        return w
+
+    def _exp_issuer(self, world: World) -> str:
+        """远征发布方:优先设施里带组织色彩的(公会/据点/宗门/公司…),贴合世界观;
+        兑底用第一个设施,再兑底『本地卫队』。"""
+        facs = [i for i in (world.infra or []) if isinstance(i, dict) and str(i.get("name", "")).strip()]
+        for it in facs:
+            blob = str(it.get("kind", "")) + str(it.get("name", ""))
+            if any(k in blob for k in self.EXP_ISSUER_KEYS):
+                return str(it.get("name"))
+        if facs:
+            return str(facs[0].get("name"))
+        return "本地卫队"
+
+    def _exp_teammates(self, gid: str, uid: str, world: World) -> list[dict]:
+        """远征队友:优先持久生活角色(成功归来可积累羁绊),再补世界NPC。"""
+        pool: list[dict] = []
+        for c in self.db.list_chars(gid):
+            if c.uid == uid or not is_npc_uid(c.uid):
+                continue
+            pool.append({"name": c.name, "kind": "life"})
+        used = {p["name"] for p in pool}
+        for n in (world.npcs or []):
+            nm = str(n.get("name", "")).strip()
+            if nm and nm not in used:
+                pool.append({"name": nm, "kind": "npc"})
+                used.add(nm)
+        random.shuffle(pool)
+        return pool[:random.randint(C.EXPEDITION_TEAM_MIN, C.EXPEDITION_TEAM_MAX)]
+
+    def _exp_success_rate(self, ch: Char, zone: dict, teammates_n: int) -> int:
+        """预估远征成功率(%):危险度重压,等级/六维/队友/生命/补给回血。"""
+        danger = max(1, min(5, int(zone.get("danger") or 3)))
+        rate = 0.95 - 0.14 * danger
+        rate += min(0.20, 0.02 * max(0, (int(getattr(ch, "level", 1) or 1) - 1)))
+        try:
+            attrs_avg = sum(int(v) for v in (ch.attrs or {}).values()) / max(1, len(C.ATTR_KEYS))
+        except Exception:
+            attrs_avg = 30
+        rate += (attrs_avg - 25) / 400.0
+        rate += min(0.12, 0.04 * max(0, teammates_n))
+        rate += (int(getattr(ch, "hp", C.HP_MAX)) / C.HP_MAX - 0.8) * 0.10
+        return int(round(max(0.08, min(0.95, rate)) * 100))
+
+    def _exp_offer_view(self, gid: str, uid: str, ch: Char, world: World | None, offer: dict) -> dict:
+        return {
+            "type": "expedition",
+            "phase": "offer",
+            "gid": gid, "uid": uid,
+            "char_name": ch.name,
+            "world_name": world.name if world else "",
+            "offer": offer,
+            "narration": str(offer.get("briefing") or ""),
+            "changes": [
+                f"⚔ 目标:{offer.get('zone_name')}(危险度★{offer.get('danger', '?')})",
+                f"⏱ 行程:约 {offer.get('duration_h', '?')} 小时",
+                "🛡 同行:" + ("、".join(offer.get("teammates") or []) or "待定"),
+                f"🎯 预估成功率:{offer.get('rate', '?')}%(属性过低可能失败)",
+                f"💰 {offer.get('teaser') or '报酬从优'}",
+            ],
+            "ok_llm": bool(offer.get("llm")),
+        }
+
+    async def ensure_expedition_offer(self, gid: str, uid: str) -> dict:
+        """查看今日远征委托(无则生成:按世界观由设施颁布,当日有效)。"""
+        ch = self.db.get_char(gid, uid)
+        if not ch:
+            raise GameError("你还没有创建分身")
+        if self._on_expedition(ch):
+            raise GameError(f"⚔ 你{self._exp_note(ch)},先等远征归来。用「/分身 远征 状态」查看进度。")
+        world = self.db.cur_world(gid)
+        if not world:
+            raise GameError("世界尚未初始化")
+        day = self._day_key()
+        key = f"exp_offer:{day}:{uid}"
+        cached = self.db.kv_get(gid, key)
+        if cached:
+            try:
+                return self._exp_offer_view(gid, uid, ch, world, json.loads(cached))
+            except Exception:
+                pass
+        world = self.ensure_world_content(gid) or world
+        zones = [z for z in (world.zones or []) if isinstance(z, dict) and str(z.get("name", "")).strip()]
+        if not zones:
+            zones = self._ensure_zones_baseline(world, world.zones)
+        # 目标区域:按等级加权(远征要有挑战,但别送死)
+        pref = max(1, min(5, 1 + int(getattr(ch, "level", 1) or 1) // 6))
+        weights = [1.0 / (1 + abs(int(z.get("danger") or 1) - pref)) for z in zones]
+        zone = random.choices(zones, weights=weights, k=1)[0]
+        danger = max(1, min(5, int(zone.get("danger") or 3)))
+        lo, hi = C.EXPEDITION_DURATIONS.get(danger, (6, 16))
+        duration_h = random.randint(lo, hi)
+        issuer = self._exp_issuer(world)
+        team = self._exp_teammates(gid, uid, world)
+        team_names = [t["name"] for t in team]
+        rate = self._exp_success_rate(ch, zone, len(team_names))
+        offer = {
+            "zone_name": str(zone.get("name")), "zone_kind": str(zone.get("kind", "")),
+            "danger": danger, "duration_h": duration_h,
+            "issuer": issuer, "teammates": team_names, "rate": rate, "day": day, "llm": False,
+        }
+        r = await self.brain.expedition_offer(world=world, char=ch, zone=zone, issuer=issuer,
+                                              teammates=team_names, duration_h=duration_h, rate=rate)
+        if r.ok:
+            offer.update({"title": r.data["title"], "briefing": r.data["briefing"],
+                          "teaser": r.data.get("teaser", ""), "llm": True})
+        else:
+            enemies = "、".join(e.get("name", "") for e in (zone.get("enemies") or []) if isinstance(e, dict))
+            offer.update({
+                "title": f"远征令·{zone.get('name')}",
+                "briefing": (f"{issuer}征召勇毅之士远征「{zone.get('name')}」({zone.get('kind', '')})——"
+                             + (f"该地出没{enemies}," if enemies else "")
+                             + f"行程约 {duration_h} 小时,风险自负,酬金与战利品从优。同行:{'、'.join(team_names) or '待定'}。"),
+                "teaser": "酬金与战利品丰厚",
+            })
+        self.db.kv_set(gid, key, json.dumps(offer, ensure_ascii=False))
+        return self._exp_offer_view(gid, uid, ch, world, offer)
+
+    async def accept_expedition(self, gid: str, uid: str) -> dict:
+        """接下今日远征委托,进入远征状态(期间无法进行其他操作)。"""
+        ch = self.db.get_char(gid, uid)
+        if not ch:
+            raise GameError("你还没有创建分身")
+        if self._on_expedition(ch):
+            raise GameError(f"⚔ 你{self._exp_note(ch)}。")
+        if self._is_locked(ch):
+            raise GameError(f"⛓ 你正被「{self._state_note(ch)}」困住,接不下远征委托。")
+        if self._work_note(ch):
+            raise GameError(f"⚒ 你正{self._work_note(ch)},先下班再说。")
+        world = self.db.cur_world(gid)
+        if not world:
+            raise GameError("世界尚未初始化")
+        day = self._day_key()
+        cached = self.db.kv_get(gid, f"exp_offer:{day}:{uid}")
+        if not cached:
+            raise GameError("今天还没有属于你的远征委托。先发「/分身 远征」查看布告。")
+        try:
+            offer = json.loads(cached)
+        except Exception:
+            raise GameError("远征委托数据异常,请重新「/分身 远征」刷新")
+        cur_zones = {str(z.get("name") or "") for z in (world.zones or []) if isinstance(z, dict)}
+        if str(offer.get("zone_name") or "") not in cur_zones:
+            # 世界变动后旧委托作废
+            self.db.kv_set(gid, f"exp_offer:{day}:{uid}", "")
+            raise GameError("这份远征委托随世界变动作废了,重新发「/分身 远征」领取新的吧。")
+        started = _now()
+        duration_h = float(offer.get("duration_h") or 6)
+        report_every_h = max(1, self._cfgi("expedition_report_hours", C.EXPEDITION_REPORT_HOURS))
+        flags = dict(ch.flags or {})
+        life_uids = {c.name: c.uid for c in self.db.list_chars(gid) if is_npc_uid(c.uid)}
+        flags["_exp"] = {
+            "title": str(offer.get("title") or "远征"), "zone": str(offer.get("zone_name") or "未知之地"),
+            "kind": str(offer.get("zone_kind") or ""), "danger": int(offer.get("danger") or 3),
+            "duration_h": duration_h, "issuer": str(offer.get("issuer") or ""),
+            "teammates": [str(t) for t in (offer.get("teammates") or [])],
+            "life_teammates": [life_uids[t] for t in (offer.get("teammates") or []) if t in life_uids],
+            "started": started, "until": started + duration_h * 3600,
+            "report_every_h": report_every_h, "next_report": started + report_every_h * 3600,
+            "reports": 0, "supplies_used": 0,
+        }
+        ch.flags = flags
+        ch.stamina = max(0, ch.stamina - 15)
+        self.db.upsert_char(ch)
+        wn = world.name if world else ""
+        self.db.append_log(gid, uid, "act",
+                           f"{ch.name} 接下「{offer.get('title')}」远征委托,随队向「{offer.get('zone_name')}」进发"
+                           f"(约 {duration_h:.0f} 小时,成功率约 {offer.get('rate', '?')}%)", wn)
+        await self.mem.remember(gid, uid, "char",
+                                f"接受了「{offer.get('title')}」远征,目标{offer.get('zone_name')},"
+                                f"同行:{'、'.join(offer.get('teammates') or []) or '同伴'}", ref=f"exp:{started:.0f}")
+        await self.mem.remember(gid, "", "world",
+                                f"《{wn}》{offer.get('issuer') or '当局'}颁布远征委托,「{ch.name}」一队向「{offer.get('zone_name')}」进发",
+                                ref=f"exp:{started:.0f}")
+        exp_snap = dict(flags["_exp"], progress=0)
+        r = await self.brain.expedition_report(world=world, char=ch, exp=exp_snap,
+                                               phase="誓师出发") if world is not None else None
+        if r is not None and r.ok:
+            narration = str(r.data["narration"])
+            dialogues = r.data.get("dialogues") or []
+        else:
+            narration = (f"「{offer.get('issuer') or '当局'}」的号令下,{ch.name} 与 "
+                         f"{'、'.join(offer.get('teammates') or []) or '同伴们'} 整装出发,"
+                         f"踏上前往「{offer.get('zone_name')}」的征途。号角/引擎/驼铃——声音很快被荒野吞没。")
+            dialogues = []
+        return {
+            "type": "expedition",
+            "phase": "depart",
+            "gid": gid, "uid": uid,
+            "char_name": ch.name,
+            "world_name": wn,
+            "title": str(offer.get("title") or "远征"),
+            "narration": narration,
+            "dialogues": dialogues,
+            "changes": ["体力-15", f"⏱ 预计 {duration_h:.0f} 小时后归来",
+                        f"🎯 成功率约 {offer.get('rate', '?')}%",
+                        "⚔ 远征期间无法进行其他操作,途中每几小时播报一次"],
+            "ok_llm": r.ok,
+        }
+
+    async def expedition_report(self, gid: str, uid: str) -> dict | None:
+        """远征途中的一次剧情播报(由主循环按间隔调用)。"""
+        ch = self.db.get_char(gid, uid)
+        if not ch:
+            return None
+        exp = self._on_expedition(ch)
+        if not exp:
+            return None
+        now = _now()
+        if now < float(exp.get("next_report") or 0):
+            return None
+        world = self.db.cur_world(gid)
+        started = float(exp.get("started") or now)
+        until = float(exp.get("until") or now)
+        span = max(1.0, until - started)
+        progress = int(min(99, (now - started) / span * 100))
+        phase = "行军" if progress < 35 else ("遭遇战" if progress < 70 else "险境")
+        # 补给消耗:背包有治疗物品时过半概率消耗一份维持状态(减轻损耗)
+        drain_hp = max(1, int(exp.get("danger") or 3))
+        drain_st = 6
+        used_item = ""
+        heal_names = {h["name"] for h in self.heal_items_of(gid, world)}
+        usable = [it["name"] for it in self.db.items_list(gid, uid) if it["name"] in heal_names]
+        if usable and random.random() < 0.55:
+            used_item = random.choice(usable)
+            self.db.item_remove(gid, uid, used_item, 1)
+            drain_hp = 0
+            drain_st = 3
+        supplies_note = (f"队伍刚消耗了背包里的「{used_item}」维持状态,叙述中自然带过即可,不必再输出物品变化。"
+                         if used_item else "")
+        hp_before = int(getattr(ch, "hp", C.HP_MAX))
+        ch.hp = max(1, hp_before - drain_hp)   # 途中不轻易昏迷,失败结算才可能重伤
+        ch.stamina = max(0, ch.stamina - drain_st)
+        exp["reports"] = int(exp.get("reports") or 0) + 1
+        if used_item:
+            exp["supplies_used"] = int(exp.get("supplies_used") or 0) + 1
+        exp["progress"] = progress
+        exp["next_report"] = now + max(1, int(exp.get("report_every_h") or C.EXPEDITION_REPORT_HOURS)) * 3600
+        ch.flags = dict(ch.flags or {})
+        ch.flags["_exp"] = exp
+        self.db.upsert_char(ch)
+        r = await self.brain.expedition_report(world=world, char=ch, exp=exp, phase=phase,
+                                               supplies_note=supplies_note) if world is not None else None
+        if r is not None and r.ok:
+            narration = str(r.data["narration"])
+            dialogues = r.data.get("dialogues") or []
+        else:
+            narration = (f"远征队伍在「{exp.get('zone')}」的深处推进:绕开哨卫、补齐饮水、轮流守夜,"
+                         f"{phase}的痕迹随处可见。前方仍未到头,但每个人都在往前走。")
+            dialogues = []
+        changes = [f"体力-{drain_st}"]
+        if drain_hp:
+            changes.append(f"生命-{drain_hp}")
+        if used_item:
+            changes.append(f"🎒 消耗「{used_item}」")
+        self.db.append_log(gid, uid, "act",
+                           f"【远征·{phase}】{ch.name} 的队伍深入「{exp.get('zone')}」({progress}%):"
+                           f"{narration[:60]}…", world.name if world else "")
+        return {
+            "type": "expedition",
+            "phase": "report",
+            "gid": gid, "uid": uid,
+            "char_name": ch.name,
+            "world_name": world.name if world else "",
+            "title": str(exp.get("title") or "远征"),
+            "phase_name": phase,
+            "progress": progress,
+            "narration": narration,
+            "dialogues": dialogues,
+            "changes": changes,
+            "ok_llm": r.ok,
+        }
+
+    async def settle_expedition(self, gid: str, uid: str) -> dict:
+        """远征归来结算:成功率判定;成功=丰厚奖励+高潮叙述;失败=重伤+损失+重要剧情叙述。"""
+        ch = self.db.get_char(gid, uid)
+        if not ch:
+            raise GameError("你还没有创建分身")
+        exp = self._on_expedition(ch)
+        if not exp:
+            raise GameError("你没有进行中的远征。")
+        flags = dict(ch.flags or {})
+        flags.pop("_exp", None)
+        ch.flags = flags
+        self.db.upsert_char(ch)   # 先摘标记防并发
+        world = self.db.cur_world(gid)
+        wn = world.name if world else ""
+        zone_danger = max(1, min(5, int(exp.get("danger") or 3)))
+        teammates = [str(t) for t in (exp.get("teammates") or [])]
+        rate = self._exp_success_rate(ch, {"danger": zone_danger}, len(teammates))
+        outcome = "success" if random.randint(1, 100) <= rate else "fail"
+        changes: list[str] = []
+        items_gain: list[str] = []
+        if outcome == "success":
+            dur_factor = 1.0 + min(1.5, float(exp.get("duration_h") or 6) / 48.0)
+            gold = int((60 + 90 * zone_danger) * dur_factor * random.uniform(0.85, 1.3))
+            exp_gain = 25 + 18 * zone_danger + int(getattr(ch, "level", 1) or 1) * 2
+            rep = 4 + zone_danger
+            ch.gold += gold
+            zone = next((z for z in ((world.zones if world else None) or [])
+                         if z.get("name") == exp.get("zone")), {}) or {}
+            loot = [str(x) for x in (zone.get("loot") or []) if str(x).strip()]
+            random.shuffle(loot)
+            for lt in loot[:random.randint(1, 2)]:
+                self.db.item_add(gid, uid, lt[:12], 1, f"远征「{exp.get('zone')}」缴获"[:20])
+                items_gain.append(lt[:12])
+            heals = self.heal_items_of(gid, world)
+            if heals:
+                hi = heals[-1]
+                self.db.item_add(gid, uid, hi["name"], 1, str(hi.get("note", ""))[:20])
+                items_gain.append(hi["name"])
+            changes += self._apply_effects(ch, {"exp": exp_gain, "reputation": rep})
+            changes.append(f"金币+{gold}")
+            boost = 2 if zone_danger >= 4 else 1
+            attr_names = list(C.ATTR_KEYS)
+            random.shuffle(attr_names)
+            for k in attr_names[:boost]:
+                ch.attrs[k] = min(100, ch.attrs.get(k, 0) + boost)
+                changes.append(f"{C.ATTR_NAMES.get(k, k)}+{boost}(远征淬炼)")
+            for it in items_gain:
+                changes.append(f"🎒 获得「{it}」")
+            self.db.kv_incr(gid, "defeats_total", zone_danger)
+            reward_line = (f"报酬 {gold} 金币;经验 +{exp_gain};声望 +{rep};"
+                           + (f"战利品:{'、'.join(items_gain)};" if items_gain else "")
+                           + (f"属性小幅提升(+{boost});" if attr_names else "")
+                           + "队伍凯旋,讨伐计数累计。")
+        else:
+            hp_loss = random.randint(25, 45) + 3 * zone_danger
+            gold_loss = random.randint(0, 40)
+            if gold_loss:
+                ch.gold = max(0, ch.gold - gold_loss)
+            hp_chg = self._apply_hp(ch, -hp_loss)
+            if hp_chg:
+                changes.append(hp_chg)
+            if gold_loss:
+                changes.append(f"金币-{gold_loss}")
+            changes += self._apply_effects(ch, {"exp": 5, "reputation": -2})
+            reward_line = (f"远征失败:重伤(生命-{hp_loss})"
+                           + (f",损失 {gold_loss} 金币" if gold_loss else "")
+                           + ",经验+5,声望-2。")
+        # 成功归来:与生活角色队友的羁绊+
+        if outcome == "success":
+            life_names = {c.name: c.uid for c in self.db.list_chars(gid) if is_npc_uid(c.uid)}
+            for t in teammates:
+                if t in life_names:
+                    self.db.bump_rel(gid, uid, life_names[t], 4, "并肩远征")
+                    changes.append(f"💞 与{t}羁绊+4")
+        self.db.upsert_char(ch)
+        r = await self.brain.expedition_settle(world=world, char=ch, exp=exp, outcome=outcome,
+                                               reward_line=reward_line) if world is not None else None
+        if r is not None and r.ok:
+            narration = str(r.data["narration"])
+            dialogues = r.data.get("dialogues") or []
+        else:
+            narration = ("远征落幕。队伍在最后一段路上拼尽了全力——"
+                         + ("战利品与捷报一同回到了出发的地方,人人带伤,个个挺立。"
+                            if outcome == "success" else
+                            "他们在夜色里撤了下来,带着伤、教训和活着回来的庆幸。"))
+            dialogues = []
+        outcome_txt = "大获全胜" if outcome == "success" else "折戟而归"
+        await self.mem.remember(gid, uid, "char",
+                                f"远征「{exp.get('title')}」{outcome_txt}:{reward_line[:70]}",
+                                ref=f"exp:{float(exp.get('started') or 0):.0f}")
+        await self.mem.remember(gid, "", "world",
+                                f"《{wn}》远征队归来:「{exp.get('title')}」{outcome_txt}({exp.get('zone')})",
+                                ref=f"exp:{float(exp.get('started') or 0):.0f}")
+        self.db.append_log(gid, uid, "act",
+                           f"⚔ 远征「{exp.get('title')}」{outcome_txt}:{reward_line[:80]}", wn)
+        return {
+            "type": "expedition",
+            "phase": "return",
+            "gid": gid, "uid": uid,
+            "char_name": ch.name,
+            "world_name": wn,
+            "title": str(exp.get("title") or "远征"),
+            "outcome": outcome,
+            "narration": narration,
+            "dialogues": dialogues,
+            "changes": changes,
+            "ok_llm": r.ok,
+        }
+
+    def abort_expedition(self, gid: str, uid: str) -> dict:
+        """中途撤离(逃兵):放弃远征,声望重挫+损失,立即恢复自由。"""
+        ch = self.db.get_char(gid, uid)
+        if not ch:
+            raise GameError("你还没有创建分身")
+        exp = self._on_expedition(ch)
+        if not exp:
+            raise GameError("你没有进行中的远征。")
+        flags = dict(ch.flags or {})
+        flags.pop("_exp", None)
+        ch.flags = flags
+        gold_loss = 50
+        ch.gold = max(0, ch.gold - gold_loss)
+        changes = self._apply_effects(ch, {"reputation": -8, "exp": 2, "mood": -5})
+        changes.append(f"金币-{gold_loss}(违约金)")
+        hp_chg = self._apply_hp(ch, -15)
+        if hp_chg:
+            changes.append(hp_chg)
+        self.db.upsert_char(ch)
+        wn = self.db.cur_world(gid)
+        self.db.append_log(gid, uid, "act",
+                           f"🏳 {ch.name} 从「{exp.get('title')}」远征中途撤离(声望-8)", wn.name if wn else "")
+        return {
+            "type": "expedition",
+            "phase": "abort",
+            "gid": gid, "uid": uid,
+            "char_name": ch.name,
+            "world_name": wn.name if wn else "",
+            "title": str(exp.get("title") or "远征"),
+            "narration": (f"{ch.name} 在途中选择了撤离。队伍目送TA的背影消失在来路上——"
+                          "违约的代价要自己承担,但至少,人还完整。"),
+            "dialogues": [],
+            "changes": changes,
+            "ok_llm": False,
+        }
+
+    def expedition_status(self, gid: str, uid: str) -> str:
+        """远征进度文本(供「远征 状态」)。"""
+        ch = self.db.get_char(gid, uid)
+        if not ch:
+            raise GameError("你还没有创建分身")
+        exp = self._on_expedition(ch)
+        if not exp:
+            return "当前没有进行中的远征。发「/分身 远征」查看今日委托。"
+        now = _now()
+        started = float(exp.get("started") or now)
+        until = float(exp.get("until") or now)
+        progress = int(min(99, (now - started) / max(1.0, until - started) * 100))
+        next_in = max(0, int((float(exp.get("next_report") or 0) - now) / 60))
+        return (
+            f"⚔ {ch.name} 的远征简报\n"
+            f"· 委托:「{exp.get('title')}」(发布:{exp.get('issuer') or '?'})\n"
+            f"· 目标:「{exp.get('zone')}」(危险度★{exp.get('danger', '?')})\n"
+            f"· 同行:{'、'.join(exp.get('teammates') or []) or '同伴'}\n"
+            f"· 行程:约 {progress}%,预计 {self._exp_left_h(exp):.1f} 小时后归来\n"
+            f"· 播报:已收到 {exp.get('reports', 0)} 段,下一段约 {next_in} 分钟后\n"
+            f"· 补给:途中已消耗 {exp.get('supplies_used', 0)} 份\n"
+            "远征期间无法进行其他操作,耐心等捷报。"
+        )
+
+    async def _sweep_expeditions(self, gid: str) -> list[dict]:
+        """主循环扫描:到点的远征播报/归来结算(一次广播)。"""
+        views: list[dict] = []
+        for ch in self.db.list_chars(gid):
+            exp = self._on_expedition(ch)
+            if not exp:
+                continue
+            now = _now()
+            try:
+                if now >= float(exp.get("until") or 0):
+                    views.append(await self.settle_expedition(gid, ch.uid))
+                elif now >= float(exp.get("next_report") or 0):
+                    v = await self.expedition_report(gid, ch.uid)
+                    if v:
+                        views.append(v)
+            except GameError:
+                continue
+            except Exception:
+                # 单次播报/结算失败不阻塞:下个周期会重试(next_report/until 未推进时)
+                continue
+        return views
+
+    # ══════════════ 讨伐(打怪 × 危险区域 融合)══════════════
+    def _hunt_zone_from_quests(self, gid: str, uid: str, zones: list) -> dict | None:
+        """今日开放委托的讨伐步骤(keywords)指向的区域/敌人——打怪未点名时自动对齐委托。"""
+        day = self._day_key()
+        kws: list[str] = []
+        for q in self.db.list_quests(gid, uid, day):
+            if q["state"] != "open":
+                continue
+            steps = json.loads(q.get("steps") or "[]") if isinstance(q.get("steps"), str) else (q.get("steps") or [])
+            for s in steps:
+                if isinstance(s, dict) and str(s.get("type") or "") == "act":
+                    kws += [str(k).strip() for k in (s.get("keywords") or []) if str(k).strip()]
+        for kw in kws:
+            for z in zones:
+                zn = str(z.get("name", ""))
+                if kw and (kw in zn or zn in kw):
+                    return z
+                for e in (z.get("enemies") or []):
+                    en = str(e.get("name", "")) if isinstance(e, dict) else ""
+                    if en and (kw in en or en in kw):
+                        return z
+        return None
+
+    def _hunt_zone_match(self, gid: str, uid: str, world: World, ch: Char, detail: str) -> tuple[dict | None, str]:
+        """为『打怪』锁定讨伐区域(融合危险区域系统):
+        1) 玩家在描述中点名了区域/敌人 → 精确锁定;
+        2) 未点名但今日委托的讨伐步骤指向某区域/敌人 → 自动对齐委托(环环相扣);
+        3) 都没有 → 按角色等级挑危险度适配的区域(低等级不轻易送死)。
+        返回 (区域, 给 LLM 的锁定说明)。"""
+        zones = [z for z in (world.zones or []) if isinstance(z, dict) and str(z.get("name", "")).strip()]
+        if not zones:
+            return None, ""
+        text = (detail or "").strip()
+
+        def _hit(z: dict, s: str) -> bool:
+            if not s:
+                return False
+            zn = str(z.get("name", ""))
+            if s in zn or zn in s:
+                return True
+            for e in (z.get("enemies") or []):
+                en = str(e.get("name", "")) if isinstance(e, dict) else ""
+                if en and (s in en or en in s):
+                    return True
+            return False
+
+        zone = next((z for z in zones if _hit(z, text)), None)
+        if zone is not None:
+            how = "玩家指定"
+        else:
+            zone = self._hunt_zone_from_quests(gid, uid, zones)
+            how = "今日委托对齐" if zone else ""
+        if zone is None:
+            pref = max(1, min(5, 1 + int(getattr(ch, "level", 1) or 1) // 8))
+            weights = [1.0 / (1 + abs(int(z.get("danger") or 1) - pref)) for z in zones]
+            zone = random.choices(zones, weights=weights, k=1)[0]
+            how = "按历练挑选"
+        enemy_names = "、".join(str(e.get("name", "")) for e in (zone.get("enemies") or []) if isinstance(e, dict))
+        note = (
+            f"地点「{zone.get('name')}」({zone.get('kind', '')},危险度{zone.get('danger', '?')},{how})"
+            + (f",主要出没:{enemy_names}" if enemy_names else "")
+            + f",可掉落:{'、'.join((zone.get('loot') or [])[:3]) or '无'}。"
+        )
+        return zone, note
+
     async def act(self, gid: str, uid: str, act_key: str, detail: str = "") -> dict:
         """玩家主动行动一次。act_key: 预设施名或'冒险'(自定义)。消耗体力+每日次数,概率触发机缘奖励。"""
         ch = self.db.get_char(gid, uid)
@@ -1414,6 +2253,7 @@ class Game:
         world = self.db.cur_world(gid)
         if not world:
             raise GameError("世界尚未初始化,管理员:「/分身 初始化世界」")
+        world = self.ensure_world_content(gid) or world
         preset = C.ACTIONS.get(act_key) or C.ACTIONS["冒险"]
         name = preset["name"]
         # 兼职时段:上工中无法主动行动
@@ -1422,6 +2262,15 @@ class Game:
             raise GameError(f"⚒ 你正{wn},下班前没法自由行动。先专心把班上完吧。")
         # 特殊状态:被困时只能靠『冒险』拼脱困,预设施名(练习/健身/打怪)一律禁止
         state_note = self._state_note(ch)
+        if self._is_ko(ch):
+            raise GameError(
+                "💔 你已重伤昏迷(生命0),动弹不得。日切时会被送到安全处(家/医院/据点)救醒;"
+                "在此之前只能等群友来救(互动),或用声望好的朋友送医。"
+            )
+        exp = self._on_expedition(ch)
+        if exp:
+            raise GameError(f"⚔ 你正在「{exp.get('title')}」远征途中,无暇分身"
+                            f"(约还需 {self._exp_left_h(exp):.1f} 小时归来)。")
         if state_note and name != "冒险":
             raise GameError(
                 f"⛓ 你正被「{state_note}」困住,无法自由行动。"
@@ -1442,10 +2291,19 @@ class Game:
         action_hint = preset["prompt"]
         if detail:
             action_hint = f"{action_hint} 玩家补充:{detail[:80]}"
+        # 打怪 × 危险区域融合:锁定讨伐地点(玩家指定 > 委托对齐 > 等级适配)
+        zone = None
+        zone_note = ""
+        if name == "打怪":
+            zone, zone_note = self._hunt_zone_match(gid, uid, world, ch, detail)
+            if zone_note:
+                action_hint = f"{action_hint} 讨伐目标:{zone_note}"
         mems = await self.mem.related(gid, f"{ch.name} {name} {detail}", uid=uid)
         r = await self.brain.resolve_action(
             world=world, char=ch, action_name=name, detail=action_hint,
             kind=preset["kind"], memories=mems, state_note=state_note,
+            heal_note=self._backpack_heal_note(gid, uid, world),
+            zone_note=zone_note,
             material=await self._kb_ctx(gid, f"主动行动 {name} 进展"),
         )
         effects = dict(r.data.get("effects") or {})
@@ -1469,17 +2327,25 @@ class Game:
         changes += state_changes
         # 物品得失(冒险捡到/缴获/消耗)
         changes += self._apply_items(gid, uid, r.data.get("items_gain"), r.data.get("items_lose"))
-        # 任务进度:冒险/打怪 行动
+        # 讨伐计数(主线 defeat 门槛用):打怪推演成功即计一次
+        if name == "打怪" and r.ok:
+            self.db.kv_incr(gid, "defeats_total", 1)
+        # 任务进度:冒险/打怪 行动(叙述也参与关键词匹配:区域/敌人名在叙述中出现即算完成)
         if name in ("冒险", "打怪"):
-            self._quest_progress(gid, uid, "act", name=name, text=f"{ch.name} {detail[:60]}")
+            lead = "讨伐" if name == "打怪" else ""
+            self._quest_progress(gid, uid, "act", name=name,
+                                 text=f"{lead} {ch.name} {detail[:60]} {(r.data.get('narration') or '')[:80]}")
         mem_text = r.data.get("memory") or f"{ch.name}在《{world.name}》「{name}」:{detail[:30]}"
         await self.mem.remember(gid, uid, "char", mem_text, ref=f"act:{_now():.0f}")
         await self.mem.remember(gid, "", "world",
                                 f"《{world.name}》{ch.name}「{name}」:{(r.data.get('narration') or '')[:60]}")
         self.db.append_log(gid, uid, "act",
                            f"{ch.name}「{name}」:{(r.data.get('narration') or '')[:90]} ", world.name)
+        echo = await self.mainline_echo(gid, uid, ctx=f"「{name}」{(r.data.get('narration') or '')[:70]}")
         return {
             "type": "act",
+            "echo": echo,
+            "zone": (zone.get("name") if zone else ""),
             "gid": gid,
             "char_name": ch.name,
             "action_name": name,
@@ -1615,8 +2481,16 @@ class Game:
                 self.db.append_log(gid, ch.uid, "title", f"{ch.name} 获得称号「{C.FLAG_TITLES['traveler']}」")
             if (ch.flags or {}).get("_state"):
                 freed += 1
+                was_ko = int(getattr(ch, "hp", 1)) <= 0
                 ch.flags.pop("_state", None)
-                self.db.append_log(gid, ch.uid, "misc", f"世界变动把被困的「{ch.name}」一并卷走,牢笼/束缚在时空震荡中崩解")
+                if was_ko:
+                    ch.hp = C.HP_WAKEUP
+                self.db.append_log(gid, ch.uid, "misc", f"世界变动把被困的「{ch.name}」一并卷走,牢笼/束缚在时空震荡中崩解"
+                                   + ("——新世界的医生把TA从昏迷中救醒了" if was_ko else ""))
+            if (ch.flags or {}).get("_exp"):
+                ch.flags.pop("_exp", None)
+                self.db.append_log(gid, ch.uid, "misc",
+                                   f"时空震荡把正在远征的「{ch.name}」一队人卷了回来——远征中断,奖励无从谈起")
             ch.mood = min(C.MOOD_MAX, ch.mood + 5)
             ch.exp += 8
             self.db.upsert_char(ch)
@@ -1643,6 +2517,10 @@ class Game:
                 f"⛓ 你正被「{state_note}」困住,无法开启穿越之门。"
                 "先脱困再说——试试「/分身 冒险 <描述>」、找特殊NPC求助,或等世界变动把你卷走 / 群友来救。"
             )
+        exp = self._on_expedition(ch)
+        if exp:
+            raise GameError(f"⚔ 你正在「{exp.get('title')}」远征途中,无法开启穿越之门"
+                            f"(约还需 {self._exp_left_h(exp):.1f} 小时归来)。")
         cd = self._limits_for(g)[4]
         wait = cd * 3600 - (_now() - float(g.get("last_travel_at") or 0))
         if wait > 0:
@@ -1695,23 +2573,80 @@ class Game:
 
     # ══════════════ 基础设施 / 世界主线 / 房产 ══════════════
     async def mainline_progress(self, gid: str, uid: str) -> dict:
-        """推进世界主线一步:当前未完成的小节中,取第一小节让 LLM 结算这一步的进展。"""
+        """推进世界主线一步:推进者需满足当前小节的阶段门槛(声望/任务/讨伐)。
+        全部小节完成后,LLM 续写『尾声』新篇章——结局之后,世界仍在继续。"""
         ch = self.db.get_char(gid, uid)
         if not ch:
             raise GameError("你还没有创建分身")
         state_note = self._state_note(ch)
+        if self._is_ko(ch):
+            raise GameError("💔 你已重伤昏迷,没法去推进主线。先等苏醒/治疗。")
+        exp = self._on_expedition(ch)
+        if exp:
+            raise GameError(f"⚔ 你正在「{exp.get('title')}」远征途中,没法推进主线"
+                            f"(约还需 {self._exp_left_h(exp):.1f} 小时归来)。")
         if state_note:
             raise GameError(f"⛓ 你正被「{state_note}」困住,暂时没法去推进主线。先脱困再说。")
         w = self.db.cur_world(gid)
         if not w:
             raise GameError("世界尚未初始化")
-        ml = list(w.mainline or [])
+        ml = [dict(m) for m in (w.mainline or []) if isinstance(m, dict)]
         if not ml:
             raise GameError("这个世界暂时没有可推进的主线(等新一轮世界变动或重新生成)。")
-        cur = ml[0]
+        cur = next((m for m in ml if not m.get("done")), None)
+        # ── 全部完成 → 续写尾声新篇章(结局后的世界仍在继续)──
+        if cur is None:
+            r = await self.brain.gen_epilogue(world=w)
+            stages = [s for s in (r.data.get("stages") or []) if s.get("stage")]
+            narration = r.data.get("narration") or ""
+            if not stages:
+                raise GameError("这个世界的篇章已全部落幕。去别的世界看看,或等一次世界变动开启新故事。")
+            ml.extend(stages)
+            self.db.update_world(w.id, mainline=ml)
+            await self.mem.remember(gid, "", "world",
+                                    f"《{w.name}》篇章完结,尾声新篇章开启({len(stages)}节)", ref=f"mainline:{w.id}")
+            self.db.append_log(gid, uid, "event",
+                               f"{ch.name} 见证了《{w.name}》旧篇章的落幕——尾声新篇章开启", w.name)
+            return {
+                "type": "mainline",
+                "gid": gid,
+                "world_name": w.name,
+                "stage": "尾声 · 新篇章",
+                "narration": (narration + "\n新篇章:「" + "」「".join(s["stage"] for s in stages) + "」已开启,"
+                              "用「/分身 主线 推进」继续。").strip(),
+                "changes": [],
+                "remaining": len(stages),
+                "ok_llm": r.ok,
+            }
+        # ── 阶段门槛检查:声望 / 任务 / 讨伐 ──
+        goal_note = ""
+        gt = str(cur.get("goal_type") or "").strip()
+        gv = int(cur.get("goal_value") or 0)
+        if gt and gv:
+            if gt == "reputation":
+                have = self.db.rep_get(gid, uid, w.id)
+                progress = f"你的声望 {have}/{gv}"
+            elif gt == "quest":
+                have = int(self.db.kv_get(gid, "quests_done_total") or 0)
+                progress = f"全群累计完成任务 {have}/{gv} 件"
+            elif gt == "defeat":
+                have = int(self.db.kv_get(gid, "defeats_total") or 0)
+                progress = f"全群累计讨伐 {have}/{gv} 次"
+            else:
+                have, progress = None, ""
+            if have is not None and have < gv:
+                raise GameError(
+                    f"主线「{cur['stage']}」的门槛尚未达成:{progress}。"
+                    f"({cur.get('goal_note', '')})先去积累历练,水到渠成后再来推进。")
+            goal_note = f"{cur.get('goal_note', '')}(当前:{progress})"
+        self._attach_rep_line(gid, uid, w)
+        # 篇章终章(推完这一节主线即完结)→ 高潮剧情权重;其余关键节点 → 重要剧情
+        remaining_after = [m for m in ml if m is not cur and not m.get("done")]
+        weight = "climax" if not remaining_after else "major"
         # 让 LLM 结算这一步
         r = await self.brain.resolve_mainline(
-            world=w, char=ch, stage=cur, material=await self._kb_ctx(gid, "世界主线 剧情 推进"))
+            world=w, char=ch, stage=cur, goal_note=goal_note, weight=weight,
+            material=await self._kb_ctx(gid, "世界主线 剧情 推进"))
         d = r.data
         changes = self._apply_effects(ch, d.get("effects") or {})
         cur["done"] = True
@@ -1724,10 +2659,6 @@ class Game:
                                 f"《{w.name}》主线进展:「{cur['stage']}」——{result_text[:80]}")
         self.db.append_log(gid, uid, "event",
                            f"{ch.name} 推进主线「{cur['stage']}」:{result_text[:80]}", w.name)
-        # 主线阶段结束 → 记一段到世界记忆
-        if not [m for m in ml if not m.get("done")] and len(list(w.mainline or [])):
-            await self.mem.remember(gid, "", "world",
-                                    f"《{w.name}》主线的「{cur['stage']}」这一小节落幕了", ref=f"mainline:{w.id}")
         remaining = [m for m in ml if not m.get("done")]
         return {
             "type": "mainline",
@@ -1746,6 +2677,10 @@ class Game:
             raise GameError("你还没有创建分身")
         if self._is_locked(ch):
             raise GameError(f"⛓ 你正被「{self._state_note(ch)}」困住,无法{what}。")
+        exp = self._on_expedition(ch)
+        if exp:
+            raise GameError(f"⚔ 你正在「{exp.get('title')}」远征途中(目标「{exp.get('zone')},"
+                            f"约还需 {self._exp_left_h(exp):.1f} 小时归来),远征结束前无法{what}。")
         wn = self._work_note(ch)
         if wn:
             raise GameError(f"⚒ 你正{wn},下班前没法{what}。先专心把班上完吧。")
@@ -2000,6 +2935,13 @@ class Game:
         if it is None:
             names = "、".join(f"{i.get('name')}" for i in facs[:20]) or "无"
             raise GameError(f"《{w.name}》没有「{name}」这处地方。现有设施:{names}")
+        # 医疗/店铺设施的特殊办理:治疗与购买走系统结算(不耗每日光顾次数、不耗 LLM)
+        act = (action or "").strip()
+        if C.is_medical_infra(it) and any(k in act for k in ("治疗", "看伤", "就诊", "治伤", "就医", "疗伤")):
+            return self.heal_at_hospital(gid, uid)
+        if act.startswith(("买", "购买")) and (C.is_medical_infra(it) or C.is_shop_infra(it)):
+            goods = re.sub(r"^(买|购买|买下|买一[些个])\s*", "", act).strip()
+            return self.buy_item(gid, uid, goods, facility=it.get("name", ""))
         # 任务需要:开放任务中提及该设施(办理地点/步骤目标)时,普通设施也放行
         task_wants = any(
             t and (t == it["name"] or t in it["name"] or it["name"] in t)
@@ -2018,6 +2960,7 @@ class Game:
         ch.flags = flags
         self.db.upsert_char(ch)
         mems = await self.mem.related(gid, f"{ch.name} 去 {it['name']} {action}", uid=uid, k=3)
+        self._attach_rep_line(gid, uid, w)
         r = await self.brain.facility_event(
             world=w, char=ch, facility=it, action=action, memories=mems,
             material=await self._kb_ctx(gid, f"设施 社交 娱乐 {it['name']}"))
@@ -2036,8 +2979,10 @@ class Game:
         # 任务需要时推进「去该设施」步骤(facility 类型)
         if task_wants:
             self._quest_progress(gid, uid, "facility", name=it["name"])
+        echo = await self.mainline_echo(gid, uid, ctx=f"在{it['name']} {(data.get('narration') or '')[:60]}")
         return {
             "type": "facility",
+            "echo": echo,
             "gid": gid,
             "char_name": ch.name,
             "world_name": w.name,
@@ -2078,6 +3023,21 @@ class Game:
         return w, p, [f"金币-{price}", f"🏠 已购入「{p['name']}」"]
 
     @staticmethod
+    def _home_hp_recovery(price: int) -> int:
+        """按房价分档的回家生命恢复:越贵的房子恢复越多(单次)。"""
+        if price >= 8000:
+            return 40
+        if price >= 5000:
+            return 32
+        if price >= 3200:
+            return 26
+        if price >= 2000:
+            return 20
+        if price >= 1000:
+            return 15
+        return 10
+
+    @staticmethod
     def _home_recovery(price: int) -> tuple[int, int]:
         """按房价分档的回家恢复:越贵回得越多(体力, 心情)。"""
         if price >= 8000:
@@ -2107,13 +3067,22 @@ class Game:
         if flags.get("_home_day") == day:
             raise GameError("今天已经回过宅补充过体力了,明天再回来歇歇吧。")
         st_gain, mo_gain = self._home_recovery(int(p.get("price") or 1000))
+        hp_gain = self._home_hp_recovery(int(p.get("price") or 1000))
         ch.mood = min(C.MOOD_MAX, ch.mood + mo_gain)
         ch.stamina = min(C.STAMINA_MAX, ch.stamina + st_gain)
+        hp_chg = ""
+        hp_actual = 0
+        if int(getattr(ch, "hp", C.HP_MAX)) < C.HP_MAX:
+            before = int(ch.hp)
+            ch.hp = min(C.HP_MAX, before + hp_gain)
+            hp_actual = int(ch.hp) - before
+            hp_chg = f"生命+{hp_actual}"
         flags["_home_day"] = day
         ch.flags = flags
         self.db.upsert_char(ch)
         self.db.append_log(gid, uid, "misc",
-                           f"{ch.name} 回《{w.name}》的「{p['name']}」休息了一阵(体力+{st_gain}/心情+{mo_gain})", w.name)
+                           f"{ch.name} 回《{w.name}》的「{p['name']}」休息了一阵"
+                           f"(体力+{st_gain}/心情+{mo_gain}" + (f"/{hp_chg}" if hp_chg else "") + ")", w.name)
         view = {
             "type": "home",
             "gid": gid,
@@ -2122,7 +3091,8 @@ class Game:
             "plot": p,
             "stamina_gain": st_gain,
             "mood_gain": mo_gain,
-            "changes": [f"心情+{mo_gain}", f"体力+{st_gain}"],
+            "hp_gain": hp_actual,
+            "changes": [f"心情+{mo_gain}", f"体力+{st_gain}"] + ([hp_chg] if hp_chg else []),
             "ok_llm": False,
         }
         # 小概率触发家居事件剧情(每天一次,因为回家本身每天一次)
@@ -2161,6 +3131,10 @@ class Game:
                 f"⛓ 你正被「{state_note}」困住,连今日的委托也无从下手。"
                 "先脱困再说——「/分身 冒险 <描述>」、找特殊NPC求助,或等群友来救 / 时机变化。"
             )
+        exp = self._on_expedition(ch)
+        if exp:
+            raise GameError(f"⚔ 你正在「{exp.get('title')}」远征途中,顾不上今日委托"
+                            f"(约还需 {self._exp_left_h(exp):.1f} 小时归来)。")
         qs = self.db.list_quests(gid, uid, day)
         if qs:
             return qs
@@ -2213,6 +3187,10 @@ class Game:
                 f"⛓ 你正被「{state_note}」困住,没法去完成委托。"
                 "先脱困再说——「/分身 冒险 <描述>」、找特殊NPC求助,或等群友来救 / 时机变化。"
             )
+        exp = self._on_expedition(ch)
+        if exp:
+            raise GameError(f"⚔ 你正在「{exp.get('title')}」远征途中,没法去交付委托"
+                            f"(约还需 {self._exp_left_h(exp):.1f} 小时归来)。")
         world = self.db.cur_world(gid)
         day = self._day_key()
         open_qs = [q for q in self.db.list_quests(gid, uid, day) if q["state"] == "open"]
@@ -2239,13 +3217,17 @@ class Game:
                                           material=await self._kb_ctx(gid, "交付 委托 报酬"))
         changes = self._apply_effects(ch, r.data.get("effects") or {})
         changes += self._apply_items(gid, uid, r.data.get("items_gain"), [])
+        # 全群累计完成任务数(主线 quest 门槛用)
+        self.db.kv_incr(gid, "quests_done_total", 1)
         await self.mem.remember(gid, uid, "char", f"交付委托「{q['text']}」(委托人:{giver})", ref=f"quest:{q['id']}")
         await self.mem.remember(gid, "", "world",
                                 f"《{world.name}》{ch.name}完成了委托「{q['text']}」", ref=f"quest:{q['id']}")
         self.db.append_log(gid, uid, "quest",
                            f"完成委托「{q['text']}」:{(r.data.get('narration') or '')[:80]}", world.name)
+        echo = await self.mainline_echo(gid, uid, ctx=f"交付委托「{q['text']}」{(r.data.get('narration') or '')[:60]}")
         return {
             "type": "result",
+            "echo": echo,
             "gid": gid,
             "uid": uid,
             "char_name": ch.name,
@@ -2258,6 +3240,252 @@ class Game:
             "changes": changes,
             "ok_llm": r.ok,
         }
+
+    # ══════════════ 声望(每个世界一份)══════════════
+    def rep_of(self, gid: str, uid: str, world_id: int | None = None) -> int:
+        w = self.db.get_world(int(world_id)) if world_id else self.db.cur_world(gid)
+        if w is None:
+            return 0
+        return self.db.rep_get(gid, uid, w.id)
+
+    def _rep_note(self, gid: str, uid: str, world: World) -> str:
+        """角色当前世界声望的一句话(注入 prompt,影响 NPC 态度)。"""
+        if is_npc_uid(uid):
+            return ""
+        ch = self.db.get_char(gid, uid)
+        if ch is None:
+            return ""
+        score = self.db.rep_get(gid, uid, world.id)
+        label = C.rep_level_label(score)
+        return f"{ch.name}在本世界的声望:{score}({label})——NPC/商人按「{label}」的居民对待TA"
+
+    def _attach_rep_line(self, gid: str, uid: str, world: World):
+        """把声望一句话挂到 char._rep_line,供 prompts._rep_short 读取。"""
+        ch = self.db.get_char(gid, uid)
+        if ch is None:
+            return
+        score = self.db.rep_get(gid, uid, world.id)
+        ch._rep_line = f"在本世界的声望{score}({C.rep_level_label(score)})"
+
+    def rep_panel(self, gid: str, uid: str) -> dict:
+        """声望面板:全部世界声望 + 当前世界声望榜。"""
+        ch = self.db.get_char(gid, uid)
+        if not ch:
+            raise GameError("你还没有创建分身")
+        w = self.db.cur_world(gid)
+        rows = self.db.rep_list_for(gid, uid)
+        cur = None
+        if w is not None:
+            cur = {"world": w.name, "score": self.db.rep_get(gid, uid, w.id),
+                   "label": C.rep_level_label(self.db.rep_get(gid, uid, w.id))}
+        return {"char_name": ch.name, "current": cur,
+                "list": [{"world": r.get("name") or f"世界#{r['world_id']}", "score": int(r["score"]),
+                          "label": C.rep_level_label(int(r["score"]))} for r in rows],
+                "top": [{"name": r.get("name") or r["uid"][:8], "score": int(r["score"])} for r in (self.db.rep_top(gid, w.id, 5) if w else [])]}
+
+    # ══════════════ 治疗物品 / 购买 / 治疗 ══════════════
+    def heal_items_of(self, gid: str, world: World | None = None) -> list[dict]:
+        """当前世界治疗物品(缺失时按题材风格兜底)。"""
+        w = world or self.db.cur_world(gid)
+        if w is None:
+            return [dict(h) for h in C.DEFAULT_HEAL_ITEMS]
+        items = [dict(h) for h in (w.heal_items or []) if isinstance(h, dict) and str(h.get("name", "")).strip()]
+        if not items:
+            items = [dict(h) for h in C.heal_style_for(w.genre, w.desc)]
+            self.db.update_world(w.id, heal_items=items)
+            w.heal_items = items
+        return items
+
+    def _backpack_heal_note(self, gid: str, uid: str, world: World) -> str:
+        """角色背包中的治疗物品清单(注入 prompt,让 LLM 在剧情中自主使用)。"""
+        names = {h["name"] for h in self.heal_items_of(gid, world)}
+        inv = [it for it in self.db.items_list(gid, uid) if it.get("name") in names]
+        if not inv:
+            return ""
+        info = "、".join(f"{it['name']}×{it['count']}" for it in inv[:4])
+        return f"背包中的治疗物品:{info}(若剧情自然需要,可让角色使用其中之一:items_lose 该物品名 + effects.hp 恢复)"
+
+    def buy_item(self, gid: str, uid: str, item_name: str, facility: str = "") -> dict:
+        """在店铺/医疗类设施购买治疗物品(去命令:/分身 去 <设施> 买治疗药 / 分身 购买 <物品名>)。
+        声望越高折扣越大(最高七五折)。返回 view。"""
+        ch = self._require_free(gid, uid, "去店里买东西")
+        w = self.db.cur_world(gid)
+        if not w:
+            raise GameError("世界尚未初始化")
+        items = self.heal_items_of(gid, w)
+        target = None
+        q = (item_name or "").strip()
+        for h in items:
+            if h["name"] == q or (q and (q in h["name"] or h["name"] in q)):
+                target = h
+                break
+        if target is None:
+            names = "、".join(h["name"] for h in items)
+            raise GameError(f"店里没有「{item_name}」。这个世界能买到的治疗物品:{names}"
+                            f"(用「/分身 去 <设施名> 买 <物品名>」或「/分身 购买 <物品名>」)")
+        # 校验设施:指定了设施名 → 必须是医疗/店铺类且存在;未指定 → 默认就近医疗/店铺
+        fac = None
+        facs = [i for i in (w.infra or []) if isinstance(i, dict) and str(i.get("name", "")).strip()]
+        if facility:
+            fac = next((i for i in facs if facility == i["name"] or facility in i["name"] or i["name"] in facility), None)
+            if fac is None:
+                raise GameError(f"《{w.name}》没有「{facility}」这处地方")
+            if not (C.is_medical_infra(fac) or C.is_shop_infra(fac)):
+                raise GameError(f"「{fac.get('name')}」不卖这些东西(要去店铺/药铺/诊所/医院类设施)")
+        else:
+            fac = next((i for i in facs if C.is_medical_infra(i)), None) \
+                or next((i for i in facs if C.is_shop_infra(i)), None)
+            if fac is None:
+                raise GameError("这个世界上没有能买东西的地方(让管理员重建设施试试)")
+        rep = self.db.rep_get(gid, uid, w.id)
+        discount = 1.0 - min(max(rep, 0), 100) / 400.0   # 声望0=原价,100=七五折
+        price = max(5, int(round(int(target.get("price") or 30) * discount)))
+        if ch.gold < price:
+            raise GameError(f"金币不足:{ch.gold}/{price}。{fac.get('name')}的「{target['name']}」可不便宜")
+        ch.gold -= price
+        self.db.upsert_char(ch)
+        self.db.item_add(gid, uid, target["name"], 1, str(target.get("note", ""))[:20])
+        self.db.append_log(gid, uid, "act",
+                           f"{ch.name} 在「{fac.get('name')}」买了一剂「{target['name']}」({price}金币)", w.name)
+        self._quest_progress(gid, uid, "facility", name=fac.get("name", ""))
+        return {
+            "type": "buy",
+            "gid": gid,
+            "char_name": ch.name,
+            "world_name": w.name,
+            "facility": fac,
+            "item": target,
+            "price": price,
+            "rep_discount": discount < 1.0,
+            "narration": (f"{ch.name}走进「{fac.get('name')}」,付了 {price} 金币,收下一剂「{target['name']}」"
+                          f"({target.get('note', '疗伤圣品')})。"
+                          + (f"掌柜认得这位{C.rep_level_label(rep)}的客人,主动抹了零头。" if discount < 1.0 else "")),
+            "changes": [f"金币-{price}", f"🎒 获得「{target['name']}」"],
+            "ok_llm": False,
+        }
+
+    def use_heal_item(self, gid: str, uid: str, item_name: str = "") -> dict:
+        """使用背包里的治疗物品(留空则自动用恢复量最小的能用的)。返回 view。"""
+        ch = self.db.get_char(gid, uid)
+        if not ch:
+            raise GameError("你还没有创建分身")
+        exp = self._on_expedition(ch)
+        if exp:
+            raise GameError("⚔ 远征途中的补给由队伍统一调配,你没法手动用药。")
+        w = self.db.cur_world(gid)
+        world_name = w.name if w else ""
+        if int(getattr(ch, "hp", C.HP_MAX)) >= C.HP_MAX:
+            raise GameError("生命值是满的,不用浪费药")
+        inv = {it["name"]: it for it in self.db.items_list(gid, uid)}
+        heal_items = {h["name"]: h for h in self.heal_items_of(gid, w)}
+        usable = [(name, heal_items[name]) for name in inv if name in heal_items]
+        if not usable:
+            raise GameError("背包里没有治疗物品。可以「/分身 去 <诊所/药铺名> 买 <治疗物品名>」购买,"
+                            "或在冒险/事件中获取")
+        if item_name:
+            item_name = item_name.strip()
+            usable = [u for u in usable if u[0] == item_name or item_name in u[0] or u[0] in item_name]
+            if not usable:
+                raise GameError(f"背包里没有能用的「{item_name}」(治疗物品请用世界通名)")
+        usable.sort(key=lambda x: x[1].get("heal", 0))   # 默认用最小的
+        name, h = usable[0]
+        self.db.item_remove(gid, uid, name, 1)
+        before = int(ch.hp)
+        chg = self._apply_hp(ch, int(h.get("heal") or 30))
+        self.db.upsert_char(ch)
+        self.db.append_log(gid, uid, "act", f"{ch.name} 使用了「{name}」({before}→{ch.hp}生命)", world_name)
+        return {
+            "type": "heal",
+            "gid": gid,
+            "char_name": ch.name,
+            "world_name": world_name,
+            "item": h,
+            "item_name": name,
+            "before": before,
+            "after": int(ch.hp),
+            "narration": f"{ch.name} 用掉了「{name}」——{h.get('note', '一股暖流散入四肢百骸')}"
+                         f"(生命 {before} → {ch.hp}/{C.HP_MAX})。",
+            "changes": [f"🎒 失去「{name}」"] + ([chg] if chg else []),
+            "ok_llm": False,
+        }
+
+    def heal_at_hospital(self, gid: str, uid: str) -> dict:
+        """去医院(泛指医疗性质设施)付费治疗:按缺失生命计费,声望折扣。每天不限次,花钱就行。"""
+        ch = self._require_free(gid, uid, "去医院治疗")
+        w = self.db.cur_world(gid)
+        if not w:
+            raise GameError("世界尚未初始化")
+        missing = C.HP_MAX - int(getattr(ch, "hp", C.HP_MAX))
+        if missing <= 0:
+            raise GameError("生命值是满的,不用去医院花冤枉钱")
+        med = [i for i in (w.infra or []) if isinstance(i, dict) and C.is_medical_infra(i)]
+        if not med:
+            raise GameError(f"《{w.name}》暂时没有医疗性质的设施(诊所/医院/药铺)。"
+                            "可以先用背包里的治疗物品,或等日切自然恢复")
+        fac = random.choice(med)
+        rep = self.db.rep_get(gid, uid, w.id)
+        discount = 1.0 - min(max(rep, 0), 100) / 400.0
+        cost = max(5, int(round(missing * C.HEAL_PRICE_PER_HP * discount)))
+        if ch.gold < cost:
+            raise GameError(
+                f"治好这一身伤要 {cost} 金币,你只有 {ch.gold}。"
+                "(声望越高折扣越大;也可以用背包里的治疗物品,或等明天体力/生命自然恢复)")
+        ch.gold -= cost
+        chg = self._apply_hp(ch, missing)
+        self.db.upsert_char(ch)
+        self.db.append_log(gid, uid, "act",
+                           f"{ch.name} 在「{fac.get('name')}」接受了治疗({cost}金币,生命回满)", w.name)
+        self._quest_progress(gid, uid, "facility", name=fac.get("name", ""))
+        return {
+            "type": "heal",
+            "gid": gid,
+            "char_name": ch.name,
+            "world_name": w.name,
+            "facility": fac,
+            "cost": cost,
+            "before": C.HP_MAX - missing,
+            "after": int(ch.hp),
+            "rep_discount": discount < 1.0,
+            "narration": (f"{ch.name} 躺进了「{fac.get('name')}」的诊台。清创、上药、包扎,一气呵成——"
+                          f"付了 {cost} 金币,生命回满({C.HP_MAX}/{C.HP_MAX})。"
+                          + (f"医者认得这位{C.rep_level_label(rep)}的客人,收费实在。" if discount < 1.0 else "")),
+            "changes": ([f"金币-{cost}", "❤ 生命回满"] + ([chg] if chg and chg.startswith("❤") else [])),
+            "ok_llm": False,
+        }
+
+    # ══════════════ 危险区域查看 ══════════════
+    def list_zones(self, gid: str) -> list[dict]:
+        w = self.db.cur_world(gid)
+        if not w:
+            raise GameError("世界尚未初始化")
+        zones = [dict(z) for z in (w.zones or []) if isinstance(z, dict) and str(z.get("name", "")).strip()]
+        if len(zones) < 2:
+            zones = self._ensure_zones_baseline(w, zones)
+            self.db.update_world(w.id, zones=zones)
+        return zones
+
+    # ══════════════ 主线回响(小概率穿插)══════════════
+    MAINLINE_ECHO_P = 0.12   # 事件/行动/互动结算后触发主线回响的概率
+
+    async def mainline_echo(self, gid: str, uid: str, ctx: str) -> str:
+        """结算后小概率生成一段『主线回响』叙述(伏笔/呼应,不改数值)。"""
+        try:
+            ch = self.db.get_char(gid, uid)
+            w = self.db.cur_world(gid)
+            if ch is None or w is None or is_npc_uid(uid):
+                return ""
+            ml = [m for m in (w.mainline or []) if isinstance(m, dict)]
+            undone = [m for m in ml if not m.get("done")]
+            if not undone or random.random() >= self.MAINLINE_ECHO_P:
+                return ""
+            r = await self.brain.mainline_echo(world=w, char=ch, stage=undone[0], ctx=ctx)
+            if r.ok and r.data.get("narration"):
+                self.db.append_log(gid, uid, "misc",
+                                   f"【主线回响】{str(r.data['narration'])[:90]}", w.name)
+                return str(r.data["narration"])
+        except Exception:
+            return ""
+        return ""
 
     def _avatar_map(self, gid: str) -> dict:
         """群内所有 OC 的名字→头像路径(仅已设置头像者),供 IM 对话气泡使用。"""

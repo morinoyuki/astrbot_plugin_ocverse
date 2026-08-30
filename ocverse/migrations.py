@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS groups (
@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS worlds (
   name TEXT, genre TEXT, desc TEXT, atmosphere TEXT,
   rules TEXT, features TEXT, npcs TEXT, event_ideas TEXT,
   infra TEXT DEFAULT '[]', mainline TEXT DEFAULT '[]',
+  zones TEXT DEFAULT '[]', heal_items TEXT DEFAULT '[]',
   source TEXT DEFAULT 'llm',
   visited INTEGER DEFAULT 0,
   created_by TEXT DEFAULT '',
@@ -46,6 +47,7 @@ CREATE TABLE IF NOT EXISTS chars (
   name TEXT, gender TEXT, tags TEXT, backstory TEXT, avatar TEXT,
   attrs TEXT, level INTEGER DEFAULT 1, exp INTEGER DEFAULT 0,
   gold INTEGER DEFAULT 100, mood INTEGER DEFAULT 70, stamina INTEGER DEFAULT 90,
+  hp INTEGER DEFAULT 100,
   title TEXT DEFAULT '无名之辈', flags TEXT DEFAULT '{}',
   created_at REAL, updated_at REAL,
   PRIMARY KEY (gid, uid)
@@ -135,6 +137,16 @@ CREATE TABLE IF NOT EXISTS kb (
   created_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_kb_gid ON kb (gid);
+CREATE TABLE IF NOT EXISTS reputations (
+  gid TEXT NOT NULL,
+  uid TEXT NOT NULL,
+  world_id INTEGER NOT NULL,
+  score INTEGER DEFAULT 0,
+  note TEXT DEFAULT '',
+  updated_at REAL,
+  PRIMARY KEY (gid, uid, world_id)
+);
+CREATE INDEX IF NOT EXISTS idx_rep_w ON reputations (gid, world_id);
 CREATE TABLE IF NOT EXISTS plots (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   gid TEXT NOT NULL,
@@ -194,6 +206,21 @@ _MIGRATIONS: list[tuple[int, str, list[str]]] = [
           updated_at REAL,
           UNIQUE (gid, uid, name)
         )""",
+    ]),
+    (6, "生命值/危险区域/治疗物品/声望(chars.hp; worlds.zones/heal_items; reputations)", [
+        "ALTER TABLE chars ADD COLUMN hp INTEGER DEFAULT 100",
+        "ALTER TABLE worlds ADD COLUMN zones TEXT DEFAULT '[]'",
+        "ALTER TABLE worlds ADD COLUMN heal_items TEXT DEFAULT '[]'",
+        """CREATE TABLE IF NOT EXISTS reputations (
+          gid TEXT NOT NULL,
+          uid TEXT NOT NULL,
+          world_id INTEGER NOT NULL,
+          score INTEGER DEFAULT 0,
+          note TEXT DEFAULT '',
+          updated_at REAL,
+          PRIMARY KEY (gid, uid, world_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_rep_w ON reputations (gid, world_id)",
     ]),
 ]
 

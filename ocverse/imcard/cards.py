@@ -33,6 +33,7 @@ ATTR_COLORS = {
     "sanity": "#A89AE8",
     "stamina": "#E8A87F",
     "mood": "#8FD8A8",
+    "hp": "#E86A6A",
 }
 
 
@@ -92,7 +93,8 @@ def _hr(r, pad=(0, 2, 0, 2)):
 
 # ══════════════════════════ 角色卡 ══════════════════════════
 def profile_card(ch, world, rels: list[tuple[str, int]], memories: list[str], cfg: dict,
-                 rel_names: dict[str, str] | None = None, extra_badges: list[str] | None = None) -> list[Image.Image]:
+                 rel_names: dict[str, str] | None = None, extra_badges: list[str] | None = None,
+                 rep: dict | None = None, items: list | None = None) -> list[Image.Image]:
     from ..config import ATTRS, exp_need
     from ..config import rel_label
 
@@ -119,20 +121,39 @@ def profile_card(ch, world, rels: list[tuple[str, int]], memories: list[str], cf
     # 资源
     stat_items.append(("体力", ch.stamina, 100, ATTR_COLORS["stamina"]))
     stat_items.append(("心情", ch.mood, 100, ATTR_COLORS["mood"]))
+    stat_items.append(("生命", getattr(ch, "hp", 100), 100, ATTR_COLORS["hp"]))
     rows.append(PanelRow(r, "属性", lambda: [StatBarRow(r, stat_items)]))
     # 资源行
     need = exp_need(ch.level)
     res_line = f"💰 金币 {ch.gold}    ⭐ 经验 {ch.exp}/{need}    🌀 经历变动 {int((ch.flags or {}).get('shifts', 0))} 次"
     rows.append(_para(r, res_line, size=int(r.font_size * 0.82), color=r.t.text_secondary))
-    # 背景设定
+    # 声望(当前世界)
+    if rep:
+        rows.append(_para(r, f"⚜ 声望 {rep.get('score', 0)} · {rep.get('label', '')}(当前世界)",
+                          size=int(r.font_size * 0.78), color=r.t.link))
+    # 背景设定(完整呈现:RichTextRow 自动作行宽换行)
     if ch.backstory:
-        story = ch.backstory if len(ch.backstory) <= 160 else ch.backstory[:157] + "…"
+        story = ch.backstory if len(ch.backstory) <= 2000 else ch.backstory[:1997] + "…"
         rows.append(PanelRow(r, "背景设定", lambda: [
             _para(r, story, color=r.t.text_secondary, size=int(r.font_size * 0.8)),
         ]))
     # 称号徽章
     if badges:
         rows.append(TagRow(r, badges))
+    # 背包(随身物品一览)
+    items = [it for it in (items or []) if isinstance(it, dict) and it.get("name")]
+    if items:
+        def item_rows():
+            out = []
+            for it in items[:6]:
+                note = f" — {it['note']}" if it.get("note") else ""
+                out.append(_para(r, f"🎒 {it['name']} ×{it['count']}{note}",
+                                 color=r.t.text_secondary, size=int(r.font_size * 0.78)))
+            if len(items) > 6:
+                out.append(_para(r, f"…以及另外 {len(items) - 6} 件(「/分身 背包」查看全部)",
+                                 color=r.t.text_muted, size=int(r.font_size * 0.7)))
+            return out
+        rows.append(PanelRow(r, f"背包({len(items)} 件)", item_rows))
     # 羁绊
     if rels:
         rel_rows = []
@@ -178,6 +199,15 @@ def event_card(view: dict, cfg: dict) -> list[Image.Image]:
     return r.render_rows(rows, title=f"遭遇 · {p.get('title', '突发状况')}")
 
 
+def _echo_row(r: ChatRenderer, echo) -> list:
+    """主线回响(小概率穿插的主线伏笔)统一渲染。"""
+    txt = str(echo or "").strip()
+    if not txt:
+        return []
+    return [EmptyRow(r, 4), PanelRow(r, "🧵 主线回响", lambda: [
+        _para(r, txt, color=r.t.link, size=int(r.font_size * 0.8))])]
+
+
 def result_card(view: dict, cfg: dict) -> list[Image.Image]:
     r = _mk(cfg)
     rows = []
@@ -191,7 +221,98 @@ def result_card(view: dict, cfg: dict) -> list[Image.Image]:
     if changes:
         rows.append(EmptyRow(r, 4))
         rows.append(TagRow(r, changes))
+    rows += _echo_row(r, view.get("echo"))
     return r.render_rows(rows, title=view.get("card_title") or "抉择 · 结算")
+
+
+# ══════════════════════════ 远征卡 ══════════════════════════
+def expedition_card(view: dict, cfg: dict) -> list[Image.Image]:
+    """远征:offer 委托布告 / depart 出征 / report 途中播报 / return 归来结算 / abort 撤离。"""
+    r = _mk(cfg)
+    phase = view.get("phase", "offer")
+    rows = []
+    wn = view.get("world_name", "")
+    if phase == "offer":
+        offer = view.get("offer") or {}
+        rows.append(PillRow(r, f"📜 远征委托 · {offer.get('issuer', '')} 颁布"))
+        rows.append(_para(r, str(offer.get("briefing") or view.get("narration", "")),
+                          color=r.t.text, margin=(6, 8, 0, 6)))
+        rows.append(EmptyRow(r, 4))
+        rows.append(TagRow(r, view.get("changes") or []))
+        rows.append(EmptyRow(r, 2))
+        rows.append(_para(r, "接下:「/分身 远征 接受」——远征期间无法进行其他操作,"
+                             "途中每几小时播报,归来结算(成功有丰厚奖励,失败会重伤)。",
+                          size=int(r.font_size * 0.72), color=r.t.text_muted))
+    elif phase == "depart":
+        rows.append(PillRow(r, f"⚔ 出征 · {view.get('title', '远征')}"))
+        rows.append(_para(r, view.get("narration", ""), color=r.t.text, margin=(6, 8, 0, 6)))
+        dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), view.get("avatars"))
+        if dlg:
+            rows.append(EmptyRow(r, 4))
+            rows.extend(dlg)
+        rows.append(EmptyRow(r, 4))
+        rows.append(TagRow(r, view.get("changes") or []))
+    elif phase == "report":
+        rows.append(PillRow(r, f"⚔ 远征 · {view.get('phase_name', '行军')} {view.get('progress', 0)}% · {view.get('title', '')}"))
+        rows.append(_para(r, view.get("narration", ""), color=r.t.text, margin=(6, 8, 0, 6)))
+        dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), view.get("avatars"))
+        if dlg:
+            rows.append(EmptyRow(r, 4))
+            rows.extend(dlg)
+        rows.append(EmptyRow(r, 4))
+        rows.append(TagRow(r, view.get("changes") or []))
+    elif phase == "return":
+        ok = view.get("outcome") == "success"
+        rows.append(PillRow(r, ("🏆 远征凯旋 · " if ok else "💀 远征折戟 · ") + str(view.get("title", ""))))
+        rows.append(_para(r, view.get("narration", ""), color=r.t.text, margin=(6, 8, 0, 6)))
+        dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), view.get("avatars"))
+        if dlg:
+            rows.append(EmptyRow(r, 4))
+            rows.extend(dlg)
+        rows.append(EmptyRow(r, 4))
+        rows.append(TagRow(r, view.get("changes") or []))
+    else:  # abort
+        rows.append(PillRow(r, f"🏳 中途撤离 · {view.get('title', '')}"))
+        rows.append(_para(r, view.get("narration", ""), color=r.t.text, margin=(6, 8, 0, 6)))
+        rows.append(EmptyRow(r, 4))
+        rows.append(TagRow(r, view.get("changes") or []))
+    if wn:
+        rows.append(EmptyRow(r, 2))
+        rows.append(_para(r, f"《{wn}》", size=int(r.font_size * 0.72), color=r.t.text_muted))
+    return r.render_rows(rows, title=f"远征 · {view.get('title', '')}")
+
+
+# ══════════════════════════ 治疗/购买卡 ══════════════════════════
+def heal_card(view: dict, cfg: dict) -> list[Image.Image]:
+    """治疗(用物品/去医院)与购买治疗物品的系统结算卡。"""
+    r = _mk(cfg)
+    t = view.get("type")
+    rows = []
+    if t == "buy":
+        item = view.get("item") or {}
+        fac = view.get("facility") or {}
+        rows.append(PillRow(r, f"🛒 购买 · {fac.get('name', '店铺')}"))
+        rows.append(_para(r, view.get("narration", ""), color=r.t.text, margin=(6, 8, 0, 6)))
+        tags = [f"「{item.get('name', '?')}」", f"花费 {view.get('price', 0)} 金币"]
+        if view.get("rep_discount"):
+            tags.append("⚜ 声望折扣")
+        rows.append(TagRow(r, tags))
+    else:
+        fac = view.get("facility") or {}
+        lead = f"🏥 治疗 · {fac.get('name', '医院')}" if fac else "💊 使用治疗物品"
+        rows.append(PillRow(r, lead))
+        rows.append(_para(r, view.get("narration", ""), color=r.t.text, margin=(6, 8, 0, 6)))
+        tags = [f"生命 {view.get('before', 0)} → {view.get('after', 0)}"]
+        if view.get("cost"):
+            tags.append(f"花费 {view.get('cost')} 金币")
+        if view.get("rep_discount"):
+            tags.append("⚜ 声望折扣")
+        rows.append(TagRow(r, tags))
+    wn = view.get("world_name", "")
+    if wn:
+        rows.append(EmptyRow(r, 2))
+        rows.append(_para(r, f"《{wn}》", size=int(r.font_size * 0.72), color=r.t.text_muted))
+    return r.render_rows(rows, title="治疗与补给")
 
 
 # ══════════════════════════ 世界卡 ══════════════════════════
@@ -217,6 +338,43 @@ def world_card(w, cfg: dict, is_current: bool = True, day: int = 1,
                     out.append(_para(r, f"　↳ {n['hook']}", color=r.t.text_muted, size=int(r.font_size * 0.72)))
             return out
         rows.append(PanelRow(r, "NPC", npc_rows))
+    ml = [m for m in (getattr(w, "mainline", None) or []) if isinstance(m, dict) and m.get("stage")]
+    if ml:
+        done_n = sum(1 for m in ml if m.get("done"))
+        def ml_rows():
+            out = []
+            for m in ml[:12]:
+                mark = "✅" if m.get("done") else "⬜"
+                goal = f" ⚑{m.get('goal_note', '')}" if (not m.get("done") and m.get("goal_type")) else ""
+                out.append(_para(r, f"{mark} {m.get('stage', '')}{goal}",
+                                 color=r.t.text if m.get("done") else r.t.text_secondary,
+                                 size=int(r.font_size * 0.8)))
+            if len(ml) > 12:
+                out.append(_para(r, f"…共 {len(ml)} 节", color=r.t.text_muted, size=int(r.font_size * 0.7)))
+            return out
+        rows.append(PanelRow(r, f"世界主线({done_n}/{len(ml)} ⚑=需达成门槛)", ml_rows))
+    zones = [z for z in (getattr(w, "zones", None) or []) if isinstance(z, dict) and z.get("name")]
+    if zones:
+        def zone_rows():
+            out = []
+            for z in zones[:6]:
+                stars = "★" * max(1, min(5, int(z.get("danger") or 1)))
+                en = "、".join(e.get("name", "") for e in (z.get("enemies") or []) if isinstance(e, dict))
+                out.append(_para(r, f"⚔ {z.get('name')}({z.get('kind', '')}) 危险度{stars}",
+                                 color=r.t.text_secondary, size=int(r.font_size * 0.8)))
+                line = z.get("desc", "")
+                if en:
+                    line += f" —— 出没:{en}"
+                if z.get("loot"):
+                    line += f";素材:{'、'.join(z['loot'][:3])}"
+                out.append(_para(r, f"　↳ {line}", color=r.t.text_muted, size=int(r.font_size * 0.72)))
+            return out
+        rows.append(PanelRow(r, "危险区域(每日变动)", zone_rows))
+    heals = [h for h in (getattr(w, "heal_items", None) or []) if isinstance(h, dict) and h.get("name")]
+    if heals:
+        rows.append(PanelRow(r, "治疗物品", lambda: [
+            _para(r, f"💊 {h['name']} — {h.get('note', '')}(售价{h.get('price', '?')})",
+                  color=r.t.text_secondary, size=int(r.font_size * 0.76)) for h in heals[:4]]))
     if world_mem:
         # 世界记忆:全局事件 / 主线 / NPC·设施流转 的近况
         def mem_rows():
@@ -226,8 +384,15 @@ def world_card(w, cfg: dict, is_current: bool = True, day: int = 1,
                                  size=int(r.font_size * 0.74)))
             return out
         rows.append(PanelRow(r, "世界记忆(近况)", mem_rows))
-    foot = "这是你们当前生活的世界" if is_current else "尚在沉眠,等待世界变动降临"
-    rows.append(_para(r, foot, size=int(r.font_size * 0.72), color=r.t.text_muted))
+    stats = [f"设施 {len(w.infra or [])} 处"]
+    if ml:
+        stats.append(f"主线 {sum(1 for m in ml if m.get('done'))}/{len(ml)} 节")
+    if zones:
+        stats.append(f"危险区域 {len(zones)} 片")
+    stats_line = " · ".join(stats)
+    foot = ("这是你们当前生活的世界" if is_current else "尚在沉眠,等待世界变动降临")
+    rows.append(_para(r, (stats_line + " · " if stats_line else "") + foot,
+                      size=int(r.font_size * 0.72), color=r.t.text_muted))
     return r.render_rows(rows, title="世界档案")
 
 
@@ -339,6 +504,7 @@ def interact_card(view: dict, cfg: dict) -> list[Image.Image]:
     if "rel" in view:
         rows.append(_para(r, f"💞 羁绊 {view['rel']:+d} 「{view.get('rel_label', '')}」",
                           size=int(r.font_size * 0.82), color=r.t.link))
+    rows += _echo_row(r, view.get("echo"))
     return r.render_rows(rows, title="群友互动")
 
 
@@ -359,6 +525,7 @@ def npc_card(view: dict, cfg: dict) -> list[Image.Image]:
     if changes:
         rows.append(EmptyRow(r, 4))
         rows.append(TagRow(r, changes))
+    rows += _echo_row(r, view.get("echo"))
     return r.render_rows(rows, title=f"NPC · {npc.get('name', '')}")
 
 
@@ -376,11 +543,13 @@ def act_card(view: dict, cfg: dict) -> list[Image.Image]:
     if changes:
         rows.append(EmptyRow(r, 4))
         rows.append(TagRow(r, changes))
+    rows += _echo_row(r, view.get("echo"))
     wname = view.get("world_name", "")
+    zone = view.get("zone") or ""
     if wname:
         rows.append(EmptyRow(r, 2))
-        rows.append(_para(r, f"行动发生地 · 《{wname}》", size=int(r.font_size * 0.72),
-                          color=r.t.text_muted))
+        rows.append(_para(r, f"行动发生地 · 《{wname}》" + (f" · ⚔ {zone}" if zone else ""),
+                          size=int(r.font_size * 0.72), color=r.t.text_muted))
     return r.render_rows(rows, title=view.get("action_name", "行动"))
 
 
@@ -470,6 +639,7 @@ def facility_card(view: dict, cfg: dict) -> list[Image.Image]:
     if changes:
         rows.append(EmptyRow(r, 4))
         rows.append(TagRow(r, changes))
+    rows += _echo_row(r, view.get("echo"))
     wn = view.get("world_name", "")
     if wn:
         rows.append(EmptyRow(r, 2))
@@ -504,6 +674,10 @@ def render_views(views: list[dict], cfg: dict) -> list[Image.Image]:
             out += home_card(v, cfg)
         elif t == "facility":
             out += facility_card(v, cfg)
+        elif t in ("heal", "buy"):
+            out += heal_card(v, cfg)
+        elif t == "expedition":
+            out += expedition_card(v, cfg)
     return out
 
 
@@ -534,21 +708,33 @@ def help_card(cfg: dict, sub_prefix: str = "/分身") -> list[Image.Image]:
             f"回复事件卡 + {sub_prefix} 选择 <编号> — 回复(引用)事件卡后再发,按№编号精确定位并抉择",
             f"{sub_prefix} 与 @群友 [互动方式…] — 和别人的分身处好关系(或结仇),好感度随之起落",
             f"{sub_prefix} npc <名字> <想做什么> — 找世界 NPC 搭话;{sub_prefix} 背包 [丢弃 <物品>] — 看随身物品",
-            f"{sub_prefix} 世界 / 世界列表 — 当前世界档案 / 可穿越的世界书",
-            f"{sub_prefix} 主线 [推进] — 看主线 / 推进一步;{sub_prefix} 房产 [买 <编号>|回家] — 置业与回宅",
+            f"{sub_prefix} 世界 / 世界列表 — 当前世界档案(含主线进度/危险区域) / 可穿越的世界书",
+            f"{sub_prefix} 主线 [推进] — 看主线(⚑门槛层层推进,完结后续写尾声)/ 推进一步;{sub_prefix} 房产 [买 <编号>|回家] — 置业与回宅",
             "💞 告白/求婚在好感度达标后于互动中自然发生(恋人≥85 / 好感≥90 求婚)",
         ]),
         sec("⚡ 主动行动(耗体力,每天限次)", [
             f"{sub_prefix} 练习 <练什么…> — 修习一项技艺/属性 · {sub_prefix} 健身 — 锻炼体魄",
-            f"{sub_prefix} 打怪 <目标…> — 高风险高回报 · {sub_prefix} 冒险 <自由描述…> — 完全自定义",
-            f"{sub_prefix} 兼职 — 在世界设施上一班(约2小时),到点自动下班结算",
-            "行动消耗体力,属性/金币/心情随之起落,还小概率触发机缘彩蛋",
+            f"{sub_prefix} 打怪 [区域或敌人] — 进危险区域讨伐(自动选区/委托对齐,掉素材与战利品) · {sub_prefix} 冒险 <自由描述…> — 完全自定义",
+            f"{sub_prefix} 区域 — 看世界危险区域(每日变动,与讨伐任务/素材联动) · {sub_prefix} 兼职 — 上一班赚钱",
+            "行动消耗体力,属性/金币/心情随之起落,还小概率触发机缘彩蛋;生命归零会重伤昏迷",
+        ]),
+        sec("🩹 生命与声望", [
+            f"{sub_prefix} 治疗 [物品名] — 用背包治疗物品疗伤;没药则去医院付费治疗",
+            f"{sub_prefix} 购买 <物品名> [设施名] — 在店铺/药铺买治疗物品(也可「去 店铺 买治疗药」)",
+            f"{sub_prefix} 声望 [名字] — 世界声望:NPC 更友好、购物/治疗折扣、主线门槛",
+            "重伤昏迷会在次日于家/医院/据点苏醒;回家/医院/治疗物品都能恢复生命",
+        ]),
+        sec("🚩 远征(大队讨伐,数小时~数天)", [
+            f"{sub_prefix} 远征 — 查看今日远征委托(由公会/据点等按世界观颁布,目标危险区域)",
+            f"{sub_prefix} 远征 接受 — 签下委托出发:期间无法其他操作,每几小时播报剧情,自动消耗背包补给",
+            f"{sub_prefix} 远征 状态 · {sub_prefix} 远征 放弃 — 进度简报 / 中途撤离(声望重挫)",
+            "归来结算:成功=大量金币/道具/经验+小幅属性提升(高潮剧情);失败=重伤与损失(属性过低易失败)",
         ]),
         sec("🧩 其他", [
             f"{sub_prefix} 我的卡片 / 名册 / 日志 [页] / 回忆 <词> / 运势 · 编辑 <人设改动> · 删除角色",
             f"🎭 {sub_prefix} 定义角色 <名字> <描述> — 造一位持久生活角色(可互动/成婚);{sub_prefix} 找 <名字> 找 TA",
             f"🌀 {sub_prefix} 定义世界 / 添加NPC / 穿越世界 — 世界书与自由穿越",
-            f"👑 {sub_prefix} 事件频率 min max · 变动概率 p · 触发变动 / 重开世界 (管理员)",
+            f"👑 {sub_prefix} 事件频率 min max · 变动概率 p · 触发变动 / 重开世界 · 重建设施 / 重建区域 (管理员)",
             "🛠 Dashboard 插件页可后台管理:查改数据、手动触发事件与变动(管理员)",
         ]),
     ]
@@ -563,7 +749,7 @@ def roster_card(chars: list, cfg: dict, world_name: str = "") -> list[Image.Imag
     for ch in chars:
         rows.append(AvatarHeadRow(
             r, avatar=_avatar_img(ch.avatar), name=ch.name,
-            subtitle=f"Lv{ch.level} · {ch.title} · 心情{ch.mood} 体力{ch.stamina}",
+            subtitle=f"Lv{ch.level} · {ch.title} · 生命{getattr(ch, 'hp', 100)} 体力{ch.stamina} 心情{ch.mood}",
             tags=ch.tags[:5] if ch.tags else [],
         ))
     rows.append(EmptyRow(r, 4))

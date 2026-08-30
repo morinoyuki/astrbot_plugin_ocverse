@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from .config import story_spec, story_weight_line  # noqa: F401 (剧情权重规格)
+
 # ═══════════════════════════ 全局风格 ═══════════════════════════
 STYLE_BASE = (
     "你是一个群聊文字游戏的叙事引擎,以轻小说的手法叙事。叙事铁律:"
@@ -33,7 +35,9 @@ WORLD_SCHEMA = (
     '"npcs":[{"name":"","role":"身份","persona":"性格一句话","hook":"可交互的钩子一句话","daily":"这名NPC每天一般会去做什么/在哪里","quirk":"一个鲜活的小怪癖/口头禅"}],'
     '"event_ideas":["该世界独有事件灵感",4-6条],'
     '"infra":[{"kind":"设施类型(店/馆/铺/坊/堂/楼/坛/站/所/市集/乐园/酒吧/剧场/温泉/观景等,尽量不重复)","name":"设施名(2~6字)","desc":"功能/氛围一句话(≤20字)","work":"在这里能打工赚钱的职业(无则不填)"}],'
-    '"mainline":[{"stage":"主线小节名(≤10字)","desc":"这一步要做什么/线索(≤30字)"}],'
+    '"zones":[{"kind":"区域类型(野外/森林/沼泽/山脉/地下城/敌对阵营领地/禁区/超古代遗迹等)","name":"区域名(2~6字)","desc":"一句话","danger":1~5的整数,"enemies":[{"name":"敌人/势力名","desc":"一句话"}],"loot":["击败敌人可获得的素材名",1~3个]}],'
+    '"heal_items":[{"name":"治疗物品名(2~6字,贴合世界观)","note":"功效一句话","price":售价金币,"heal":恢复的生命数}],'
+    '"mainline":[{"stage":"主线小节名(≤10字)","desc":"这一步要做什么/线索(≤30字)","goal":{"type":"reputation|quest|defeat|空","value":数字,"note":"目标一句话"}}],'
     '"plots":[{"kind":"房|宅|小屋|公寓|铺面|庄园…","name":"可购住处名(2~6字)","desc":"一句话","price":按物价设定的金币价,600~8000区间}]}'
 )
 
@@ -55,7 +59,33 @@ def _world_line(world) -> str:
     return (
         f"当前世界:《{world.name}》[{world.genre}] {world.desc}\n"
         f"氛围:{world.atmosphere}\n世界规则:{';'.join(world.rules or [])}"
+        + _zone_line(world)
     )
+
+
+def _zone_line(world) -> str:
+    """危险区域/敌对阵营一览(打怪、讨伐、素材、任务联动用)。"""
+    zones = [z for z in (getattr(world, "zones", None) or []) if isinstance(z, dict) and z.get("name")]
+    if not zones:
+        return ""
+    parts = []
+    for z in zones[:6]:
+        en = "、".join(e.get("name", "") for e in (z.get("enemies") or []) if isinstance(e, dict))
+        parts.append(f"{z.get('name')}({z.get('kind', '')},危险度{z.get('danger', '?')},敌人:{en or '不明'},可掉落:{'、'.join((z.get('loot') or [])[:3]) or '无'})")
+    return ("\n危险区域(打怪/讨伐/冒险类场景请把地点放在其中之一,并点出区域与敌人;"
+            "击败敌人可掉落该区域素材):" + ";".join(parts))
+
+
+def _heal_line(world, inventory_note: str = "") -> str:
+    """治疗物品提示:世界通名 + (可选)角色背包里的治疗物品。"""
+    items = [h for h in (getattr(world, "heal_items", None) or []) if isinstance(h, dict) and h.get("name")]
+    line = ""
+    if items:
+        line = "\n本世界治疗物品通名(掉落/售卖/使用物品时必须用这些名字):" + \
+               "、".join(f"{h['name']}({h.get('note', '')})" for h in items[:4])
+    if inventory_note:
+        line += "\n" + inventory_note
+    return line
 
 
 def _material_tail(user: str, material: str) -> str:
@@ -81,7 +111,7 @@ def gen_world(desc: str | None, avoid_names: list[str] | None, theme_hint: str) 
         "覆盖衣食住行玩各方面)。每个NPC都要有自己的"
         "日常行踪(daily:TA每天一般在哪/做什么)、鲜活小怪癖或口头禅(quirk),"
         "让这个世界住着活生生的人。\n"
-        "然后为这个世界设计以下内容(必须全部给出,分别填入 infra / mainline / plots 三个数组):\n"
+        "然后为这个世界设计以下内容(必须全部给出,分别填入 infra / zones / heal_items / mainline / plots 五个数组):\n"
         "- infra: 20~28个贴合该世界题材与时代的基础设施,种类尽量丰富不重复,"
         "必须覆盖生存必要(补给/住宿/餐饮/医疗/据点),还要有不少社交娱乐约会场所"
         "(茶馆酒馆/戏台剧场/温泉澡堂/公园花园/观景看台/夜市市集/约会胜地等,越丰富越热闹),"
@@ -89,7 +119,15 @@ def gen_world(desc: str | None, avoid_names: list[str] | None, theme_hint: str) 
         "  可从这些类型里选或自创:商店/集市/饭馆/小吃摊/茶馆/酒馆/咖啡馆/旅店/澡堂/书店/当铺/"
         "  花店/药铺/诊所/铁匠铺/工坊/裁缝铺/戏院/道场/学园/祭坛/神社/码头/驿站/车马行/据点/地标等,\n"
         "  kind/name/desc/work 必填;\n"
-        "- mainline: 3~6 节世界主线(stage/desc),是一段能推动这个世界的故事;\n"
+        "- zones: 3~6 个危险区域/敌对阵营(如野外险地/森林/沼泽/地下城/敌对势力领地/"
+        "远远超越当前文明的超古代遗迹等,贴合世界观),每个区域含 danger(1~5 危险度)、"
+        "1~2 种 enemies(敌人/怪物/敌对势力成员)与 loot(击败后可掉落的素材);\n"
+        "- heal_items: 3 种贴合世界观的治疗物品(如丹药/药剂/医疗包,由低到高三档),"
+        "price 为售价金币、heal 为可恢复的生命数(30/60/100 左右递增);\n"
+        "- mainline: 3~6 节世界主线(stage/desc),是一段能推动这个世界的故事;"
+        "每节可带 goal(阶段性门槛,层层推进):type 只能是 reputation(推进者在本世界的声望≥value)"
+        "|quest(全群累计完成任务数≥value)|defeat(全群累计讨伐数≥value),value 为数字;"
+        "开篇的 1~2 节不要设 goal,中后期的 2~3 节设 goal,让世界走向由玩家的积累决定;\n"
         "- plots: 3~5 处可供居民购置的住处(kind/name/desc/price),price 用整数金币。\n"
         "全部要贴合该世界的题材与时代,不要套用同一套现代模板。\n"
         f"严格输出 JSON,结构:{WORLD_SCHEMA}"
@@ -133,6 +171,38 @@ INFRA_CORRECT = (
 )
 
 
+def regen_zones_heals(world) -> str:
+    """管理员重绘危险区域与治疗物品的 user prompt(贴合世界观,避开旧名)。"""
+    zones = [z for z in (world.zones or []) if isinstance(z, dict) and z.get("name")]
+    heals = [h for h in (world.heal_items or []) if isinstance(h, dict) and h.get("name")]
+    zone_line = "、".join(str(z.get("name")) for z in zones) or "无"
+    heal_line = "、".join(str(h.get("name")) for h in heals) or "无"
+    return (
+        f"世界:《{world.name}》[{world.genre}] {world.desc}\n"
+        f"氛围:{world.atmosphere}\n世界规则:{';'.join(world.rules or [])}\n"
+        f"现有危险区域(重新规划,不要照抄这些名字):{zone_line}\n"
+        f"现有治疗物品(重新规划,不要照抄这些名字):{heal_line}\n\n"
+        "请以造世者的身份,重新设计这个世界的危险区域与治疗物品。\n"
+        "【硬性要求】\n"
+        "1. zones:3~6 个危险区域/敌对阵营,贴合该世界的题材、时代与文明水平"
+        "(如野外险地/森林/沼泽/地下城/敌对势力领地/远远超越当代文明的超古代遗迹等);"
+        "每个区域含 danger(1~5 危险度)、1~2 种 enemies(敌人/怪物/敌对势力成员,贴合世界观)"
+        "与 1~3 种 loot(击败后可掉落的素材);\n"
+        "2. heal_items:3 种贴合世界观的治疗物品,由低到高三档(如丹药/药剂/医疗包),"
+        "price 为售价金币、heal 为可恢复的生命数(30/60/100 左右递增);\n"
+        "3. 名字 2~6 字,融入世界观,不要套用模板。\n"
+        '严格输出 JSON:{"zones":[{"kind":"类型","name":"区域名","desc":"一句话","danger":1~5,'
+        '"enemies":[{"name":"敌人名","desc":"一句话"}],"loot":["素材1","素材2"]}],'
+        '"heal_items":[{"name":"物品名","note":"功效一句话","price":售价,"heal":恢复量}]}'
+    )
+
+
+ZONES_HEALS_CORRECT = (
+    "\n\n【纠正】危险区域或治疗物品缺失/不合规,请补全:"
+    "zones 至少 3 片(各含 danger/enemies/loot),heal_items 恰好 3 档(低中高)。"
+)
+
+
 def enrich_user_world(name: str, desc: str) -> str:
     """玩家自设世界落地补全的 user prompt。"""
     return (
@@ -152,7 +222,7 @@ def make_event(*, world, char=None, npc=None, memories: list[str] | None = None,
         "这是全员都会被卷入的群事件,主角是『群里的众人』。"
         if char is None
         else f"主角是 {char.persona_line()},背景:{char.backstory[:600] or '未详'}。"
-             f"当前体力{char.stamina}/心情{char.mood}/金币{char.gold}。"
+             f"当前生命{char.hp}/100、体力{char.stamina}/心情{char.mood}/金币{char.gold}。"
     )
     if state_note:
         role += (
@@ -202,14 +272,16 @@ def make_life_event(*, world, chars, rels: str = "",
 
 
 def resolve_event(*, world, char=None, event: dict, choice_idx: int,
-                  state_note: str = "", previous: list[str] | None = None) -> str:
+                  state_note: str = "", previous: list[str] | None = None,
+                  heal_note: str = "") -> str:
     """结算一次选择的 user prompt(含连贯性铁律与新文风要求)。"""
     who = char.persona_line() if char else "群里的众人"
+    hp_line = (f"当前生命{char.hp}/100。" if char else "")
     opts = event.get("options") or []
     pick = opts[choice_idx] if 0 <= choice_idx < len(opts) else {"label": "顺其自然", "hint": ""}
     user = (
         f"世界:《{world.name}》。{who}遭遇了:「{event.get('title')}」——{event.get('scene')}\n"
-        f"TA选择了「{pick['label']}」({pick.get('hint','')})。\n"
+        f"TA选择了「{pick['label']}」({pick.get('hint','')})。{hp_line}\n"
         "【连贯性铁律】结算必须紧接上面这场遭遇续写:同一时间、同一地点、同一批在场人物,"
         "从做出选择之后的下一秒写起。严禁跳跃到新的时间/地点,严禁引入遭遇场景里没有的新人物;"
         "dialogues 的 speaker 必须使用遭遇中出现过的角色本名(禁止「少女」「神秘人」之类代称)。\n"
@@ -219,9 +291,14 @@ def resolve_event(*, world, char=None, event: dict, choice_idx: int,
         '"dialogues":事件中人物的多轮对话(2~5轮,IM聊天体,每条"speaker"≤8字、"text"≤60字,可含(动作)小注)。'
         "禁止独角戏:至少 2 个不同说话人,事件人物必须开口回应,不能只有主角一人自说自话。\n"
         '严格输出 JSON:{"narration":"结果叙述","dialogues":[{"speaker":"","text":""}],"effects":{"stamina":±,"mood":±,"gold":±,"exp":0-25,'
-        '"attrs":{"force":0}}, "memory":"第三人称一句话记忆存档", "state":{"type":"囚禁|束缚|被困...","reason":"一句原因"}, "state_lift":true, '
+        '"attrs":{"force":0},"reputation":-10~10}, "memory":"第三人称一句话记忆存档", "state":{"type":"囚禁|束缚|被困...","reason":"一句原因"}, "state_lift":true, '
         '"items_gain":[{"name":"获得物品≤12字","note":"来历≤20字"}],"items_lose":["失去/消耗的物品名"]}\n'
-        "items_gain/items_lose 只在剧情自然涉及物品得失时输出(拾获/受赠/被掳/消耗),通常为空数组;物品名要贴合世界观。\n"
+        "effects.reputation:此事传开后角色在本世界的声望变化(-10~10):善行/英勇/慷慨为正,恶行/怯懦/背信为负;寻常小事可不输出。\n"
+        "effects.hp:生命值变化(-100~30):遭遇危险/受伤/激战为负,休息疗养/服用治疗物品为正;"
+        "生命归零会重伤昏迷(小危险-10~-30,大危险-30~-60,不要轻易打到归零)。\n"
+        "items_gain/items_lose 只在剧情自然涉及物品得失时输出(拾获/受赠/被拢/消耗/击败敌人拾获战利品),"
+        "通常为空数组;物品名要贴合世界观(治疗物品用世界通名)。\n"
+        "若角色受伤且背包有治疗物品,可让TA在剧情中自然使用(items_lose 该物品 + effects.hp 正值)。\n"
         "数值克制:大部分±5~15,exp 5~20;负反馈不要毁灭性。memory 一句话,30字内。"
         "state 与 state_lift 只在处境发生变化时才输出(见上),否则两字段都不要出现。"
     )
@@ -230,6 +307,7 @@ def resolve_event(*, world, char=None, event: dict, choice_idx: int,
             f"\n该角色正被「{state_note}」困住(无法自由行动)。本次抉择结果要明确交代处境:若这次成功挣脱,"
             "则输出 state_lift:true;若这次反而更被束缚或换一种束缚,则输出 state:{...}(type/reason自定);若只是推进未有果,则两者都不输出。"
         )
+    user += _heal_line(world, heal_note)
     user += previous_block(previous)
     return user
 
@@ -265,7 +343,8 @@ def resolve_life_event(*, world, chars, event: dict, choice_idx: int,
 # ═══════════════════════════ 角色互动 ═══════════════════════════
 def resolve_interaction(*, world, a, b=None, npc=None, mode: str, detail: str,
                         rel_score: int, rel_stage: str = "",
-                        state_note: str = "", previous: list[str] | None = None) -> str:
+                        state_note: str = "", previous: list[str] | None = None,
+                        rep_note: str = "") -> str:
     """A 与 B(玩家分身/NPC)一段互动的 user prompt(含切题铁律)。"""
     b_ps = ""
     if b:
@@ -275,6 +354,7 @@ def resolve_interaction(*, world, a, b=None, npc=None, mode: str, detail: str,
         b_ps = f"\nB资料:{npc.get('name','?')}({npc.get('role','')}),{npc.get('persona','')}"
     rel_line = (f"两人当前关系:{rel_score}({rel_stage or ''})。" if not npc
                 else "对方是本世界的NPC。")
+    rep_line = (f"\n【声望】{rep_note}" if rep_note else "")
     state_line = ""
     if state_note:
         state_line = (
@@ -285,7 +365,7 @@ def resolve_interaction(*, world, a, b=None, npc=None, mode: str, detail: str,
     return (
         f"{_world_line(world)}\n"
         f"A:{a.persona_line()},背景:{a.backstory[:600] or '未详'},体力{a.stamina}/心情{a.mood}/金币{a.gold}"
-        f"{b_ps}\n{rel_line}\n"
+        f"{b_ps}\n{rel_line}{rep_line}\n"
         f"互动:「{mode}」" + (f"({detail[:60]})" if detail else "") + state_line + "\n"
         f"【切题铁律】这段叙述演的必须就是上面这场「{mode}」互动"
         + (f"({detail[:60]})" if detail else "") + "。"
@@ -300,9 +380,11 @@ def resolve_interaction(*, world, a, b=None, npc=None, mode: str, detail: str,
         "禁止独角戏:A 与 B 都必须开口,不能只有一人说个不停。\n"
         "若是消费类互动(请客/送礼),务必扣 A 的金币并给 B 心情。\n"
         '严格输出 JSON:{"narration":"互动叙述","a_effects":{"mood":±,"gold":±,"exp":0-10,'
-        '"stamina":±,"attrs":{}}, "b_effects":{"mood":±,"gold":±},'
-        ' "rel_delta":-20~20整数, "memory":"一句话存档", "state":{...}, "state_lift":true}'
+        '"stamina":±,"hp":±,"attrs":{}}, "b_effects":{"mood":±,"gold":±},'
+        ' "rel_delta":-20~20整数, "reputation":-5~5整数, "memory":"一句话存档", "state":{...}, "state_lift":true}'
         "(state/state_lift 仅在救援场景、且B的处境发生变化时按上面的规则输出,否则不要出现)"
+        "(reputation:A 在本世界的声望微调,仅在互动明显体现品性/义举/恶行时输出,一般可不输出)"
+        "(hp:仅在互动中受伤/疗愈时输出,一般不要输出)"
     ) + previous_block(previous)
 
 
@@ -329,7 +411,7 @@ def propose_bond(*, world, a, b, label: str, rel_score: int, rel_stage: str = ""
 
 
 def confess(*, world, a, b, score: int, outcome: str) -> str:
-    """告白场景 prompt。outcome: success(答应) | crush(婉拒留悬念) | reject(明确拒绝)。"""
+    """告白场景 prompt(重要剧情权重)。outcome: success(答应) | crush(婉拒留悬念) | reject(明确拒绝)。"""
     outcome_line = {
         "success": "告白成功,两人正式确立恋人关系(双向奔赴或水到渠成,写出动情与确定的一刻)",
         "crush": "告白被温柔地婉拒,但对方心动未泯、留下悬念(单相思的开始,克制而不绝情)",
@@ -341,36 +423,49 @@ def confess(*, world, a, b, score: int, outcome: str) -> str:
         f"被告白者:{b.persona_line()},背景:{b.backstory[:600] or '未详'}\n"
         f"两人当前好感:{score}。\n"
         f"本次走向:{outcome_line}。\n"
-        "写一段告白场景:叙述(100~180字,轻小说式)+多轮对话(3~6轮,IM聊天体,"
+        "写一段告白场景:叙述(300~600字,轻小说式:铺垫回忆→说出口→等待→回应→关系落点)"
+        "+多轮对话(6~10轮,IM聊天体,"
         '每条"speaker"≤8字、"text"≤60字)。'
         "禁止独角戏:双方都必须开口。结果要按上面「本次走向」落到实处,不给模棱两可的暧昧结尾。\n"
+        + story_weight_line("major") +
         '严格输出 JSON:{"narration":"告白场景叙述","dialogues":[{"speaker":"","text":""}]}'
     )
 
 
 def propose(*, world, a, b, score: int) -> str:
-    """求婚/缔结伴侣场景 prompt(条件已校验,必定成功)。"""
+    """求婚/缔结伴侣场景 prompt(重要剧情权重;条件已校验,必定成功)。"""
     return (
         f"{_world_line(world)}\n"
         f"求婚者:{a.persona_line()}\n"
         f"被求婚者:{b.persona_line()}\n"
         f"两人好感:{score},早已是彼此认定的恋人。\n"
-        "写一段求婚场景:叙述(100~180字,轻小说式,仪式感与动情),"
-        "+多轮对话(3~6轮,IM聊天体,每条\"speaker\"≤8字、\"text\"≤60字)。"
+        "写一段求婚场景:叙述(300~600字,轻小说式,从准备、时机、仪式到动情的完整一幕),"
+        "+多轮对话(6~10轮,IM聊天体,每条\"speaker\"≤8字、\"text\"≤60字)。"
         "禁止独角戏:双方都必须开口。结尾要明确『答应与否』,不许停在欲言又止。\n"
+        + story_weight_line("major") +
         '严格输出 JSON:{"narration":"求婚场景叙述","dialogues":[{"speaker":"","text":""}]}'
     )
 
 
 # ═══════════════════════════ 主动行动 / 设施 / 家 / 兼职 / 主线 ═══════════════════════════
 def resolve_action(*, world, char, action_name: str, detail: str, kind: str = "safe",
-                   memories: list[str] | None = None, state_note: str = "") -> str:
-    """结算一次玩家主动行动(练习/健身/打怪/冒险)。kind: safe | risk。"""
+                   memories: list[str] | None = None, state_note: str = "",
+                   heal_note: str = "", zone_note: str = "") -> str:
+    """结算一次玩家主动行动(练习/健身/打怪/冒险)。kind: safe | risk。
+    zone_note: 『打怪』的讨伐区域锁定说明(游戏层按玩家指定/委托对齐/等级适配预先选好)。"""
     risk_line = (
         "【风险型】结果起伏大:可能大丰收,也可能受伤/掉属性/破财。数值范围可以放得更宽。"
         if kind == "risk"
         else "【日常型】大体都往好的方向走,只是奖励丰俭有别;不要给毁灭性打击。"
     )
+    if action_name == "打怪":
+        risk_line += (
+            "\n【讨伐规则】打怪必须把场景放进当前世界的危险区域之一,点出区域名与遭遇的敌人(用区域清单里的敌人名);"
+            "战斗结果要明确(击败/击退/败退);若获胜,items_gain 可给 1~2 个该区域 loot 素材"
+            "或世界治疗物品(用世界通名),声望也会因讨伐而上升;若败退,hp 负值要克制。"
+        )
+        if zone_note:
+            risk_line += f"\n【本次讨伐已锁定】{zone_note}"
     if state_note:
         risk_line += (
             f"\n该角色正被「{state_note}」困住(无法自由行动)——这次行动是TA的脱困/求生尝试,"
@@ -381,7 +476,7 @@ def resolve_action(*, world, char, action_name: str, detail: str, kind: str = "s
     return (
         f"{_world_line(world)}\n"
         f"角色:{char.persona_line()},背景:{char.backstory[:600] or '未详'},"
-        f"当前体力{char.stamina}/心情{char.mood}/金币{char.gold}\n"
+        f"当前生命{char.hp}/100、体力{char.stamina}/心情{char.mood}/金币{char.gold}\n"
         f"今日于《{world.name}》执行行动:「{action_name}」{detail[:80]}\n{risk_line}\n{mem}\n"
         "请写出这次行动的经过与结果(轻小说式,100~200字:画面感+心理细节+结果交代清楚"
         "——做成了什么/收获什么/付出什么代价,都写明白),"
@@ -390,12 +485,15 @@ def resolve_action(*, world, char, action_name: str, detail: str, kind: str = "s
         "禁止独角戏:至少 2 个不同说话人,场景人物必须回应,不能只有角色自说自话。\n"
         "属性键:" + attr_names_line() + "。日常型行动要消耗的体力由系统扣除,效果表里不要写体力。\n"
         '严格输出 JSON:{"narration":"行动叙述",'
-        '"effects":{"mood":±,"gold":±,"exp":0-25,"stamina":±(仅风险型可写),"attrs":{"force":0}},"memory":"一句话存档", "state":{"type":"...","reason":"..."}, "state_lift":true, '
+        '"effects":{"mood":±,"gold":±,"exp":0-25,"stamina":±(仅风险型可写),"hp":±,"attrs":{"force":0},"reputation":-10~15},"memory":"一句话存档", "state":{"type":"...","reason":"..."}, "state_lift":true, '
         '"items_gain":[{"name":"获得物品≤12字","note":"来历≤20字"}],"items_lose":["失去/消耗的物品名"]}\n'
-        "items_gain/items_lose 只在行动自然涉及物品得失时输出(拾获/缴获/受赠/消耗/损坏),通常为空数组;物品名要贴合世界观。"
+        "effects.reputation:此事传开后在本世界的声望变化(-10~15):讨伐建功/义举为正,劫掠/怯逃为负;日常行动可不输出。\n"
+        "effects.hp:生命值变化(-100~30):受伤为负、服用治疗物品/疗伤为正;归零会重伤昏迷,负值要克制。"
+        "若角色受伤且背包有治疗物品,可让TA在行动中自然使用(items_lose 该物品 + effects.hp 正值)。"
+        "items_gain/items_lose 只在行动自然涉及物品得失时输出(拾获/缴获/受赠/消耗/损坏/讨伐掉落),通常为空数组;物品名要贴合世界观。"
         "数值克制:日常型大部分±5~15、exp 5~18、金币±0~40;风险型可到 exp 5~30、金币 0~80,失败时给负反馈但不要毁灭性打击。"
         "state 与 state_lift 只在处境变化时输出(见规则说明),否则两字段都不要出现。"
-    )
+    ) + _heal_line(world, heal_note)
 
 
 def facility_event(*, world, char, facility: dict, action: str,
@@ -458,24 +556,69 @@ def settle_work(*, world, char, spot: str, job: str, hours: float,
     )
 
 
-def resolve_mainline(*, world, char, stage: dict) -> str:
-    """结算世界主线一小节(user prompt)。"""
+def resolve_mainline(*, world, char, stage: dict, goal_note: str = "",
+                     weight: str = "major") -> str:
+    """结算世界主线一小节(user prompt)。goal_note: 门槛达成说明;weight: 剧情权重。"""
+    goal_line = (f"\n【阶段门槛已达成】{goal_note}" if goal_note else "")
+    narr_spec, dlg_spec = story_spec(weight, "90~180", "1~3")
+    dlg_cap = {"normal": 50, "major": 60, "climax": 80}.get(weight, 50)
     return (
         f"{_world_line(world)}\n"
-        f"主角:{char.persona_line()}\n"
-        f"\n当前主线小节:{stage.get('stage','')} —— {stage.get('desc','')}\n"
-        "角色主动去推进这段世界主线。请写出这一步的经过与结果(轻小说式,90~180字):"
-        "要扣住主线目标、有画面感、结果交代清楚(这一步达成与否、拿到的线索或代价都写明),并给出数值变化(克制:±3~10)。\n"
-        '"dialogues":这段推进中的简短对话(1~3轮,IM聊天体,speaker≤8字、text≤50字,至少2个说话人)。\n'
+        f"主角:{char.persona_line()},{_rep_short(world, char)}\n"
+        f"\n当前主线小节:{stage.get('stage','')} —— {stage.get('desc','')}{goal_line}\n"
+        "角色主动去推进这段世界主线。请写出这一步的经过与结果(轻小说式,"
+        f"{narr_spec}字):"
+        "要扣住主线目标、有画面感、结果交代清楚(这一步达成与否、拿到的线索或代价都写明),并给出数值变化(克制:±3~10);"
+        "主线推进有广泛影响,reputation 可在 -5~10 之间。\n"
+        f'"dialogues":这段推进中的对话({dlg_spec}轮,IM聊天体,speaker≤8字、text≤{dlg_cap}字,至少2个说话人)。\n'
+        + story_weight_line(weight) +
         '严格输出 JSON:{"narration":"推进叙述","dialogues":[{"speaker":"","text":""}],'
-        '"effects":{"mood":±,"gold":±,"exp":0-15,"attrs":{}}, "memory":"一句话存档"}'
+        '"effects":{"mood":±,"gold":±,"exp":0-15,"hp":±,"attrs":{},"reputation":-5~10}, "memory":"一句话存档"}'
+    )
+
+
+def _rep_short(world, char) -> str:
+    """角色当前世界声望的一句话(game 层预先挂在 char._rep_line 上;无则空)。"""
+    return str(getattr(char, "_rep_line", "") or "")
+
+
+def rep_note_block(rep_note: str) -> str:
+    """声望注入块(game 层拼好的一句话;空则不占行)。"""
+    rn = (rep_note or "").strip()
+    return f"【声望】{rn}\n" if rn else ""
+
+
+def mainline_echo(*, world, char, stage: dict, ctx: str) -> str:
+    """主线回响:日常结算后小概率触发的主线伏笔/呼应叙述。"""
+    return (
+        f"{_world_line(world)}\n"
+        f"角色:{char.persona_line()}\n"
+        f"当前主线小节:{stage.get('stage','')} —— {stage.get('desc','')}\n"
+        f"刚刚发生:{str(ctx)[:120]}\n"
+        "这件事与世界主线隐隐呼应。请写一段『主线回响』(60~110字):从刚发生的事自然引出主线线索——"
+        "一个征兆、一句传言、一件似曾相识的旧物、远处的一声号角、某位神秘人的注视等;"
+        "只做伏笔与呼应,不要超展开、不要直接揭开谜底,也不要打断刚刚发生的事。"
+        '严格输出 JSON:{"narration":"回响叙述"}'
+    )
+
+
+def gen_epilogue(*, world) -> str:
+    """主线全篇完结后续写『尾声』新篇章(世界在结局之后仍在继续)。"""
+    return (
+        f"{_world_line(world)}\n"
+        "这个世界的主线篇章已经完结(尘埃落定)。但世界仍在继续——请续写『尾声』新篇章:\n"
+        '严格输出 JSON:{"narration":"篇章过渡叙述(80~140字:旧篇章落幕、余波与新暗流并起)",'
+        '"stages":[{"stage":"小节名≤10字","desc":"≤30字","goal":{"type":"reputation|quest|defeat|空","value":数字}}]}\n'
+        "stages 给 2~4 节:内容是主线结局之后的世界走向——余波、重建、新暗流、旧人物的归宿或新威胁的萌芽,"
+        "层层可推进;中后期的 1~2 节可带 goal(与主线门槛同规则)。"
     )
 
 
 # ═══════════════════════════ NPC 对话 ═══════════════════════════
 def npc_chat(*, world, npc: dict, char, action: str,
              memories: list[str] | None = None,
-             state_note: str = "", previous: list[str] | None = None) -> str:
+             state_note: str = "", previous: list[str] | None = None,
+             rep_note: str = "") -> str:
     """与当前世界 NPC 的多轮对话 prompt(切题铁律 + 直白不谜语)。"""
     state_line = ""
     if state_note:
@@ -490,8 +633,10 @@ def npc_chat(*, world, npc: dict, char, action: str,
         f"钩子:{npc.get('hook','')})"
         + (f"\nTA的日子:平时{npc.get('daily','')}" if npc.get("daily") else "")
         + (f";怪癖/口头禅:{npc.get('quirk','')}" if npc.get("quirk") else "")
-        + f"\n角色:{char.persona_line()}\n角色行为:{action[:80]}\n"
-        f"{("\n".join(memories[:4]) if memories else '')}\n{state_line}\n"
+        + f"\n角色:{char.persona_line()},{_rep_short(world, char)}\n角色行为:{action[:80]}\n"
+        f"{("\n".join(memories[:4]) if memories else '')}\n{rep_note_block(rep_note)}{state_line}\n"
+        "【声望与态度】NPC 对角色的第一态度应贴合其在本世界的声望:声望高则热络/尊敬/愿意帮忙,"
+        "声望低则提防/冷淡/要价更高;态度是起点而非终点,互动本身可以让它变化。\n"
         f"【切题铁律】这段对话演的必须就是角色的「{action[:40]}」这个行为,只涉及角色与该NPC两人;"
         "严禁跑题:不得凭空插入与行为无关的遭遇/战斗/陌生人物/超展开;"
         "知识库素材只作风味点缀,不得改变本次互动的主题、场景与人物关系。\n"
@@ -501,7 +646,8 @@ def npc_chat(*, world, npc: dict, char, action: str,
         "禁止独角戏:NPC 与角色都必须开口,不能只有角色一人说个不停。\n"
         '严格输出 JSON:{"reply":"NPC最核心的一句台词","dialogues":[{"speaker":"","text":""}],'
         '"narration":"旁白收尾",'
-        '"effects":{"mood":±,"gold":±,"exp":0-8}, "memory":"一句话存档", "state":{...}, "state_lift":true}'
+        '"effects":{"mood":±,"gold":±,"exp":0-8,"hp":±,"reputation":-5~5}, "memory":"一句话存档", "state":{...}, "state_lift":true}'
+        "(reputation/hp 仅在剧情明显涉及时输出,一般可不输出)"
     ) + previous_block(previous)
 
 
@@ -601,18 +747,25 @@ def gen_quests(*, world, char, npc_names: list[str] | None = None,
                life_names: list[str] | None = None,
                facilities: list[dict] | None = None,
                memories: list[str] | None = None) -> str:
-    """生成 3 个设施/委托人驱动的任务。"""
+    """生成 3 个设施/委托人驱动的任务。zones: 危险区域(讨伐/素材类任务可与之联动)。"""
     mem = "\n".join(memories[:4]) if memories else ""
     npc_line = "、".join((npc_names or [])[:10]) or "暂无"
     life_line = "、".join((life_names or [])[:8]) or "暂无"
     facs = (facilities or [])[:10]
     fac_line = "\n".join(f"- {f.get('name')}({f.get('kind','')}){'·可打工:'+f['work'] if f.get('work') else ''}"
                          for f in facs) or "- 暂无"
+    zones = [z for z in (getattr(world, "zones", None) or []) if isinstance(z, dict) and z.get("name")]
+    zone_line = "\n".join(
+        f"- {z.get('name')}({z.get('kind','')},危险度{z.get('danger','?')})敌人:"
+        + "、".join(e.get("name", "") for e in (z.get("enemies") or []) if isinstance(e, dict))
+        + "；素材:" + "、".join((z.get("loot") or [])[:3])
+        for z in zones[:5]) or "- 暂无"
     return (
         f"{_world_line(world)}\n"
         f"角色:{char.persona_line()},背景:{char.backstory[:600] or '未详'}\n"
         f"世界知名NPC:{npc_line}\n生活角色:{life_line}\n"
         f"世界设施(任务的发布地点从这里选):\n{fac_line}\n"
+        f"危险区域(讨伐/采集素材类任务应指向这些区域及其敌人/素材):\n{zone_line}\n"
         f"{mem}\n"
         "请给这个角色生成今天的 3 个委托任务,由设施的委托板/当值者发布。每个任务包含:\n"
         '1) "giver":委托人(2~6字)——优先用设施相关的组织(如冒险者公会/商会/茶馆掌柜)或上面的NPC,也可临时虚构一个贴合世界观的普通委托人;'
@@ -620,15 +773,16 @@ def gen_quests(*, world, char, npc_names: list[str] | None = None,
         '2) "place":发布设施名(必须从上面设施清单里选)\n'
         '3) "text":任务名≤16字,"hint":完成提示≤20字\n'
         '4) "steps":1~3 个可验证步骤,type 只能从以下选:\n'
-        '   {"type":"act","desc":"≤20字","keywords":["关键词2~4个"]} —— 需要玩家用「冒险/打怪」完成,keywords 要能出现在玩家的行动描述里\n'
+        '   {"type":"act","desc":"≤20字","keywords":["关键词2~4个"]} —— 需要玩家用「冒险/打怪」完成,keywords 要能出现在玩家的行动描述里(讨伐类任务的关键词直接用区域名或敌人名,如「打怪 低语森林 树精」)\n'
         '   {"type":"npc","desc":"≤20字","npc":"NPC名"} —— 与某位世界NPC互动;npc 必须用名单本名\n'
         '   {"type":"life","desc":"≤20字","npc":"生活角色名"} —— 与某位生活角色互动;必须用名单本名\n'
         '   {"type":"social","desc":"≤20字"} —— 与任意群友互动一次(不指定具体人)\n'
         '   {"type":"work","desc":"≤20字"} —— 完成一次兼职打工\n'
-        '   {"type":"item","desc":"≤20字","item":"物品名≤12字"} —— 取得某件物品(通过冒险/事件获得)\n'
+        '   {"type":"item","desc":"≤20字","item":"物品名≤12字"} —— 取得某件物品(讨伐掉落素材/冒险拾获/事件获得;素材名用上面区域 loot 名)\n'
         '   {"type":"facility","desc":"≤20字","facility":"设施名"} —— 前往某个设施办事(必须用设施清单本名;\n'
         '     非社交娱乐设施也可去——这是任务需要,系统会放行并生成一段在设施里的剧情)\n'
-        "要求:3 个任务难度递进(至少1个单步日常,最多1个三步任务);步骤必须与任务文本逻辑一致;"
+        "要求:3 个任务难度递进(至少1个单步日常,最多1个三步任务);"
+        "至少 1 个任务与危险区域联动(讨伐敌人或采集素材);步骤必须与任务文本逻辑一致;"
         "结合世界观,生活气息或小冒险皆可。严禁把其他玩家/群友写成任务目标或委托人。\n"
         '严格输出 JSON:{"quests":[{"text":"","giver":"","place":"","hint":"",'
         '"steps":[{"type":"","desc":"","keywords":[],"npc":"","item":""}]}]}\n恰好 3 个。'
@@ -637,15 +791,17 @@ def gen_quests(*, world, char, npc_names: list[str] | None = None,
 
 def finish_quest(*, world, char, quest: str, giver: str = "", place: str = "",
                  steps_desc: list[str] | None = None,
-                 memories: list[str] | None = None) -> str:
+                 memories: list[str] | None = None,
+                 rep_note: str = "") -> str:
     """向委托人交付任务的 prompt(出场人物锁死)。"""
     mem = "\n".join(memories[:3]) if memories else ""
     giver = (giver or "委托人").strip()
     place = (place or "").strip()
     steps_line = "".join(f"\n- ✅ {s}" for s in (steps_desc or [])) or "\n- ✅(单步任务)"
+    rep_line = (f",{_rep_short(world, char)}" if getattr(char, "_rep_line", "") else "")
     return (
         f"{_world_line(world)}\n"
-        f"角色:{char.persona_line()},背景:{char.backstory[:600] or '未详'}\n"
+        f"角色:{char.persona_line()}{rep_line},背景:{char.backstory[:600] or '未详'}\n"
         f"角色完成了委托任务:「{quest[:30]}」\n"
         f"委托人:{giver}(发布地点:{place or '不祥'})"
         "——若委托人是组织/设施,由当值代理人出面交付;若是个人委托人则以本名出场\n"
@@ -653,13 +809,82 @@ def finish_quest(*, world, char, quest: str, giver: str = "", place: str = "",
         f"{mem}\n"
         "【出场铁律】这是交付场景:只允许角色与委托人两方出场,"
         "严禁出现其他群友/生活角色/无关NPC/凭空新人物,严禁把交付成果交给或送给别人。\n"
+        "【声望】声望高的角色委托人更信任、酬劳更爽快;声望低则被防备、要价或扣除押金。交付叙述要体现这一点。\n"
         "写一段交付场景(轻小说式,80~150字:委托人的验收反应+简短交代+结果说明——酬劳拿到没、"
         "事情如何收尾都写明),并给一点委托酬劳。\n"
         f'"dialogues":角色与「{giver}」的交割对话(1~3轮,IM聊天体,每条"speaker"≤8字、"text"≤40字)。'
         "禁止独角戏:至少 2 个不同说话人,不能只有角色一人说话。\n"
-        '严格输出 JSON:{"narration":"交付叙述","effects":{"exp":5~12,"gold":0~25,"mood":0~3},'
-        '"items_gain":[{"name":"可选:委托人额外送的谢礼≤12字","note":"≤20字"}]}'
-        "items_gain 只在委托人明确会给实物谢礼时才输出,通常为空。"
+        '严格输出 JSON:{"narration":"交付叙述","effects":{"exp":5~12,"gold":0~25,"mood":0~3,"reputation":0~8},'
+        '"items_gain":[{"name":"可选:委托人额外送的谢礼≤12字","note":"≤20字(可为世界治疗物品)"}]}'
+        "items_gain 只在委托人明确会给实物谢礼时才输出,通常为空;reputation 为完成任务后的声望上升(1~8)。"
+    )
+
+
+# ═══════════════════════════ 远征系统 ═══════════════════════════
+WORLDVIEW_LAW = (
+    "\n【世界观铁律】远征的一切措辞都必须贴合该世界的题材与时代:"
+    "发布方与称谓(公会是奇幻,宗门/仙盟是修仙,据点议会是末世,株式会社/科考队是科幻近代……)、"
+    "装备与交通、报酬形式、地名与术语,全部就地取材;严禁出现与世界观冲突的组织或名词。"
+)
+
+
+def expedition_offer(*, world, char, zone: dict, issuer: str, teammates: list[str],
+                     duration_h: int, rate: int) -> str:
+    """远征委托布告的 user prompt。issuer/队友名单由系统按世界观给定,布告以其名义撰写。"""
+    team_line = "、".join(teammates) if teammates else "暂无,可补 1~2 名贴合世界观的临时同伴"
+    return (
+        f"{_world_line(world)}\n"
+        f"角色:{char.persona_line()},{_rep_short(world, char)}\n"
+        f"远征目标区域:「{zone.get('name')}」({zone.get('kind','')},危险度{zone.get('danger','?')}——{zone.get('desc','')})\n"
+        f"出没敌人:{'、'.join(e.get('name','') for e in (zone.get('enemies') or []) if isinstance(e, dict)) or '不明'}\n"
+        f"发布方(必须以此名义颁布):{issuer}\n"
+        f"已确认同行的同伴:{team_line}\n"
+        f"预计行程:约 {duration_h} 小时;以角色当前实力预估成功率约 {rate}%\n"
+        "请以发布方口吻写一份远征委托布告:目标与意义、集合与行程、风险与告诫、报酬概要(报酬由系统结算,布告只需概述形式:"
+        "贴合世界观的酬金/功勋/物资均可)。title 是这份布告的名字。"
+        + WORLDVIEW_LAW +
+        '严格输出 JSON:{"title":"远征委托名≤12字","briefing":"布告正文90~160字","teaser":"报酬一句话≤18字"}'
+    )
+
+
+def expedition_report(*, world, char, exp: dict, phase: str, supplies_note: str) -> str:
+    """远征途中的剧情片段(播报)。phase: 行军/遭遇战/险境/决战前夜。"""
+    teammates = "、".join(exp.get("teammates") or []) or "队友们"
+    return (
+        f"{_world_line(world)}\n"
+        f"角色:{char.persona_line()}\n"
+        f"正在进行:「{exp.get('title','')}」远征,目标「{exp.get('zone','')}」(危险度{exp.get('danger','?')}),"
+        f"同行:{teammates}。行程已过约 {exp.get('progress', 0)}%。\n"
+        f"当前阶段:{phase}——写一段远征途中的剧情片段(120~220字):"
+        "行军写风物与队伍氛围,遭遇战写一场短促交手,险境写困境与代价,决战前夜写肃杀与决心;"
+        "片段要有画面、有进展、有落点,像连载中的一章。"
+        + (f"\n{supplies_note}" if supplies_note else "")
+        + "\n\"dialogues\":片段中队友/敌人的简短对话(1~3轮,IM聊天体,speaker用队友本名或敌人称谓,text≤50字)。"
+        + WORLDVIEW_LAW +
+        '严格输出 JSON:{"narration":"剧情片段","dialogues":[{"speaker":"","text":""}]}'
+    )
+
+
+def expedition_settle(*, world, char, exp: dict, outcome: str, reward_line: str) -> str:
+    """远征结算:成功=高潮剧情(climax,600~1000字),失败=重要剧情(major,300~600字)。
+    报酬/损失由系统结算(reward_line),叙述中自然带过即可,严禁自行发钱发物。"""
+    weight = "climax" if outcome == "success" else "major"
+    teammates = "、".join(exp.get("teammates") or []) or "队友们"
+    outcome_line = (
+        "远征大获全胜:写最终决战的多回合交锋(前哨→主力接战→危局→逆转→歼灭/夺标)→携战利品凯旋返程的完整一幕"
+        if outcome == "success"
+        else "远征折戟:写局势如何一步步失控(意外/强敌/天灾)、艰难撤离、带伤归来的狼狈与教训"
+    )
+    return (
+        f"{_world_line(world)}\n"
+        f"角色:{char.persona_line()},{_rep_short(world, char)}\n"
+        f"「{exp.get('title','')}」远征({exp.get('zone','')},危险度{exp.get('danger','?')}),"
+        f"同行:{teammates},历时约 {exp.get('duration_h', '?')} 小时。\n"
+        f"结局走向:{outcome_line}。\n"
+        f"系统结算结果(叙述中自然提及,不要改动):{reward_line}\n"
+        "dialogues 6~12轮:最终一战/撤离途中队友与强敌的多轮对话(轮番开口、有呐喊有诀别或虚脱后的相视而笑)。"
+        + story_weight_line(weight) + WORLDVIEW_LAW +
+        '严格输出 JSON:{"narration":"结算叙述","dialogues":[{"speaker":"","text":""}],"memory":"一句话存档"}'
     )
 
 

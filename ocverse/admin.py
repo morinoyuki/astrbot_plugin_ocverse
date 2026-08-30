@@ -19,6 +19,8 @@ from dataclasses import asdict
 from astrbot.api import logger
 from astrbot.api.web import error_response, request as web_req
 
+from .config import INFRA_MAX
+
 # 群配置可编辑的白名单(键 → 钳制范围)
 _CFG_FIELDS = {
     "event_min": (0, 50),
@@ -31,7 +33,7 @@ _CFG_FIELDS = {
 # 角色可编辑白名单:name/gender/title/backstory 分别限长(与创角/编辑指令一致),
 # tags/attrs/flags 由 update_char 自动 json
 _CHAR_SIMPLE = (("name", 24), ("gender", 12), ("title", 32), ("backstory", 4000))
-_CHAR_INT = ("level", "exp", "gold", "mood", "stamina")
+_CHAR_INT = ("level", "exp", "gold", "mood", "stamina", "hp")
 _CHAR_STRUCT = ("attrs", "flags")
 
 
@@ -67,9 +69,12 @@ class AdminPanel:
             (f"{base}/api/events", self.api_events, ["GET"], "事件列表"),
             (f"{base}/api/event/expire", self.api_event_expire, ["POST"], "事件收场"),
             (f"{base}/api/infra/regen", self.api_infra_regen, ["POST"], "AI 重新生成世界设施"),
+            (f"{base}/api/content/regen", self.api_content_regen, ["POST"], "AI 重绘危险区域与治疗物品"),
             (f"{base}/api/logs", self.api_logs, ["GET"], "时间线日志"),
             (f"{base}/api/memories", self.api_memories, ["GET"], "记忆列表"),
             (f"{base}/api/memory/delete", self.api_mem_delete, ["POST"], "删除记忆"),
+            (f"{base}/api/kb", self.api_kb, ["GET"], "知识库列表"),
+            (f"{base}/api/kb/delete", self.api_kb_delete, ["POST"], "删除知识库条目"),
             (f"{base}/api/config", self.api_config, ["GET"], "群参数"),
             (f"{base}/api/config", self.api_config_edit, ["POST"], "编辑群参数"),
             (f"{base}/api/rel", self.api_rel, ["POST"], "编辑羁绊"),
@@ -99,6 +104,14 @@ class AdminPanel:
         except RuntimeError:
             return {}
         return d if isinstance(d, dict) else {}
+
+    async def _req_ids(self) -> tuple[str, str]:
+        """(gid, uid):POST 的 bridge 调用只带 JSON body 不带 query,
+        因此 POST 处理器必须优先从 body 取 gid/uid(GET 保持 query 兼容)。"""
+        body = await self._body()
+        gid = str(body.get("gid") or "") or self._gid()
+        uid = str(body.get("uid") or "") or str(web_req.query.get("uid") or "")
+        return gid, uid
 
     # ── 序列化 ────────────────────────────────────────────────
     @staticmethod
@@ -162,7 +175,7 @@ class AdminPanel:
                 "memories": mems, "items": items}
 
     async def api_char_edit(self):
-        gid, uid = self._gid(), str(web_req.query.get("uid") or "")
+        gid, uid = await self._req_ids()
         if not self.db.get_char(gid, uid):
             return error_response("角色不存在", status_code=404)
         body = await self._body()
@@ -207,6 +220,8 @@ class AdminPanel:
     async def api_world_edit(self):
         gid = self._gid()
         body = await self._body()
+        if not gid:
+            gid = str(body.get("gid") or "")
         # 编辑目标:默认当前世界;传 world_id 可编辑该群任意世界(含沉眠中)
         wid = body.get("world_id")
         if wid is not None:
@@ -232,7 +247,7 @@ class AdminPanel:
                 fields[k] = [str(x)[:cap] for x in body[k][:cnt]]
         if "infra" in body and isinstance(body["infra"], list):
             items = []
-            for it in body["infra"][:12]:
+            for it in body["infra"][:INFRA_MAX]:
                 if not isinstance(it, dict) or not str(it.get("name", "")).strip():
                     continue
                 items.append({
@@ -245,6 +260,47 @@ class AdminPanel:
             if len(names) != len(set(names)):
                 return error_response("设施名字重复", status_code=400)
             fields["infra"] = items
+        if "zones" in body and isinstance(body["zones"], list):
+            zones = []
+            for z in body["zones"][:16]:
+                if not isinstance(z, dict) or not str(z.get("name", "")).strip():
+                    continue
+                try:
+                    danger = max(1, min(5, int(z.get("danger") or 1)))
+                except (TypeError, ValueError):
+                    danger = 1
+                enemies = []
+                for e in (z.get("enemies") or [])[:3]:
+                    if isinstance(e, dict) and str(e.get("name", "")).strip():
+                        enemies.append({"name": str(e["name"])[:10], "desc": str(e.get("desc", ""))[:30]})
+                zones.append({
+                    "kind": str(z.get("kind", "区域"))[:10],
+                    "name": str(z.get("name"))[:12],
+                    "desc": str(z.get("desc", ""))[:60],
+                    "danger": danger,
+                    "enemies": enemies,
+                    "loot": [str(x)[:10] for x in (z.get("loot") or [])[:3] if str(x).strip()],
+                })
+            names = [z["name"] for z in zones]
+            if len(names) != len(set(names)):
+                return error_response("区域名字重复", status_code=400)
+            fields["zones"] = zones
+        if "heal_items" in body and isinstance(body["heal_items"], list):
+            heals = []
+            for h in body["heal_items"][:5]:
+                if not isinstance(h, dict) or not str(h.get("name", "")).strip():
+                    continue
+                try:
+                    heal = max(10, min(200, int(h.get("heal") or 30)))
+                except (TypeError, ValueError):
+                    heal = 30
+                try:
+                    price = max(10, min(500, int(h.get("price") or heal)))
+                except (TypeError, ValueError):
+                    price = heal
+                heals.append({"name": str(h.get("name"))[:10], "note": str(h.get("note", ""))[:24],
+                              "price": price, "heal": heal})
+            fields["heal_items"] = heals
         if "npcs" in body and isinstance(body["npcs"], list):
             npcs = []
             for n in body["npcs"][:50]:
@@ -300,6 +356,25 @@ class AdminPanel:
         except Exception as e:
             return error_response(str(e), status_code=400)
 
+    async def api_content_regen(self):
+        """AI 重绘危险区域与治疗物品(贴合世界观)。
+        body/query: gid 必填;world_id 可选(默认当前世界)。"""
+        if self.ops is None or not hasattr(self.ops, "regen_content"):
+            return error_response("未接入重绘操作", status_code=400)
+        body = await self._body()
+        gid = self._gid() or str(body.get("gid") or "")
+        world_id = body.get("world_id")
+        if not gid:
+            return error_response("需要 gid", status_code=400)
+        try:
+            wid = int(world_id) if world_id is not None else None
+        except (TypeError, ValueError):
+            return error_response("world_id 应为整数", status_code=400)
+        try:
+            return await self.ops.regen_content(gid, wid)
+        except Exception as e:
+            return error_response(str(e), status_code=400)
+
     # ── 日志 / 记忆 ───────────────────────────────────────────
     async def api_logs(self):
         gid = self._gid()
@@ -329,6 +404,29 @@ class AdminPanel:
         self.db.mem_delete_ids(ids)
         return {"deleted": len(ids)}
 
+    # ── 知识库(素材库:所有生成功能共享的世界观素材)──
+    @staticmethod
+    def _kb_json(r) -> dict:
+        return {"id": r["id"], "source": r.get("source") or "", "theme": r.get("theme") or "",
+                "kind": r.get("kind") or "", "content": r.get("content") or "",
+                "created_at": r.get("created_at")}
+
+    async def api_kb(self):
+        """查看当前群知识库(采集的著作/设定素材,注入世界生成/事件/任务等)。"""
+        gid = self._gid()
+        rows = self.db.kb_rows(gid)
+        return {"entries": [self._kb_json(r) for r in rows][::-1],
+                "total": len(rows),
+                "sources": sorted({r.get("source") or "" for r in rows} - {""})}
+
+    async def api_kb_delete(self):
+        body = await self._body()
+        ids = [int(i) for i in (body.get("ids") or []) if str(i).lstrip("-").isdigit()]
+        if not ids:
+            return error_response("没有要删除的知识库 id", status_code=400)
+        n = self.db.kb_delete_ids(ids)
+        return {"deleted": n}
+
     # ── 群配置 / 羁绊 / 触发 ──────────────────────────────────
     async def api_config(self):
         row = self.db.get_group(self._gid())
@@ -340,6 +438,8 @@ class AdminPanel:
     async def api_config_edit(self):
         gid = self._gid()
         body = await self._body()
+        if not gid:
+            gid = str(body.get("gid") or "")
         fields = {}
         for k, (lo, hi) in _CFG_FIELDS.items():
             if k in body:
