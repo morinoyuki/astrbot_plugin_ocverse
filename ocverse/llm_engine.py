@@ -310,6 +310,21 @@ class Brain:
                 return BrainResult(True, {"infra": self._norm_infra(d2)})
         return BrainResult(False, {"infra": []})
 
+    async def regen_mainline(self, *, world, material: str = "") -> BrainResult:
+        """重新生成世界主线(3~6 节,可带阶段门槛;贴合世界观,避开旧名)。"""
+        sys = self.style
+        user = prompts.regen_mainline(world)
+        user = self._with_material(user, material)
+        d = await self._ask_json(sys, user, use_tools=True)
+        nodes = self._norm_mainline(d) if isinstance(d, dict) else []
+        if len(nodes) >= 2:
+            return BrainResult(True, {"mainline": nodes})
+        d2 = await self._ask_json(sys, user + prompts.MAINLINE_CORRECT, use_tools=True)
+        nodes2 = self._norm_mainline(d2) if isinstance(d2, dict) else []
+        if len(nodes2) >= 2:
+            return BrainResult(True, {"mainline": nodes2})
+        return BrainResult(False, {"mainline": []})
+
     async def regen_zones_heals(self, *, world, material: str = "") -> BrainResult:
         """管理员:重新生成世界的危险区域与治疗物品(贴合世界观,避开旧名)。"""
         sys = self.style

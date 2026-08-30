@@ -197,6 +197,30 @@ def regen_zones_heals(world) -> str:
     )
 
 
+def regen_mainline(world) -> str:
+    """管理员/自动补全:重新生成世界主线的 user prompt(贴合世界观,避开旧名)。"""
+    nodes = [m for m in (world.mainline or []) if isinstance(m, dict) and m.get("stage")]
+    old_line = "、".join(str(m.get("stage")) for m in nodes) or "无"
+    return (
+        f"{_world_line(world)}\n"
+        f"现有主线小节(重新规划,不要照抄这些名字):{old_line}\n\n"
+        "请以造世者的身份,重新设计这个世界的主线剧情:3~6 节(stage≤10字、desc≤30字),"
+        "是一段能推动这个世界的故事,层层推进、可玩几个月;\n"
+        "每节可带 goal(阶段门槛):type 只能是 reputation(推进者在本世界的声望≥value)"
+        "|quest(全群累计完成任务数≥value)|defeat(全群累计讨伐数≥value),value 为数字;"
+        "开篇的 1~2 节不要设 goal,中后期的 2~3 节设 goal,让世界走向由玩家的积累决定;\n"
+        "全部贴合该世界的题材、时代与文明水平,不要套用模板。\n"
+        '严格输出 JSON:{"mainline":[{"stage":"","desc":"",'
+        '"goal":{"type":"reputation|quest|defeat|空","value":数字,"note":"目标一句话"}}]}'
+    )
+
+
+MAINLINE_CORRECT = (
+    "\n\n【纠正】主线小节缺失/不足,请补全:至少 3 节(stage/desc 必填),"
+    "中后期的小节要带 goal 门槛(reputation/quest/defeat 之一)。"
+)
+
+
 ZONES_HEALS_CORRECT = (
     "\n\n【纠正】危险区域或治疗物品缺失/不合规,请补全:"
     "zones 至少 3 片(各含 danger/enemies/loot),heal_items 恰好 3 档(低中高)。"

@@ -77,6 +77,14 @@ def llm_fake(system, user):
                                        {"label": "喊人", "hint": "求援"}]}, ensure_ascii=False)
     if "主线回响" in user:
         return json.dumps({"narration": "那声枪响的方向,与传闻中深坑的位置一致。"}, ensure_ascii=False)
+    if "重新设计这个世界的主线剧情" in user:
+        return json.dumps({"mainline": [
+            {"stage": "异响之源", "desc": "追查夜里金属摩擦声的来历"},
+            {"stage": "旧地图之谜", "desc": "拼齐散落的地图碎片",
+             "goal": {"type": "quest", "value": 2, "note": "全群累计完成任务≥2件"}},
+            {"stage": "深坑之门", "desc": "打开通往核心的门",
+             "goal": {"type": "reputation", "value": 10, "note": "推进者声望≥10"}}]},
+            ensure_ascii=False)
     if "重新设计这个世界的危险区域与治疗物品" in user:
         return json.dumps({"zones": [
                                 {"kind": "辐射区", "name": "荧光沼泽", "desc": "发光的泥潭", "danger": 4,
@@ -402,6 +410,19 @@ async def main():
     check("AI 重绘危险区域/治疗物品(落库)", "荧光沼泽" in {z["name"] for z in w6.zones}
           and "止血喷剂" in {h["name"] for h in w6.heal_items} and rz and rh)
     check("重绘总结文本", "舆图已重绘" in msg)
+
+    # ── 主线空/缺失 → LLM 立即重生成 ──
+    db.update_world(w.id, mainline=[])
+    v = await game.mainline_progress(gid, "u1")
+    w7 = db.get_world(w.id)
+    check("主线为空 → 推进时自动 LLM 重生成", len(w7.mainline) >= 3
+          and v["stage"] == "异响之源" and w7.mainline[0].get("done") is True)
+    check("重生成的小节带阶段门槛", any(m.get("goal_type") == "quest" for m in w7.mainline))
+    # 管理员重绘主线
+    msg, nodes = await game.regen_mainline(gid)
+    check("管理员重建主线(落库+含门槛)", len(db.get_world(w.id).mainline) >= 3
+          and "主线已重铸" in msg
+          and any(m.get("goal_type") == "reputation" for m in db.get_world(w.id).mainline))
 
     # ── 剧情权重:主线终章=高潮 ──
     from ocverse.prompts import resolve_mainline as _rm, story_weight_line

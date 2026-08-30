@@ -734,7 +734,7 @@ def help_card(cfg: dict, sub_prefix: str = "/分身") -> list[Image.Image]:
             f"{sub_prefix} 我的卡片 / 名册 / 日志 [页] / 回忆 <词> / 运势 · 编辑 <人设改动> · 删除角色",
             f"🎭 {sub_prefix} 定义角色 <名字> <描述> — 造一位持久生活角色(可互动/成婚);{sub_prefix} 找 <名字> 找 TA",
             f"🌀 {sub_prefix} 定义世界 / 添加NPC / 穿越世界 — 世界书与自由穿越",
-            f"👑 {sub_prefix} 事件频率 min max · 变动概率 p · 触发变动 / 重开世界 · 重建设施 / 重建区域 (管理员)",
+            f"👑 {sub_prefix} 事件频率 min max · 变动概率 p · 触发变动 / 重开世界 · 重建设施 / 重建区域 / 重建主线 (管理员)",
             "🛠 Dashboard 插件页可后台管理:查改数据、手动触发事件与变动(管理员)",
         ]),
     ]

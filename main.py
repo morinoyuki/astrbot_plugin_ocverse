@@ -585,6 +585,11 @@ class OcversePlugin(Star):
                     msg, zones, heals = await plugin.game.regen_zones_heals(gid, world_id=world_id)
                 return {"message": msg, "zones": zones, "heal_items": heals}
 
+            async def regen_mainline(self_, gid: str, world_id: int | None = None) -> dict:
+                async with plugin._glock(gid):
+                    msg, nodes = await plugin.game.regen_mainline(gid, world_id=world_id)
+                return {"message": msg, "mainline": nodes}
+
         return _Ops()
 
     async def terminate(self):
@@ -1889,6 +1894,17 @@ class OcversePlugin(Star):
             msg, _zones, _heals = await self.game.regen_zones_heals(gid)
         yield event.plain_result(msg)
 
+    @filter.permission_type(PermissionType.ADMIN)
+    @oc.command("重建主线", alias={"regen_mainline", "重铸主线"})
+    @_guard
+    async def cmd_regen_mainline(self, event: AstrMessageEvent):
+        """分身 重建主线 - 管理员让 AI 按世界观重新生成当前世界的主线剧情(3~6节,含阶段门槛)"""
+        gid = self._need_gid(event)
+        yield event.plain_result("⏳ 正在重铸世界主线(可能联网搜索),请稍候…")
+        async with self._glock(gid):
+            msg, _nodes = await self.game.regen_mainline(gid)
+        yield event.plain_result(msg)
+
     @oc.command("定义世界", alias={"add_world", "世界书"})
     @_guard
     async def cmd_define_world(self, event: AstrMessageEvent):
@@ -2290,6 +2306,7 @@ class OcversePlugin(Star):
         day = self.game._world_day(gid)
         async with self._glock(gid):
             w = self.game.ensure_world_content(gid) or w   # 旧世界补齐危险区域/治疗物品
+            w = await self.game.ensure_world_mainline(gid) or w   # 主线空/缺失 → LLM 立即重生成
         # 直接取世界范畴(world/npc)近况:以原始记忆行还原标题+片段
         world_mem = await self.game.world_memory_panel(gid, w.name, k=5)
         imgs = world_card(w, self._card_cfg(), is_current=True, day=day, world_mem=world_mem)

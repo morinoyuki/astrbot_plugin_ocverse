@@ -239,11 +239,6 @@ class Game:
                 {"kind": "杂货铺", "name": "街角杂货铺", "desc": "什么都有一点,也能换零用钱", "work": "杂货铺帮工"},
                 {"kind": "饭馆", "name": "街边饭馆", "desc": "热汤热饭,招呼四方来客", "work": "饭馆跑堂"},
             ]
-        if not wdata.get("mainline"):
-            wdata["mainline"] = [
-                {"stage": "初来乍到", "desc": "先摸清这个世界的风气与规矩。"},
-                {"stage": "名字背后的故事", "desc": "这个地方似乎藏着一段被遗忘的往事。"},
-            ]
         w = World(
             gid=gid,
             name=wdata.get("name", "无名世界"),
@@ -267,6 +262,8 @@ class Game:
         # 危险区域与治疗物品保底(LLM 没生成或旧数据缺失时按题材风格兜底)
         w.zones = self._ensure_zones_baseline(w, w.zones)
         w.heal_items = self._ensure_heal_items_baseline(w, w.heal_items)
+        # 主线兜底:LLM 没给时用世界自己的 NPC/区域拼三幕(不再是千篇一律的占位文本)
+        w.mainline = self._ensure_mainline_baseline(w, w.mainline)
         w.id = self.db.add_world(w)
         self.db.update_group(gid, cur_world_id=w.id, init_done=1)
         # 把世界生成时设计的『可购住处』种子进地块表
@@ -912,6 +909,7 @@ class Game:
         if not world or not chars:
             return None
         world = self.ensure_world_content(gid) or world
+        world = await self.ensure_world_mainline(gid) or world
         # 定时推送且无人被点名时:可触发『群像生活事件』(多名玩家角色偶遇/结伴)
         multi = None
         if char_uid is None and random.random() < LIFE_MULTI_PROB and len(chars) >= 2:
@@ -1719,6 +1717,95 @@ class Game:
                            f"《{w.name}》补齐了危险区域与治疗物品的名录", ref=f"zone:{_now():.0f}")
         return w
 
+    # ══════════════ 主线补全(空/缺失数据 → LLM 立即重生成)══════════════
+    MAINLINE_REGEN_FAILS_PER_DAY = 3
+
+    @staticmethod
+    def _mainline_valid(ml) -> list[dict]:
+        """有效主线小节:dict 且 stage 非空。"""
+        return [m for m in (ml or []) if isinstance(m, dict) and str(m.get("stage") or "").strip()]
+
+    def _ensure_mainline_baseline(self, world: World, ml) -> list[dict]:
+        """主线兜底:不足 2 个有效小节时,用世界自己的 NPC/危险区域拼三幕(贴合世界观)。"""
+        valid = [dict(m) for m in self._mainline_valid(ml)]
+        if len(valid) >= 2:
+            return valid
+        npc = next((str(n.get("name")) for n in (world.npcs or [])
+                    if isinstance(n, dict) and n.get("name")), "一位老住户")
+        zone = next((str(z.get("name")) for z in (world.zones or [])
+                     if isinstance(z, dict) and z.get("name")), "一处神秘之地")
+        return valid + [
+            {"stage": "风言渐起", "desc": f"关于{zone}的怪谈在街头巷尾流传,线索散落各处。"},
+            {"stage": "身入漩涡", "desc": f"{npc}的委托把主线推向明处:是陷阱也是机遇。"},
+            {"stage": "真相之门", "desc": "靠近事情的核心,做出属于你自己的选择。"},
+        ]
+
+    async def ensure_world_mainline(self, gid: str, force: bool = False) -> World | None:
+        """主线为空/缺失数据时,立即调用 LLM 重新生成(LLM 失败回填世界观基线,不让玩法空转)。
+        正常情况下原样返回,不耗 LLM;每日失败重试有上限(防风暴)。"""
+        w = self.db.cur_world(gid)
+        if not w:
+            return None
+        if not force and len(self._mainline_valid(w.mainline)) >= 2:
+            return w
+        day = self._day_key()
+        fail_key = f"ml_fail:{day}"
+        try:
+            fails = int(self.db.kv_get(gid, fail_key) or 0)
+        except (TypeError, ValueError):
+            fails = 0
+        if not force and fails >= self.MAINLINE_REGEN_FAILS_PER_DAY:
+            w.mainline = self._ensure_mainline_baseline(w, w.mainline)
+            self.db.update_world(w.id, mainline=w.mainline)
+            return w
+        r = await self.brain.regen_mainline(world=w,
+                                            material=await self._kb_ctx(gid, "世界主线 剧情 推进"))
+        nodes = r.data.get("mainline") if r.ok else []
+        if len(nodes) >= 2:
+            w.mainline = nodes
+            self.db.update_world(w.id, mainline=nodes)
+            self.db.kv_set(gid, fail_key, "0")
+            self.db.append_log(gid, "", "misc",
+                               f"《{w.name}》的主线剧情被造世者重新补全({len(nodes)} 节)", w.name)
+            _fire_remember(self.mem, gid, "", "world",
+                           f"《{w.name}》的主线剧情线重新确立", ref=f"mainline:{w.id}")
+            return w
+        if not force:
+            self.db.kv_incr(gid, fail_key)
+        w.mainline = self._ensure_mainline_baseline(w, w.mainline)
+        self.db.update_world(w.id, mainline=w.mainline)
+        return w
+
+    async def regen_mainline(self, gid: str, world_id: int | None = None) -> tuple[str, list[dict]]:
+        """管理员:让 AI 按世界观重新生成主线(force,无视失败上限)。返回(总结文本, 新小节)。"""
+        if world_id is not None:
+            w = self.db.get_world(int(world_id))
+            if not w or w.gid != gid:
+                raise GameError("世界不存在或不属于该群")
+        else:
+            w = self.db.cur_world(gid)
+            if not w:
+                raise GameError("世界尚未初始化")
+        r = await self.brain.regen_mainline(world=w,
+                                            material=await self._kb_ctx(gid, "世界主线 剧情 推进"))
+        nodes = r.data.get("mainline") if r.ok else []
+        if len(nodes) < 2:
+            nodes = self._ensure_mainline_baseline(w, w.mainline)
+        w.mainline = nodes
+        self.db.update_world(w.id, mainline=nodes)
+        self.db.append_log(gid, "", "misc",
+                           f"《{w.name}》主线重铸完成({len(nodes)} 节)"
+                           + ("" if r.ok else "(AI 不可用,使用基线剧情)"), w.name)
+        _fire_remember(self.mem, gid, "", "world",
+                       f"《{w.name}》的主线被重铸:{nodes[0].get('stage', '')}拉开帷幕", ref=f"mainline:{w.id}")
+        lines = [f"《{w.name}》主线已重铸({len(nodes)} 节):"]
+        for m in nodes:
+            goal = f" ⚑{m.get('goal_note', '')}" if m.get("goal_type") else ""
+            lines.append(f"· {m.get('stage', '')} — {m.get('desc', '')}{goal}")
+        if not r.ok:
+            lines.append("(AI 不可用,使用的是基线剧情)")
+        return "\n".join(lines), nodes
+
     def _exp_issuer(self, world: World) -> str:
         """远征发布方:优先设施里带组织色彩的(公会/据点/宗门/公司…),贴合世界观;
         兑底用第一个设施,再兑底『本地卫队』。"""
@@ -2254,6 +2341,7 @@ class Game:
         if not world:
             raise GameError("世界尚未初始化,管理员:「/分身 初始化世界」")
         world = self.ensure_world_content(gid) or world
+        world = await self.ensure_world_mainline(gid) or world
         preset = C.ACTIONS.get(act_key) or C.ACTIONS["冒险"]
         name = preset["name"]
         # 兼职时段:上工中无法主动行动
@@ -2590,6 +2678,7 @@ class Game:
         w = self.db.cur_world(gid)
         if not w:
             raise GameError("世界尚未初始化")
+        w = await self.ensure_world_mainline(gid) or w   # 主线空/缺失 → 立即 LLM 重生成
         ml = [dict(m) for m in (w.mainline or []) if isinstance(m, dict)]
         if not ml:
             raise GameError("这个世界暂时没有可推进的主线(等新一轮世界变动或重新生成)。")

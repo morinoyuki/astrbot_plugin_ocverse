@@ -279,6 +279,7 @@
       <div class="row-end">
         <button class="btn primary" id="w-save">保存世界档案</button>
         <button class="btn" id="content-regen">🎲 AI 重绘区域/治疗物品</button>
+        <button class="btn" id="mainline-regen">📜 AI 重铸主线</button>
       </div></div>
       <div class="card"><h3>基础设施(保存为整表替换;work 非空的设施可兼职)</h3>
       <div class="table-wrap"><table class="tbl" id="infra-tbl">
@@ -413,6 +414,16 @@
       await apiPost("/admin/api/world", { gid: GID, world_id: WID, heal_items: HEALS });
       toast("✅ 治疗物品已保存");
     };
+    $("#mainline-regen").onclick = () => confirmAction("AI 重铸主线",
+      "将丢弃当前主线小节,由 AI 贴合世界观重新生成 3~6 节(含阶段门槛)。继续?",
+      async () => {
+        toast("⏳ AI 规划中,可能需要一点时间…");
+        const r = await apiPost("/admin/api/mainline/regen", { gid: GID, world_id: WID });
+        const w = WORLDS.find((x) => x.id === WID);
+        if (w) w.mainline = r.mainline || [];
+        toast("✅ " + String(r.message || "已重铸").split("\n")[0]);
+        renderWorldEditor();
+      });
     $("#content-regen").onclick = () => confirmAction("AI 重绘区域/治疗物品",
       "将丢弃当前危险区域与治疗物品名录,由 AI 贴合世界观重新生成(3~6 片区域 + 3 档治疗物品)。继续?",
       async () => {

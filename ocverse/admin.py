@@ -70,6 +70,7 @@ class AdminPanel:
             (f"{base}/api/event/expire", self.api_event_expire, ["POST"], "事件收场"),
             (f"{base}/api/infra/regen", self.api_infra_regen, ["POST"], "AI 重新生成世界设施"),
             (f"{base}/api/content/regen", self.api_content_regen, ["POST"], "AI 重绘危险区域与治疗物品"),
+            (f"{base}/api/mainline/regen", self.api_mainline_regen, ["POST"], "AI 重铸世界主线"),
             (f"{base}/api/logs", self.api_logs, ["GET"], "时间线日志"),
             (f"{base}/api/memories", self.api_memories, ["GET"], "记忆列表"),
             (f"{base}/api/memory/delete", self.api_mem_delete, ["POST"], "删除记忆"),
@@ -372,6 +373,25 @@ class AdminPanel:
             return error_response("world_id 应为整数", status_code=400)
         try:
             return await self.ops.regen_content(gid, wid)
+        except Exception as e:
+            return error_response(str(e), status_code=400)
+
+    async def api_mainline_regen(self):
+        """AI 重铸世界主线(贴合世界观,3~6 节,含阶段门槛)。
+        body/query: gid 必填;world_id 可选(默认当前世界)。"""
+        if self.ops is None or not hasattr(self.ops, "regen_mainline"):
+            return error_response("未接入重铸操作", status_code=400)
+        body = await self._body()
+        gid = self._gid() or str(body.get("gid") or "")
+        world_id = body.get("world_id")
+        if not gid:
+            return error_response("需要 gid", status_code=400)
+        try:
+            wid = int(world_id) if world_id is not None else None
+        except (TypeError, ValueError):
+            return error_response("world_id 应为整数", status_code=400)
+        try:
+            return await self.ops.regen_mainline(gid, wid)
         except Exception as e:
             return error_response(str(e), status_code=400)
 
