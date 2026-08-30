@@ -186,4 +186,32 @@ async def main():
     assert calls["kb"] == fails3, "放弃后不应再调用 LLM"
     print("✓ 知识库采集失败:重试 3 次/天上限,防风暴")
 
+    # 11) 互动目标解析:@ 组件 → 文本 @名字 → 角色名(QQ 官方接口 At 兼容)
+    from astrbot.core.message.components import At
+
+    class AtEvent(FakeEvent):
+        def __init__(self, uid="u1", at=None):
+            super().__init__(uid)
+            self._at = at
+
+        def get_messages(self):
+            return [At(qq=self._at)] if self._at else []
+
+    ev2 = FakeEvent("u2")   # u2 的分身「阿澈」在前文互动工具测试中已创建
+    # ① At 组件(平台原生;官方 openid 非数字同样接受)
+    t, rest = pl._resolve_interact_target("g1", AtEvent("u1", at="u2"), "@阿澈 打个招呼")
+    assert t == "u2" and rest == "打个招呼", (t, rest)
+    t, _ = pl._resolve_interact_target("g1", AtEvent("u1", at="OPENID_ABC"), "闲聊")
+    assert t == "OPENID_ABC", t
+    # ② 无 At 组件:文本「@名字」(官方接口常见形态)
+    t, rest = pl._resolve_interact_target("g1", AtEvent("u1"), "@阿澈 请客")
+    assert t == "u2" and rest == "请客", (t, rest)
+    # ③ 直接写角色名
+    t, rest = pl._resolve_interact_target("g1", AtEvent("u1"), "阿澈 闲聊")
+    assert t == "u2" and rest == "闲聊", (t, rest)
+    # ④ 陌生名字 → None(由上层给出名单帮助)
+    t, _ = pl._resolve_interact_target("g1", AtEvent("u1"), "不存在的人 闲聊")
+    assert t is None
+    print("✓ 互动目标解析:@组件 → 文本@名字 → 角色名,官方接口兼容")
+
 asyncio.run(main())

@@ -33,7 +33,7 @@ from .ocverse.admin import AdminPanel
 from .ocverse.avatar_store import AvatarStore
 from .ocverse.db import Database
 from .ocverse.embedder import make_embedder
-from .ocverse.game import Game, GameError, npc_uid
+from .ocverse.game import Game, GameError, is_npc_uid, npc_uid
 from .ocverse.imcard import (
     fortune_card,
     help_card,
@@ -386,16 +386,36 @@ class OcversePlugin(Star):
         return out
 
     def _at_target(self, event: AstrMessageEvent) -> str:
+        """从消息组件解析被 @ 的目标(QQ 官方接口的 openid 可能是非数字,同样接受)。"""
         try:
             me = self._uid(event)
             for c in event.get_messages():
                 if isinstance(c, At):
                     t = str(getattr(c, "qq", "") or getattr(c, "target_id", "") or "")
-                    if t and t.isdigit() and t != me:
+                    if t and t != me:
                         return t
         except Exception:
             pass
         return ""
+
+    def _resolve_interact_target(self, gid: str, event, raw: str) -> tuple[str | None, str]:
+        """互动/关系类命令的目标解析:@ 组件优先 → 文本里的 @名字 → 直接角色名。
+        返回 (目标uid 或 None, 互动方式文本)。"""
+        raw = (raw or "").strip()
+        text_wo_at = re.sub(r"@\S+", "", raw).strip()
+        # 1) @ 消息组件(平台原生)
+        target = self._at_target(event)
+        if target:
+            return target, text_wo_at
+        # 2) 文本首段当名字:兼容「@名字」(官方接口只有纯文本)与直接写角色名
+        if raw:
+            first, rest = (raw.split(None, 1) + [""])[:2]
+            cand = first.lstrip("@").strip()
+            if cand:
+                tchar = self._char_by_name(gid, cand)
+                if tchar is not None:
+                    return tchar.uid, (rest.strip() or text_wo_at)
+        return None, text_wo_at
 
     # ── 渲染与发送 ────────────────────────────────────────────────
     def _save_card(self, img) -> str | None:
@@ -2722,66 +2742,44 @@ class OcversePlugin(Star):
         if chain:
             yield event.chain_result(chain)
 
-    @oc.command("与", alias={"互动"})
-    @_guard
-    async def cmd_interact(self, event: AstrMessageEvent):
-        """分身 与 @群友 [互动方式/自由行动…] - 与别人的分身互动"""
-        gid = self._need_gid(event)
-        target = self._at_target(event)
-        if not target:
-            yield event.plain_result("请 @ 对方:/分身 与 @某人 [打招呼/闲聊/请客/切磋/吐槽/送礼/倾听/合影,或自由描述]")
-            return
-        raw = self._rest(event, "与", "互动").strip()
-        raw = re.sub(r"@\S+", "", raw).strip()
-        mode, detail = "", ""
-        if raw:
-            first = raw.split()[0]
-            custom = {i["name"]: i["descr"] for i in self.db.list_interactions(gid)}
-            if first in self._default_mode_hint:
-                mode, detail = first, self._default_mode_hint[first]
-            elif first in custom:
-                mode, detail = first, custom[first]
-            else:
-                mode, detail = "自由互动", raw
-        else:
-            mode, detail = "打招呼", self._default_mode_hint["打招呼"]
-        yield event.plain_result("⏳ 正在演绎这段互动,请稍候…")
-        async with self._glock(gid):
-            v = await self.game.interact(gid, self._uid(event), target, mode, detail)
-        views = [v] + (v.pop("extra_views", []) or [])  # 事件触发的求婚等附加场景卡
-        imgs = render_views(views, self._card_cfg())
-        chain = self._chain(imgs)
-        if chain:
-            yield event.chain_result(chain)
-
-    @oc.command("找", alias={"交往", "结识", "找TA", "talk"})
+    @oc.command("找", alias={"交往", "结识", "找TA", "talk", "与", "互动"})
     @_guard
     async def cmd_char_interact(self, event: AstrMessageEvent):
-        """分身 找 <生活角色名> [方式/自由描述…] - 与持久生活角色互动(可发展关系/结婚)"""
+        """分身 找 <名字/@群友> [方式/自由描述…] - 与玩家分身或持久生活角色互动
+        (@ 组件与角色名双兼容,QQ 官方接口无 At 组件时直接写名字即可;可发展关系/结婚)"""
         gid = self._need_gid(event)
-        raw = self._rest(event, "找", "交往", "结识", "找TA", "talk").strip()
-        if not raw:
-            names = "、".join(c.name for c in self.game._npc_chars(gid)) or "无"
+        uid = self._uid(event)
+        raw = self._rest(event, "找", "交往", "结识", "找TA", "talk", "与", "互动").strip()
+        target, mode_text = self._resolve_interact_target(gid, event, raw)
+        if not target:
+            lives = "、".join(c.name for c in self.game._npc_chars(gid)) or "无"
+            players = "、".join(c.name for c in self.db.list_chars(gid) if not is_npc_uid(c.uid)) or "无"
             yield event.plain_result(
-                "格式:/分身 找 <生活角色名> [方式]\n"
-                "可先「/分身 定义角色 <名字> <描述>」创造属于这个群世界的生活角色,再与TA互动/发展关系/结婚。"
-                f"当前生活角色:{names}")
+                "格式:/分身 找 <名字 或 @群友> [互动方式]\n"
+                "例:/分身 找 绫波 聊聊雾码头 / 分身 找 @某人 请客\n"
+                "(玩家分身与生活角色通用;平台 @ 失效时直接写名字即可)\n"
+                f"当前玩家分身:{players}\n当前生活角色:{lives}")
             return
-        parts = raw.split(None, 1)
-        name = parts[0]
+        target_char = self.db.get_char(gid, target)
+        if not target_char:
+            yield event.plain_result("找不到这个目标(可能TA还没有分身)。")
+            return
+        if target_char.uid == uid:
+            yield event.plain_result("不能和自己互动哦(对着镜子练吧)。")
+            return
         mode, detail = "打招呼", self._default_mode_hint["打招呼"]
-        if len(parts) > 1:
-            m0 = parts[1].split()[0]
+        if mode_text:
+            m0 = mode_text.split()[0]
             custom = {i["name"]: i["descr"] for i in self.db.list_interactions(gid)}
             if m0 in self._default_mode_hint:
                 mode, detail = m0, self._default_mode_hint[m0]
             elif m0 in custom:
                 mode, detail = m0, custom[m0]
             else:
-                mode, detail = "自由互动", parts[1]
+                mode, detail = "自由互动", mode_text
         yield event.plain_result("⏳ 正在演绎这段互动,请稍候…")
         async with self._glock(gid):
-            v = await self.game.interact_life_char(gid, self._uid(event), name, mode, detail)
+            v = await self.game.interact(gid, uid, target_char.uid, mode, detail)
         views = [v] + (v.pop("extra_views", []) or [])
         imgs = render_views(views, self._card_cfg())
         chain = self._chain(imgs)
@@ -2791,19 +2789,20 @@ class OcversePlugin(Star):
     @oc.command("关系", alias={"bond", "自定义关系"})
     @_guard
     async def cmd_bond(self, event: AstrMessageEvent):
-        """分身 关系 @群友 <称谓> - 提议自定义搞怪关系(如想当TA爸爸),AI 判断对方答不答应"""
+        """分身 关系 <名字/@群友> <称谓> - 提议自定义搞怪关系(如想当TA爸爸),AI 判断对方答不答应"""
         gid = self._need_gid(event)
-        target = self._at_target(event)
+        raw = self._rest(event, "关系", "bond", "自定义关系").strip()
+        target, label = self._resolve_interact_target(gid, event, raw)
         if not target:
             yield event.plain_result(
-                "格式:/分身 关系 @群友 <称谓>\n"
-                "例:/分身 关系 @老徐 爸爸(你想当 TA 的爸爸)/女仆/主人/师父/冤种弟弟…\n"
+                "格式:/分身 关系 <名字 或 @群友> <称谓>\n"
+                "例:/分身 关系 老徐 爸爸(你想当 TA 的爸爸)/女仆/主人/师父/冤种弟弟…\n"
                 "AI 会以对方的性格与你们的交情判断答不答应;亲密关系(恋人/情侣/夫妻等)不可自定义"
             )
             return
-        label = re.sub(r"@\S+", "", self._rest(event, "关系", "bond", "自定义关系")).strip()
+        label = label.strip()
         if not label:
-            yield event.plain_result("请写上想要的称谓,如:/分身 关系 @群友 爸爸")
+            yield event.plain_result("请写上想要的称谓,如:/分身 关系 老徐 爸爸")
             return
         yield event.plain_result("⏳ 对方正在认真考虑这个提案…")
         async with self._glock(gid):
@@ -2824,7 +2823,7 @@ class OcversePlugin(Star):
             lines.append("")
             lines += [f"· {i['name']}(自定)— {i['descr']}" for i in custom]
         lines.append("")
-        lines.append("用法:/分身 与 @群友 互动方式;也可以直接自由描述一段行动,由你们的性格与羁绊决定走向。")
+        lines.append("用法:/分身 找 <名字 或 @群友> 互动方式(玩家分身/生活角色通用);也可以直接自由描述一段行动,由你们的性格与羁绊决定走向。")
         yield event.plain_result("\n".join(lines))
 
     @filter.permission_type(PermissionType.ADMIN)
