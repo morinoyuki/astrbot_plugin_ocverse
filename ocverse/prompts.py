@@ -885,7 +885,8 @@ def expedition_report(*, world, char, exp: dict, phase: str, supplies_note: str)
         + (f"\n{supplies_note}" if supplies_note else "")
         + "\n\"dialogues\":片段中队友/敌人的简短对话(1~3轮,IM聊天体,speaker用队友本名或敌人称谓,text≤50字)。"
         + WORLDVIEW_LAW +
-        '严格输出 JSON:{"narration":"剧情片段","dialogues":[{"speaker":"","text":""}]}'
+        '严格输出 JSON:{"narration":"剧情片段","dialogues":[{"speaker":"","text":""}],"items_lose":["本轮消耗的补给名"]}'
+        "(items_lose 按上方物资指示填写;指示要求不要消耗时输出空数组)"
     )
 
 

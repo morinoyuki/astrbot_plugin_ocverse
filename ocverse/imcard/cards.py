@@ -225,6 +225,32 @@ def result_card(view: dict, cfg: dict) -> list[Image.Image]:
     return r.render_rows(rows, title=view.get("card_title") or "抉择 · 结算")
 
 
+# ══════════════════════════ 主线卡 ══════════════════════════
+def mainline_card(view: dict, cfg: dict) -> list[Image.Image]:
+    """主线推进结算(重要/高潮剧情长文)与尾声篇章过渡。"""
+    r = _mk(cfg)
+    rows = []
+    stage = str(view.get("stage") or "主线")
+    rows.append(PillRow(r, f"📜 主线 · {stage}"))
+    rows.append(_para(r, view.get("narration", ""), color=r.t.text, margin=(6, 8, 0, 6)))
+    dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), view.get("avatars"))
+    if dlg:
+        rows.append(EmptyRow(r, 4))
+        rows.extend(dlg)
+    changes = view.get("changes") or []
+    if changes:
+        rows.append(EmptyRow(r, 4))
+        rows.append(TagRow(r, changes))
+    rows += _echo_row(r, view.get("echo"))
+    remaining = view.get("remaining")
+    wn = view.get("world_name", "")
+    foot = (f"剩余 {remaining} 节" if isinstance(remaining, int) else "") + (f" · 《{wn}》" if wn else "")
+    if foot:
+        rows.append(EmptyRow(r, 2))
+        rows.append(_para(r, foot.strip(" ·"), size=int(r.font_size * 0.72), color=r.t.text_muted))
+    return r.render_rows(rows, title=f"主线 · {stage}")
+
+
 # ══════════════════════════ 远征卡 ══════════════════════════
 def expedition_card(view: dict, cfg: dict) -> list[Image.Image]:
     """远征:offer 委托布告 / depart 出征 / report 途中播报 / return 归来结算 / abort 撤离。"""
@@ -565,7 +591,7 @@ def work_card(view: dict, cfg: dict) -> list[Image.Image]:
     if phase == "done":
         rows.append(PillRow(r, f"⚒ 下班收工 · {spot}"))
         rows.append(_para(r, view.get("narration", ""), color=r.t.text, margin=(6, 8, 0, 6)))
-        dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), {})
+        dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), view.get("avatars"))
         if dlg:
             rows.append(EmptyRow(r, 4))
             rows.extend(dlg)
@@ -610,7 +636,7 @@ def home_card(view: dict, cfg: dict) -> list[Image.Image]:
                       size=int(r.font_size * 0.78), margin=(4, 4, 0, 4)))
     if view.get("narration"):
         rows.append(_para(r, view["narration"], color=r.t.text, margin=(6, 8, 0, 6)))
-        dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), {})
+        dlg = _dialogue_rows(r, view.get("dialogues"), view.get("char_name", ""), view.get("avatars"))
         if dlg:
             rows.append(EmptyRow(r, 2))
             rows.extend(dlg)
@@ -678,6 +704,8 @@ def render_views(views: list[dict], cfg: dict) -> list[Image.Image]:
             out += heal_card(v, cfg)
         elif t == "expedition":
             out += expedition_card(v, cfg)
+        elif t == "mainline":
+            out += mainline_card(v, cfg)
     return out
 
 

@@ -705,6 +705,7 @@ class Brain:
             return BrainResult(True, {
                 "narration": str(d["narration"])[:320],
                 "dialogues": self._norm_dialogues(d.get("dialogues"), 4),
+                "items_lose": self._norm_items(d)[1],
             })
         return BrainResult(False, {})
 

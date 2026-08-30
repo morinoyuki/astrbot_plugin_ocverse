@@ -1966,6 +1966,25 @@ class Game:
             "report_every_h": report_every_h, "next_report": started + report_every_h * 3600,
             "reports": 0, "supplies_used": 0,
         }
+        # ── 行前筹备:采买食物/饮水(金币--,背包++)——数量随行程,钱不够就少买 ──
+        kit = C.supply_kit_for(world.genre if world else "", world.desc if world else "")
+        unit = kit[0]["price"] + kit[1]["price"]
+        k = max(1, int(round(duration_h / 8.0)))
+        k = min(k, ch.gold // unit) if ch.gold >= unit else 0
+        prep_note, prep_changes = "", []
+        if k > 0:
+            cost = unit * k
+            ch.gold -= cost
+            for it in kit:
+                self.db.item_add(gid, uid, it["name"], k, it.get("note", "")[:20])
+            prep_note = (f"行前已在{offer.get('issuer') or '市集'}采买补给:"
+                         f"{kit[0]['name']}×{k}、{kit[1]['name']}×{k}(共 {cost} 金币),"
+                         "叙述中自然带过这段采购即可,不要输出物品变化。")
+            prep_changes = [f"金币-{cost}", f"🎒 采买 {kit[0]['name']}×{k}", f"🎒 采买 {kit[1]['name']}×{k}"]
+        else:
+            prep_note = "角色身无分文,行前没能采买任何食物饮水(空身上路,途中损耗会更重)。"
+            prep_changes = ["💸 无钱采购补给,空身上路"]
+        flags["_exp"]["supply_names"] = [kit[0]["name"], kit[1]["name"]]
         ch.flags = flags
         ch.stamina = max(0, ch.stamina - 15)
         self.db.upsert_char(ch)
@@ -1981,14 +2000,18 @@ class Game:
                                 ref=f"exp:{started:.0f}")
         exp_snap = dict(flags["_exp"], progress=0)
         r = await self.brain.expedition_report(world=world, char=ch, exp=exp_snap,
-                                               phase="誓师出发") if world is not None else None
+                                               phase="誓师出发",
+                                               supplies_note=prep_note) if world is not None else None
         if r is not None and r.ok:
             narration = str(r.data["narration"])
             dialogues = r.data.get("dialogues") or []
         else:
+            prep_txt = (f"行囊里装着 {kit[0]['name']}×{k} 和 {kit[1]['name']}×{k}。" if k > 0
+                        else "行囊空空,只能碰运气了。")
             narration = (f"「{offer.get('issuer') or '当局'}」的号令下,{ch.name} 与 "
                          f"{'、'.join(offer.get('teammates') or []) or '同伴们'} 整装出发,"
-                         f"踏上前往「{offer.get('zone_name')}」的征途。号角/引擎/驼铃——声音很快被荒野吞没。")
+                         f"踏上前往「{offer.get('zone_name')}」的征途。{prep_txt}"
+                         "号角/引擎/驼铃——声音很快被荒野吞没。")
             dialogues = []
         return {
             "type": "expedition",
@@ -1999,10 +2022,11 @@ class Game:
             "title": str(offer.get("title") or "远征"),
             "narration": narration,
             "dialogues": dialogues,
-            "changes": ["体力-15", f"⏱ 预计 {duration_h:.0f} 小时后归来",
-                        f"🎯 成功率约 {offer.get('rate', '?')}%",
-                        "⚔ 远征期间无法进行其他操作,途中每几小时播报一次"],
-            "ok_llm": r.ok,
+            "avatars": self._avatar_map(gid),
+            "changes": prep_changes + ["体力-15", f"⏱ 预计 {duration_h:.0f} 小时后归来",
+                                       f"🎯 成功率约 {offer.get('rate', '?')}%",
+                                       "⚔ 远征期间无法进行其他操作,途中每几小时播报一次"],
+            "ok_llm": r.ok if r else False,
         }
 
     async def expedition_report(self, gid: str, uid: str) -> dict | None:
@@ -2022,32 +2046,47 @@ class Game:
         span = max(1.0, until - started)
         progress = int(min(99, (now - started) / span * 100))
         phase = "行军" if progress < 35 else ("遭遇战" if progress < 70 else "险境")
-        # 补给消耗:背包有治疗物品时过半概率消耗一份维持状态(减轻损耗)
+        # 补给消耗:背包清单交给 LLM 判断本轮消耗哪些(食物/饮水至少一份,受伤可用治疗物品)
         drain_hp = max(1, int(exp.get("danger") or 3))
         drain_st = 6
-        used_item = ""
+        inv = self.db.items_list(gid, uid)
         heal_names = {h["name"] for h in self.heal_items_of(gid, world)}
-        usable = [it["name"] for it in self.db.items_list(gid, uid) if it["name"] in heal_names]
-        if usable and random.random() < 0.55:
-            used_item = random.choice(usable)
-            self.db.item_remove(gid, uid, used_item, 1)
-            drain_hp = 0
+        supply_names = [str(s) for s in (exp.get("supply_names") or [])]
+        inv_line = "、".join(f"{it['name']}×{it['count']}" for it in inv[:8]) or "空"
+        supplies_note = (f"背包物资:{inv_line}。"
+                         "请按剧情判断本轮消耗哪些补给:至少消耗一份食物/饮水,受伤时可改用/并用治疗物品;"
+                         "把消耗的物品名放进 items_lose(只能消耗背包里存在的东西)。")
+        r = await self.brain.expedition_report(world=world, char=ch, exp=exp, phase=phase,
+                                               supplies_note=supplies_note) if world is not None else None
+        llm_lose = [str(x).strip() for x in (r.data.get("items_lose") or []) if str(x).strip()] \
+            if (r is not None and r.ok) else []
+        consumed: list[str] = []
+        for nm in llm_lose[:3]:
+            row = next((it for it in self.db.items_list(gid, uid)
+                        if it["name"] == nm or nm in it["name"] or it["name"] in nm), None)
+            if row and self.db.item_remove(gid, uid, row["name"], 1):
+                consumed.append(row["name"])
+        if not consumed:
+            # 本地兜底:LLM 没给出消耗时,优先消耗一份行前补给,其次治疗物品
+            for cand in supply_names + [h for h in heal_names]:
+                row = next((it for it in self.db.items_list(gid, uid) if it["name"] == cand), None)
+                if row and self.db.item_remove(gid, uid, cand, 1):
+                    consumed.append(cand)
+                    break
+        if consumed:
+            drain_hp = 0       # 有物资维持,生命不受损
             drain_st = 3
-        supplies_note = (f"队伍刚消耗了背包里的「{used_item}」维持状态,叙述中自然带过即可,不必再输出物品变化。"
-                         if used_item else "")
+        exp["supplies_used"] = int(exp.get("supplies_used") or 0) + len(consumed)
+        consumed_line = "、".join(f"「{c}」" for c in consumed)
         hp_before = int(getattr(ch, "hp", C.HP_MAX))
         ch.hp = max(1, hp_before - drain_hp)   # 途中不轻易昏迷,失败结算才可能重伤
         ch.stamina = max(0, ch.stamina - drain_st)
         exp["reports"] = int(exp.get("reports") or 0) + 1
-        if used_item:
-            exp["supplies_used"] = int(exp.get("supplies_used") or 0) + 1
         exp["progress"] = progress
         exp["next_report"] = now + max(1, int(exp.get("report_every_h") or C.EXPEDITION_REPORT_HOURS)) * 3600
         ch.flags = dict(ch.flags or {})
         ch.flags["_exp"] = exp
         self.db.upsert_char(ch)
-        r = await self.brain.expedition_report(world=world, char=ch, exp=exp, phase=phase,
-                                               supplies_note=supplies_note) if world is not None else None
         if r is not None and r.ok:
             narration = str(r.data["narration"])
             dialogues = r.data.get("dialogues") or []
@@ -2058,11 +2097,13 @@ class Game:
         changes = [f"体力-{drain_st}"]
         if drain_hp:
             changes.append(f"生命-{drain_hp}")
-        if used_item:
-            changes.append(f"🎒 消耗「{used_item}」")
+        for c in consumed:
+            changes.append(f"🎒 消耗{c}")
+        if not consumed:
+            changes.append("⚠ 本轮未动用补给,损耗加重")
         self.db.append_log(gid, uid, "act",
-                           f"【远征·{phase}】{ch.name} 的队伍深入「{exp.get('zone')}」({progress}%):"
-                           f"{narration[:60]}…", world.name if world else "")
+                           f"【远征·{phase}】{ch.name} 的队伍深入「{exp.get('zone')}」({progress}%,"
+                           f"消耗:{consumed_line or '无'}):{narration[:60]}…", world.name if world else "")
         return {
             "type": "expedition",
             "phase": "report",
@@ -2074,8 +2115,9 @@ class Game:
             "progress": progress,
             "narration": narration,
             "dialogues": dialogues,
+            "avatars": self._avatar_map(gid),
             "changes": changes,
-            "ok_llm": r.ok,
+            "ok_llm": r.ok if r else False,
         }
 
     async def settle_expedition(self, gid: str, uid: str) -> dict:
@@ -2183,8 +2225,9 @@ class Game:
             "outcome": outcome,
             "narration": narration,
             "dialogues": dialogues,
+            "avatars": self._avatar_map(gid),
             "changes": changes,
-            "ok_llm": r.ok,
+            "ok_llm": r.ok if r else False,
         }
 
     def abort_expedition(self, gid: str, uid: str) -> dict:
@@ -2219,6 +2262,7 @@ class Game:
             "narration": (f"{ch.name} 在途中选择了撤离。队伍目送TA的背影消失在来路上——"
                           "违约的代价要自己承担,但至少,人还完整。"),
             "dialogues": [],
+            "avatars": self._avatar_map(gid),
             "changes": changes,
             "ok_llm": False,
         }
@@ -2701,10 +2745,14 @@ class Game:
             return {
                 "type": "mainline",
                 "gid": gid,
+                "uid": uid,
+                "char_name": ch.name,
                 "world_name": w.name,
                 "stage": "尾声 · 新篇章",
                 "narration": (narration + "\n新篇章:「" + "」「".join(s["stage"] for s in stages) + "」已开启,"
                               "用「/分身 主线 推进」继续。").strip(),
+                "dialogues": [],
+                "avatars": self._avatar_map(gid),
                 "changes": [],
                 "remaining": len(stages),
                 "ok_llm": r.ok,
@@ -2754,9 +2802,13 @@ class Game:
         return {
             "type": "mainline",
             "gid": gid,
+            "uid": uid,
+            "char_name": ch.name,
             "world_name": w.name,
             "stage": cur["stage"],
             "narration": result_text,
+            "dialogues": d.get("dialogues") or [],
+            "avatars": self._avatar_map(gid),
             "changes": changes,
             "remaining": len(remaining),
             "ok_llm": r.ok,
@@ -2898,6 +2950,7 @@ class Game:
             "earn": earn,
             "narration": narration,
             "dialogues": dialogues,
+            "avatars": self._avatar_map(gid),
             "changes": changes,
             "ok_llm": ok_llm,
         }
@@ -3183,6 +3236,8 @@ class Game:
             "stamina_gain": st_gain,
             "mood_gain": mo_gain,
             "hp_gain": hp_actual,
+            "dialogues": [],
+            "avatars": self._avatar_map(gid),
             "changes": [f"心情+{mo_gain}", f"体力+{st_gain}"] + ([hp_chg] if hp_chg else []),
             "ok_llm": False,
         }

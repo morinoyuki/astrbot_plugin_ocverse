@@ -453,6 +453,47 @@ def heal_style_for(genre: str, desc: str = "") -> list[dict]:
     return DEFAULT_HEAL_ITEMS
 
 
+# ── 远征行前补给(食物/饮水,按题材命名与定价)──
+SUPPLY_STYLE_PACKS = [
+    (r"修仙|仙侠|灵气|修真|道法|仙道|功法", [
+        {"name": "辟谷丹", "note": "一粒可抵一日餐食", "price": 15},
+        {"name": "灵泉玉露", "note": "清泉化露,解渴生津", "price": 12},
+    ]),
+    (r"科幻|未来|机械|赛博|朋克|星际|机甲|宇宙|太空|殖民|飞艇|柴油", [
+        {"name": "营养膏", "note": "一支顶一整天", "price": 12},
+        {"name": "合成水", "note": "循环过滤的饮用水", "price": 8},
+    ]),
+    (r"奇幻|魔法|剑与魔法|异世界|魔幻|精灵|恶龙|魔物|冒险者", [
+        {"name": "干粮面包", "note": "耐放的硬面包", "price": 10},
+        {"name": "清水皮囊", "note": "旅人标配水囊", "price": 8},
+    ]),
+    (r"武侠|江湖|武林|镖局|侠客", [
+        {"name": "干粮馒头", "note": "镖师的老伙食", "price": 8},
+        {"name": "水葫芦", "note": "随身水葫芦", "price": 6},
+    ]),
+    (r"末世|废土|丧尸|生存|辐射|灾变|避难", [
+        {"name": "罐头", "note": "战前储备口粮", "price": 12},
+        {"name": "净化水", "note": "过滤除菌的饮用水", "price": 10},
+    ]),
+]
+
+DEFAULT_SUPPLIES = [
+    {"name": "干粮", "note": "耐储存的口粮", "price": 8},
+    {"name": "饮用水", "note": "清水一囊", "price": 6},
+]
+
+
+def supply_kit_for(genre: str, desc: str = "") -> list[dict]:
+    """按世界题材返回 [食物, 饮水] 两件补给模板(名字/备注/单价贴合世界观)。"""
+    import re
+
+    text = f"{genre or ''} {desc or ''}"
+    for pattern, pack in SUPPLY_STYLE_PACKS:
+        if re.search(pattern, text):
+            return [dict(x) for x in pack]
+    return [dict(x) for x in DEFAULT_SUPPLIES]
+
+
 # 医疗性质设施识别关键词(医院泛指这类设施)
 def is_medical_infra(it: dict) -> bool:
     blob = (str(it.get("kind") or "") + str(it.get("name") or ""))

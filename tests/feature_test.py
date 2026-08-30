@@ -103,7 +103,8 @@ def llm_fake(system, user):
     if "远征途中的剧情片段" in user:
         return json.dumps({"narration": "队伍在废墟间推进,轮流探路,暂时平安。",
                            "dialogues": [{"speaker": "老周", "text": "跟紧点。"},
-                                         {"speaker": "自己", "text": "明白。"}]}, ensure_ascii=False)
+                                         {"speaker": "自己", "text": "明白。"}],
+                           "items_lose": ["罐头"]}, ensure_ascii=False)
     if "远征大获全胜" in user or "远征折戟" in user:
         return json.dumps({"narration": "最终一战打完了,队伍带着战利品回到出发的地方,人人带伤,个个挺立。",
                            "dialogues": [{"speaker": "老周", "text": "活下来了。"},
@@ -162,6 +163,7 @@ async def main():
 
     # 角色
     game.create_char(gid, "u1", "阿灰", "男", ["沉稳"], "拾荒者")
+    db.update_char(gid, "u1", avatar="fake_avatar.png")   # 验证各卡对话头像
     ch = db.get_char(gid, "u1")
     check("初始生命满", ch.hp == C.HP_MAX)
 
@@ -240,6 +242,9 @@ async def main():
     # ── 尾声:全部完结后续写 ──
     v = await game.mainline_progress(gid, "u1")
     check("主线全完结触发尾声新篇章", "尾声" in v["stage"] and v["remaining"] >= 1)
+    from ocverse.imcard import render_views as _rv
+    check("主线卡片正常渲染(含对话头像)", len(_rv([v], {"card_width": 900, "card_font_size": 34, "card_theme": "dark"})) > 0
+          and v["avatars"].get("阿灰") == "fake_avatar.png")
     w3 = db.get_world(w.id)
     check("尾声小节写入主线", any("远方商队" == m.get("stage") for m in w3.mainline))
 
@@ -299,6 +304,7 @@ async def main():
 
     # ── 远征系统 ──
     db.update_char(gid, "u1", stamina=100)
+    gold_before_exp = db.get_char(gid, "u1").gold
     ov = await game.ensure_expedition_offer(gid, "u1")
     check("远征委托生成(布告+同伴+成功率)", ov["phase"] == "offer" and ov["offer"]["teammates"]
           and 8 <= ov["offer"]["rate"] <= 95)
@@ -307,6 +313,13 @@ async def main():
     dv = await game.accept_expedition(gid, "u1")
     ch = db.get_char(gid, "u1")
     check("接下远征进入远征状态", dv["phase"] == "depart" and game._on_expedition(ch) is not None)
+    gold_after_exp = ch.gold
+    check("远征前行前采购(金币-- 背包++ 食物饮水)", gold_after_exp < gold_before_exp
+          and (db.item_get(gid, "u1", "罐头") or {}).get("count", 0) >= 1
+          and (db.item_get(gid, "u1", "净化水") or {}).get("count", 0) >= 1
+          and any("采买" in c for c in dv["changes"]))
+    check("远征快照记录补给名(供途中消耗)", game._on_expedition(ch).get("supply_names") == ["罐头", "净化水"])
+    check("出征对话带头像", dv["avatars"].get("阿灰") == "fake_avatar.png")
     try:
         await game.act(gid, "u1", "冒险", "挣扎")
         raise AssertionError("远征中不应能行动")
@@ -329,8 +342,14 @@ async def main():
     fl = dict(ch.flags); fl["_exp"]["next_report"] = 0; fl["_exp"]["until"] = 0 + 1
     fl["_exp"]["started"] = __import__("time").time() - 3600
     db.update_char(gid, "u1", flags=fl)
+    canned_before = (db.item_get(gid, "u1", "罐头") or {}).get("count", 0)
+    hp_before = db.get_char(gid, "u1").hp
     rv = await game.expedition_report(gid, "u1")
     check("远征途中播报剧情片段", rv is not None and rv["phase"] == "report" and rv["narration"])
+    check("途中消耗补给(LLM 判断,背包--)", (db.item_get(gid, "u1", "罐头") or {}).get("count", 0) == canned_before - 1
+          and any("罐头" in c for c in rv["changes"]))
+    check("有补给维持则生命无损", db.get_char(gid, "u1").hp == hp_before)
+    check("播报对话带头像", rv["avatars"].get("阿灰") == "fake_avatar.png")
     # 强制归来结算
     ch = db.get_char(gid, "u1")
     fl = dict(ch.flags); fl["_exp"]["until"] = 1
