@@ -74,7 +74,7 @@ def _dialogue_rows(r, dialogues, self_name: str = "", avatars: dict | None = Non
         sp = str(d.get("speaker") or "").strip()
         tx = str(d.get("text") or "").strip()
         if sp and tx:
-            dlg.append((sp[:12], tx[:100]))
+            dlg.append((sp[:12], tx))
     if len({sp for sp, _ in dlg}) < 2:
         return []
     rows = []

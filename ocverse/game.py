@@ -3152,7 +3152,7 @@ class Game:
             eff = dict(r.data.get("effects") or {})
             eff.pop("gold", None)  # 工钱本地入账,防双重
             changes += self._apply_effects(ch, eff)
-            narration = str(r.data.get("narration") or "")[:300]
+            narration = str(r.data.get("narration") or "")
             dialogues = self._norm_r_dialogues(r.data)
             gains, loses = r.data.get("items_gain") or [], r.data.get("items_lose") or []
             changes += self._apply_items(gid, uid, gains, loses)
@@ -3488,7 +3488,7 @@ class Game:
                     ev_eff = dict(r.data.get("effects") or {})
                     ev_eff.pop("gold", None); ev_eff.pop("stamina", None)
                     view["changes"] += self._apply_effects(ch, ev_eff)
-                    view["narration"] = str(r.data.get("narration"))[:220]
+                    view["narration"] = str(r.data.get("narration"))
                     view["dialogues"] = self._norm_r_dialogues(r.data)
                     view["event_title"] = f"🏠 归家的插曲 · {p.get('name')}"
                     view["ok_llm"] = True

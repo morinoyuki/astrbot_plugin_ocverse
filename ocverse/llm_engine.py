@@ -111,7 +111,6 @@ class BrainResult:
 
 
 # 剧情权重的字数/对话轮上限(结算侧截断,与 prompts.story_weight_line 呼应)
-NARR_CAPS = {"normal": 320, "major": 640, "climax": 1150}
 DLG_LIMITS = {"normal": 6, "major": 10, "climax": 16}
 
 
@@ -551,7 +550,7 @@ class Brain:
             return BrainResult(
                 True,
                 {
-                    "narration": str(d["narration"])[:340],
+                    "narration": str(d["narration"]),
                     "dialogues": self._norm_dialogues(d.get("dialogues"), 5),
                     "effects": _clamp_effects(d.get("effects") or {}),
                     "memory": str(d.get("memory", ""))[:120],
@@ -567,7 +566,7 @@ class Brain:
         """主线回响:日常结算后小概率生成一段主线伏笔/呼应叙述(不改任何数值)。"""
         d = await self._ask_json(self.style, prompts.mainline_echo(world=world, char=char, stage=stage, ctx=ctx))
         if d and d.get("narration"):
-            return BrainResult(True, {"narration": str(d["narration"])[:200]})
+            return BrainResult(True, {"narration": str(d["narration"])})
         return BrainResult(False, {})
 
     async def resolve_life_event(self, *, world, chars, event: dict, choice_idx: int,
@@ -588,7 +587,7 @@ class Brain:
                 if isinstance(e, dict):
                     per[str(key)] = _clamp_effects(e)
             return BrainResult(True, {
-                "narration": str(d["narration"])[:360],
+                "narration": str(d["narration"]),
                 "dialogues": self._norm_dialogues(d.get("dialogues"), 6),
                 "effects_by": per,
                 "rel_delta": _clamp(d.get("rel_delta", 0), -10, 15),
@@ -622,7 +621,7 @@ class Brain:
             return BrainResult(
                 True,
                 {
-                    "narration": str(d["narration"])[:360],
+                    "narration": str(d["narration"]),
                     "dialogues": self._norm_dialogues(d.get("dialogues"), 6),
                     "a_effects": _clamp_effects(d.get("a_effects") or {}),
                     "b_effects": _clamp_effects(d.get("b_effects") or {}),
@@ -653,7 +652,7 @@ class Brain:
                 True,
                 {
                     "agree": bool(d["agree"]),
-                    "narration": str(d["narration"])[:360],
+                    "narration": str(d["narration"]),
                     "dialogues": self._norm_dialogues(d.get("dialogues"), 4),
                     "effects": _clamp_effects(eff),
                     "memory": str(d.get("memory", ""))[:120],
@@ -676,7 +675,7 @@ class Brain:
         d = await self._ask_fixed_dialogues(sys, user, limit=DLG_LIMITS.get(weight, 10))
         if d and d.get("narration"):
             return BrainResult(True, {
-                "narration": str(d["narration"])[:NARR_CAPS.get(weight, 640)],
+                "narration": str(d["narration"]),
                 "dialogues": self._norm_dialogues(d.get("dialogues"), DLG_LIMITS.get(weight, 10)),
                 "effects": _clamp_effects(d.get("effects") or {}),
                 "memory": str(d.get("memory", ""))[:120],
@@ -692,7 +691,7 @@ class Brain:
         if d and (d.get("stages") or d.get("narration")):
             stages = self._norm_mainline({"mainline": d.get("stages") or []})
             return BrainResult(True, {
-                "narration": str(d.get("narration") or "旧篇章落幕,新的暗流已在世界深处涌动。")[:300],
+                "narration": str(d.get("narration") or "旧篇章落幕,新的暗流已在世界深处涌动。"),
                 "stages": stages,
             })
         return BrainResult(False, {"narration": "", "stages": []})
@@ -707,8 +706,8 @@ class Brain:
         if d and d.get("title") and d.get("briefing"):
             return BrainResult(True, {
                 "title": str(d["title"])[:14],
-                "briefing": str(d["briefing"])[:240],
-                "teaser": str(d.get("teaser", ""))[:20],
+                "briefing": str(d["briefing"]),
+                "teaser": str(d.get("teaser", "")),
             })
         return BrainResult(False, {})
 
@@ -724,7 +723,7 @@ class Brain:
             counterpart=(other.name if other else ""), limit=3)
         if d and d.get("narration"):
             return BrainResult(True, {
-                "narration": str(d["narration"])[:380],
+                "narration": str(d["narration"]),
                 "dialogues": self._norm_dialogues(d.get("dialogues"), 3),
                 "effects": _clamp_effects(d.get("effects") or {}),
                 "rel_delta": _clamp(d.get("rel_delta", 0), -3, 4),
@@ -755,7 +754,7 @@ class Brain:
         if d and isinstance(d.get("agree"), bool) and d.get("narration"):
             return BrainResult(True, {
                 "agree": bool(d["agree"]),
-                "narration": str(d["narration"])[:300],
+                "narration": str(d["narration"]),
                 "dialogues": self._norm_dialogues(d.get("dialogues"), 4),
                 "rel_delta": _clamp(d.get("rel_delta", 0), -3, 5),
             })
@@ -771,7 +770,7 @@ class Brain:
         d = await self._ask_fixed_dialogues(self.style, user, limit=4)
         if d and d.get("narration"):
             return BrainResult(True, {
-                "narration": str(d["narration"])[:380],
+                "narration": str(d["narration"]),
                 "dialogues": self._norm_dialogues(d.get("dialogues"), 4),
                 "items_lose": self._norm_items(d)[1],
             })
@@ -790,7 +789,7 @@ class Brain:
             limit=DLG_LIMITS[weight])
         if d and d.get("narration"):
             return BrainResult(True, {
-                "narration": str(d["narration"])[:NARR_CAPS[weight]],
+                "narration": str(d["narration"]),
                 "dialogues": self._norm_dialogues(d.get("dialogues"), DLG_LIMITS[weight]),
                 "memory": str(d.get("memory", ""))[:120],
             })
@@ -811,7 +810,7 @@ class Brain:
         if d and d.get("narration"):
             gains, _l = self._norm_items(d)
             return BrainResult(True, {
-                "narration": str(d["narration"])[:360],
+                "narration": str(d["narration"]),
                 "dialogues": self._norm_dialogues(d.get("dialogues"), 4),
                 "effects": _clamp_effects(d.get("effects") or {}),
                 "memory": str(d.get("memory", ""))[:120],
@@ -832,7 +831,7 @@ class Brain:
         d = await self._ask_fixed_dialogues(sys, user, limit=3)
         if d and d.get("narration"):
             return BrainResult(True, {
-                "narration": str(d["narration"])[:260],
+                "narration": str(d["narration"]),
                 "dialogues": self._norm_dialogues(d.get("dialogues"), 3),
                 "effects": d.get("effects") if isinstance(d.get("effects"), dict) else {},
                 "memory": str(d.get("memory", ""))[:120],
@@ -855,7 +854,7 @@ class Brain:
             effects.pop("gold", None)
             gains, _loses = self._norm_items(d)
             return BrainResult(True, {
-                "narration": str(d["narration"])[:340],
+                "narration": str(d["narration"]),
                 "dialogues": self._norm_dialogues(d.get("dialogues"), 3),
                 "effects": effects,
                 "items_gain": gains,
@@ -886,7 +885,7 @@ class Brain:
             return BrainResult(
                 True,
                 {
-                    "narration": str(d["narration"])[:360],
+                    "narration": str(d["narration"]),
                     "dialogues": self._norm_dialogues(d.get("dialogues"), 4),
                     "effects": _clamp_effects(d.get("effects") or {}),
                     "memory": str(d.get("memory", ""))[:120],
@@ -918,9 +917,9 @@ class Brain:
             return BrainResult(
                 True,
                 {
-                    "reply": str(d["reply"])[:160],
+                    "reply": str(d["reply"]),
                     "dialogues": self._norm_dialogues(d.get("dialogues"), 6),
-                    "narration": str(d.get("narration", ""))[:200],
+                    "narration": str(d.get("narration", "")),
                     "effects": _clamp_effects(d.get("effects") or {}),
                     "memory": str(d.get("memory", ""))[:120],
                     "state": d.get("state") if isinstance(d.get("state"), dict) else {},
@@ -940,7 +939,7 @@ class Brain:
             return BrainResult(
                 True,
                 {
-                    "narration": str(d["narration"])[:360],
+                    "narration": str(d["narration"]),
                     "tips": [str(x)[:40] for x in (d.get("tips") or [])][:3],
                 },
             )
@@ -954,7 +953,7 @@ class Brain:
         d = await self._ask_json(sys, user)
         if d and d.get("brief"):
             return BrainResult(
-                True, {"brief": str(d["brief"])[:220], "watch": str(d.get("watch", ""))[:40]}
+                True, {"brief": str(d["brief"]), "watch": str(d.get("watch", ""))}
             )
         return BrainResult(False, dict(FB_MORNING))
 
@@ -1164,7 +1163,7 @@ class Brain:
                 except (TypeError, ValueError):
                     pass
             gains, _loses = self._norm_items(d)
-            return BrainResult(True, {"narration": str(d["narration"])[:300],
+            return BrainResult(True, {"narration": str(d["narration"]),
                                      "dialogues": self._norm_dialogues(d.get("dialogues"), 3),
                                      "effects": eff, "items_gain": gains})
         return BrainResult(False, dict(FB_QUEST_DONE))
@@ -1179,7 +1178,7 @@ class Brain:
             if not isinstance(d, dict):
                 continue
             sp = str(d.get("speaker") or "").strip()[:12]
-            tx = str(d.get("text") or "").strip()[:100]
+            tx = str(d.get("text") or "").strip()
             if sp and tx:
                 out.append({"speaker": sp, "text": tx})
         return out
@@ -1235,7 +1234,7 @@ class Brain:
         user = self._with_avatars(user, avatars)
         d = await self._ask_fixed_dialogues(sys, user, counterpart=b.name, limit=DLG_LIMITS["major"])
         if d and d.get("narration"):
-            return BrainResult(True, {"narration": str(d["narration"])[:NARR_CAPS["major"]],
+            return BrainResult(True, {"narration": str(d["narration"]),
                                       "dialogues": self._norm_dialogues(d.get("dialogues"), DLG_LIMITS["major"])})
         return BrainResult(False, {"narration": "话到了嘴边,终究是说出口了。结果如何,彼此心里都清楚。",
                                    "dialogues": [{"speaker": a.name, "text": "那个……我喜欢你。"},
@@ -1250,7 +1249,7 @@ class Brain:
         user = self._with_avatars(user, avatars)
         d = await self._ask_fixed_dialogues(sys, user, counterpart=b.name, limit=DLG_LIMITS["major"])
         if d and d.get("narration"):
-            return BrainResult(True, {"narration": str(d["narration"])[:NARR_CAPS["major"]],
+            return BrainResult(True, {"narration": str(d["narration"]),
                                       "dialogues": self._norm_dialogues(d.get("dialogues"), DLG_LIMITS["major"])})
         return BrainResult(False, {"narration": "在那盏灯下,戒指被稳稳戴上。世界仿佛安静了一瞬,然后是彼此的笑声。",
                                    "dialogues": [{"speaker": a.name, "text": "(单膝跪地)嫁给我,好不好?"},
