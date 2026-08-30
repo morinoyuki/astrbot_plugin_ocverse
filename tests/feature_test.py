@@ -66,6 +66,7 @@ WORLD_JSON = {
 }
 
 DIALOGUE = [{"speaker": "自己", "text": "先这样。"}, {"speaker": "对方", "text": "嗯,回头见。"}]
+INVITE_PROMPTS: list[str] = []   # 记录远征邀约 prompt(验证任务信息注入)
 
 
 def llm_fake(system, user):
@@ -101,6 +102,7 @@ def llm_fake(system, user):
                            "briefing": "据点议会征召远征队:目标归零深坑,清剿畸变体,带回样本。行程艰险,报酬从优,量力而行。"},
                           ensure_ascii=False)
     if "诚邀被邀请者同行远征" in user:
+        INVITE_PROMPTS.append(user)
         return json.dumps({"agree": True, "rel_delta": 2,
                            "narration": "绫波听完行程,把烟杆在鞋底磕了磕:正好,老身也想再去看看那条船。",
                            "dialogues": [{"speaker": "自己", "text": "路上危险。"},
@@ -155,9 +157,9 @@ async def main():
 
     ok = 0
 
-    def check(name, cond):
+    def check(name, cond, extra=""):
         nonlocal ok
-        assert cond, f"FAIL: {name}"
+        assert cond, f"FAIL: {name}" + (f" | {extra}" if extra else "")
         ok += 1
         print(f"✓ {name}")
 
@@ -454,9 +456,14 @@ async def main():
     db.update_char(gid, "u1", stamina=100)
     await game.ensure_expedition_offer(gid, "u1")
     life2 = db.get_char(gid, "npc:g1:绫波")
+    ov2 = await game.ensure_expedition_offer(gid, "u1")
     iv = await game.expedition_invite(gid, "u1", life2.uid)
     check("远征邀约(LLM 判定同行)", iv["phase"] == "invite" and iv["agree"] is True
           and "绫波" in iv["narration"])
+    _p = INVITE_PROMPTS[-1] if INVITE_PROMPTS else ""
+    check("邀约对话注入真实委托信息", "深坑清剿令" in _p and "据点议会征召远征队" in _p
+          and "危险度★" in _p and "行程约" in _p and "成功率" in _p and "已有同行" in _p,
+          extra=_p[:160])
     check("受邀者入招募名单", "绫波" in game._exp_recruited(gid, "u1"))
     iv2 = await game.expedition_invite(gid, "u1", life2.uid)
     check("重复邀请短路(不重复编入)", iv2["agree"] is True and game._exp_recruited(gid, "u1").count("绫波") == 1)
@@ -471,6 +478,14 @@ async def main():
     await game.settle_expedition(gid, "u1")
     ch = db.get_char(gid, "u1")
     ch.hp = C.HP_MAX; ch.flags.pop("_state", None); db.upsert_char(ch)
+    # 缓存委托的目标区域消失(区域重绘/世界变动)→ ensure 时作废重生成
+    stale_zone = ov2["offer"]["zone_name"]
+    keep = [z for z in db.get_world(w.id).zones if z.get("name") != stale_zone]
+    db.update_world(w.id, zones=keep)
+    ov3 = await game.ensure_expedition_offer(gid, "u1")
+    check("缓存委托区域失效后自动作废重生成", ov3["offer"]["zone_name"] != stale_zone
+          and ov3["offer"]["zone_name"] in {z["name"] for z in db.get_world(w.id).zones}
+          and len(db.get_world(w.id).zones) >= C.ZONES_MIN)
 
     # ── 剧情权重:主线终章=高潮 ──
     from ocverse.prompts import resolve_mainline as _rm, story_weight_line

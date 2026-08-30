@@ -1728,7 +1728,8 @@ class Game:
         if self._exp_npc_on_march(gid, tch.name):
             raise GameError(f"⚔ {tch.name} 正随远征队在外。")
         # 确保今日委托存在(接受前拉人:还没看过布告也会现场生成)
-        offer = await self.ensure_expedition_offer(gid, uid)
+        offer_view = await self.ensure_expedition_offer(gid, uid)
+        offer = dict(offer_view.get("offer") or {})
         team = self._exp_recruited(gid, uid)
         if tch.name in team:
             return {
@@ -1760,6 +1761,8 @@ class Game:
             raise GameError("世界尚未初始化")
         pre = self.db.get_rel_full(gid, uid, target_uid)
         self._attach_rep_line(gid, uid, world)
+        offer["rate"] = self._exp_success_rate(ch, {"danger": int(offer.get("danger") or 3)}, len(team) + 1)
+        offer["team_note"] = "、".join(team) or "暂无(你是第一位同行者)"
         r = await self.brain.expedition_invite(
             world=world, char=ch, target=tch, offer=offer,
             rel_score=pre["score"], rel_stage=C.rel_stage_label(pre["score"], pre["state"]))
@@ -1992,7 +1995,12 @@ class Game:
         cached = self.db.kv_get(gid, key)
         if cached:
             try:
-                return self._exp_offer_view(gid, uid, ch, world, json.loads(cached))
+                cached_offer = json.loads(cached)
+                cur_zones = {str(z.get("name") or "") for z in (world.zones or []) if isinstance(z, dict)}
+                if str(cached_offer.get("zone_name") or "") in cur_zones:
+                    return self._exp_offer_view(gid, uid, ch, world, cached_offer)
+                # 目标区域已不存在(世界变动/区域重绘)→ 作废旧委托,现场重新生成
+                self.db.kv_set(gid, key, "")
             except Exception:
                 pass
         world = self.ensure_world_content(gid) or world
