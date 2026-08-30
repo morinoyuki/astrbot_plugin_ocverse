@@ -881,6 +881,31 @@ def expedition_offer(*, world, char, zone: dict, issuer: str, teammates: list[st
     )
 
 
+def life_char_story(*, world, char, other=None, memories=None) -> str:
+    """持久生活角色的日常小剧场:TA 自己的经历与变化(让群世界里的TA们活起来)。"""
+    other_line = ""
+    if other is not None:
+        other_line = (f"\n在场者:{other.persona_line()},背景:{other.backstory[:300] or '未详'}"
+                      "(TA恰好在场,可以互动、结伴,也可以只是擦肩)。")
+    mem = "\n".join(memories[:3]) if memories else ""
+    return (
+        f"{_world_line(world)}\n"
+        f"主角(持久生活角色):{char.name} —— {char.backstory[:400] or '一名生活在群世界里的角色'}\n"
+        f"{other_line}{mem}\n"
+        "写一段TA自己的日常小剧场(120~220字,轻小说式):贴合TA的人设与世界观,"
+        "有画面、有小事件、有落点(做成了什么/心情如何/日子往前挪了一步);"
+        "不超展开,像真实生活里的一帧。对话与叙述必须贴合该世界的题材与时代。\n"
+        '"dialogues":1~3轮对话(IM聊天体,speaker≤8字、text≤50字;'
+        "有在场者时至少2人开口,无在场者时可与路人交谈或自言自语)。\n"
+        "effects:TA自己的变化(exp 0~8,mood ±5,gold ±5,attrs 偶尔±1,克制)。\n"
+        "rel_delta:与在场者的好感变化(-3~4;无在场者时输出0)。\n"
+        "items_gain/items_lose:仅在自然涉及时输出一件(捡到/买了个小东西/用掉了什么),通常为空。\n"
+        '严格输出 JSON:{"narration":"日常小剧场","dialogues":[{"speaker":"","text":""}],'
+        '"effects":{"exp":0-8,"mood":±,"gold":±,"attrs":{}},"rel_delta":0,'
+        '"items_gain":[{"name":"","note":""}],"items_lose":[""],"memory":"一句话"}'
+    )
+
+
 def expedition_invite(*, world, char, target, offer: dict,
                       rel_score: int, rel_stage: str = "") -> str:
     """远征邀约:发起人邀请对方同行,由被邀请者的性格与两人关系判断是否同意。"""
@@ -913,10 +938,10 @@ def expedition_report(*, world, char, exp: dict, phase: str, supplies_note: str)
         f"当前阶段:{phase}——写一段远征途中的剧情片段(120~220字):"
         "行军写风物与队伍氛围,遭遇战写一场短促交手,险境写困境与代价,决战前夜写肃杀与决心;"
         "片段要有画面、有进展、有落点,像连载中的一章。"
-        "\n【物资归属铁律】背包物资清单是『角色本人』随身携带的物品(队伍补给由TA统一背管);"
-        "items_lose 结算的是从角色自己行囊中取出的消耗——叙述必须写明是从TA自己的背包/行囊里拿出,"
-        "严禁写成从其他角色/NPC的背包或口袋里拿出(他们的物品不归系统结算);"
-        "队友/NPC 若要帮忙,用他们自己的台词动作表现即可,不得借用他们的名字消耗清单物品。"
+        "\n【物资归属铁律】背包物资清单按成员分列(角色本人与随行队友,各自随身);"
+        "items_lose 每项必须写成『成员名:物品名』,表示从该成员自己的行囊取出——"
+        "叙述与归属必须一致(谁出的就从谁的行囊拿出),严禁张冠李戴、严禁取用清单外的物品;"
+        "未列出的队友/NPC 的私有物品不得混入。"
         + (f"\n{supplies_note}" if supplies_note else "")
         + "\n\"dialogues\":片段中队友/敌人的简短对话(1~3轮,IM聊天体,speaker用队友本名或敌人称谓,text≤50字)。"
         + WORLDVIEW_LAW +

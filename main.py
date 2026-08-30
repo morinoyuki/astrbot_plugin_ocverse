@@ -814,6 +814,8 @@ class OcversePlugin(Star):
             return await self.game.world_shift(gid)
         if kind == "morning":
             return await self.game.fire_morning(gid)
+        if kind == "life_event":
+            return await self.game.fire_life_event(gid)
         _ = forced
         return None
 

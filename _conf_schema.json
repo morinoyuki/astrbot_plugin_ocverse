@@ -212,6 +212,12 @@
     "default": 2,
     "hint": "远征进行中每隔几小时向群里推送一段剧情片段;行程走完自动结算归来。最小 1 小时"
   },
+  "life_story_daily_percent": {
+    "description": "生活角色日常小剧场每日触发概率 %",
+    "type": "int",
+    "default": 70,
+    "hint": "群里有持久生活角色时,每天安排一场TA们自己的日常小剧场(自带经验/心情/金钱/好感变化);0-100"
+  },
   "interactions_max_per_day": {
     "description": "每人每日互动次数上限",
     "type": "int",

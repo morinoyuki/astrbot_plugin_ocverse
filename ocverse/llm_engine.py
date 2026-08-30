@@ -693,6 +693,34 @@ class Brain:
             })
         return BrainResult(False, {})
 
+    async def life_char_story(self, *, world, char, other=None,
+                              memories: list[str] | None = None) -> BrainResult:
+        """持久生活角色的日常小剧场:自带经验/心情/金钱/好感等变化。"""
+        sys = self.style
+        d = await self._ask_fixed_dialogues(
+            sys, prompts.life_char_story(world=world, char=char, other=other, memories=memories),
+            counterpart=(other.name if other else ""), limit=3)
+        if d and d.get("narration"):
+            return BrainResult(True, {
+                "narration": str(d["narration"])[:320],
+                "dialogues": self._norm_dialogues(d.get("dialogues"), 3),
+                "effects": _clamp_effects(d.get("effects") or {}),
+                "rel_delta": _clamp(d.get("rel_delta", 0), -3, 4),
+                "items_gain": self._norm_items(d)[0],
+                "items_lose": self._norm_items(d)[1],
+                "memory": str(d.get("memory", ""))[:120],
+            })
+        return BrainResult(True, {   # 离线兜底:日子照过,轻微变化
+            "narration": f"{char.name}的一天照旧过去了:把手头的事做完,守着小小的习惯,"
+                         "在熟悉的地方打了个盹。日子往前挪了一步。",
+            "dialogues": [],
+            "effects": {"mood": 1, "exp": 2},
+            "rel_delta": 0,
+            "items_gain": [],
+            "items_lose": [],
+            "memory": f"{char.name}度过了平常的一天。",
+        })
+
     async def expedition_invite(self, *, world, char, target, offer: dict,
                                 rel_score: int, rel_stage: str = "") -> BrainResult:
         """远征邀约:LLM 以被邀请者性格与双方关系判断是否同行。"""

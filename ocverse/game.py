@@ -472,6 +472,11 @@ class Game:
             idx += 1
             m = rng.randint(lo, hi - 1)
             items.append({"id": idx, "hhmm": f"{m // 60:02d}:{m % 60:02d}", "kind": "shift", "done": 0})
+        # 生活角色日常小剧场:群里有持久角色时,大概率每天安排一场(不定时触发,让TA们活起来)
+        if self._npc_chars(gid) and rng.random() * 100 < self._cfgi("life_story_daily_percent", 70):
+            idx += 1
+            m = rng.randint(lo, hi - 1)
+            items.append({"id": idx, "hhmm": f"{m // 60:02d}:{m % 60:02d}", "kind": "life_event", "done": 0})
         if self.cfg("morning_brief", True):
             idx += 1
             m = lo + rng.randint(0, 59)
@@ -2168,38 +2173,52 @@ class Game:
         span = max(1.0, until - started)
         progress = int(min(99, (now - started) / span * 100))
         phase = "行军" if progress < 35 else ("遭遇战" if progress < 70 else "险境")
-        # 补给消耗:背包清单交给 LLM 判断本轮消耗哪些(食物/饮水至少一份,受伤可用治疗物品)
+        # 补给消耗:队伍各成员的行囊分列,交给 LLM 判断本轮谁出哪些(食物/饮水至少一份)
         drain_hp = max(1, int(exp.get("danger") or 3))
         drain_st = 6
-        inv = self.db.items_list(gid, uid)
+        team_lifes = [self.db.get_char(gid, tu) for tu in (exp.get("life_teammates") or [])]
+        team_lifes = [c for c in team_lifes if c]
         heal_names = {h["name"] for h in self.heal_items_of(gid, world)}
         supply_names = [str(s) for s in (exp.get("supply_names") or [])]
-        inv_line = "、".join(f"{it['name']}×{it['count']}" for it in inv[:8]) or "空"
-        supplies_note = (f"角色本人随身携带的补给(队伍由TA统一背管):{inv_line}。"
+        inv = self.db.items_list(gid, uid)
+        pack_lines = [f"{ch.name}的行囊:" + ("、".join(f"{it['name']}×{it['count']}" for it in inv[:6]) or "空")]
+        for c in team_lifes:
+            tinv = self.db.items_list(gid, c.uid)
+            pack_lines.append(f"{c.name}的行囊:" + ("、".join(f"{it['name']}×{it['count']}" for it in tinv[:6]) or "空"))
+        supplies_note = ("远征队伍的物资按成员分列(各自随身):" + ";".join(pack_lines) + "。"
                          "请按剧情判断本轮消耗哪些:至少一份食物/饮水,受伤可用治疗物品;"
-                         "消耗写明从角色自己行囊取出,放进 items_lose(只能消耗这些物品)。")
+                         "items_lose 每项写成『成员名:物品名』,从该成员自己的行囊取出(只能消耗清单里存在的)。")
         r = await self.brain.expedition_report(world=world, char=ch, exp=exp, phase=phase,
                                                supplies_note=supplies_note) if world is not None else None
         llm_lose = [str(x).strip() for x in (r.data.get("items_lose") or []) if str(x).strip()] \
             if (r is not None and r.ok) else []
-        consumed: list[str] = []
-        for nm in llm_lose[:3]:
-            row = next((it for it in self.db.items_list(gid, uid)
-                        if it["name"] == nm or nm in it["name"] or it["name"] in nm), None)
-            if row and self.db.item_remove(gid, uid, row["name"], 1):
-                consumed.append(row["name"])
+        consumed: list[tuple[Char, str]] = []   # (谁, 物品名)
+        for entry in llm_lose[:3]:
+            owner, item_name = ch, entry
+            if ":" in entry or ":" in entry:
+                parts = re.split(r"[:]", entry, maxsplit=1)
+                if len(parts) == 2:
+                    o, item_name = parts[0].strip(), parts[1].strip()
+                    owner = next((c for c in [ch] + team_lifes if c.name == o or o in c.name or c.name in o), ch)
+            row = next((it for it in self.db.items_list(gid, owner.uid)
+                        if it["name"] == item_name or item_name in it["name"] or it["name"] in item_name), None)
+            if row and self.db.item_remove(gid, owner.uid, row["name"], 1):
+                consumed.append((owner, row["name"]))
         if not consumed:
-            # 本地兜底:LLM 没给出消耗时,优先消耗一份行前补给,其次治疗物品
-            for cand in supply_names + [h for h in heal_names]:
-                row = next((it for it in self.db.items_list(gid, uid) if it["name"] == cand), None)
-                if row and self.db.item_remove(gid, uid, cand, 1):
-                    consumed.append(cand)
+            # 本地兜底:优先角色本人的行前补给,其次队友补给,再次治疗物品
+            for cand_owner, cand_pool in [(ch, supply_names)] + [(c, supply_names + list(heal_names)) for c in team_lifes]:
+                for cand in cand_pool:
+                    row = next((it for it in self.db.items_list(gid, cand_owner.uid) if it["name"] == cand), None)
+                    if row and self.db.item_remove(gid, cand_owner.uid, cand, 1):
+                        consumed.append((cand_owner, cand))
+                        break
+                if consumed:
                     break
         if consumed:
-            drain_hp = 0       # 有物资维持,生命不受损
+            drain_hp = 0       # 有物资维持,队伍生命不受损
             drain_st = 3
         exp["supplies_used"] = int(exp.get("supplies_used") or 0) + len(consumed)
-        consumed_line = "、".join(f"「{c}」" for c in consumed)
+        consumed_line = "、".join(f"{o.name}出的「{item}」" for o, item in consumed)
         hp_before = int(getattr(ch, "hp", C.HP_MAX))
         ch.hp = max(1, hp_before - drain_hp)   # 途中不轻易昏迷,失败结算才可能重伤
         ch.stamina = max(0, ch.stamina - drain_st)
@@ -2219,10 +2238,15 @@ class Game:
         changes = [f"体力-{drain_st}"]
         if drain_hp:
             changes.append(f"生命-{drain_hp}")
-        for c in consumed:
-            changes.append(f"🎒 消耗{c}")
+        for o, item in consumed:
+            changes.append(f"🎒 {o.name} 消耗「{item}」")
         if not consumed:
             changes.append("⚠ 本轮未动用补给,损耗加重")
+        # 随行队友也在行军:轻微损耗(有物资维持时减半)
+        for c in team_lifes:
+            c.stamina = max(0, c.stamina - (1 if consumed else 3))
+            c.hp = max(1, c.hp - (0 if consumed else max(1, drain_hp // 2)))
+            self.db.upsert_char(c)
         self.db.append_log(gid, uid, "act",
                            f"【远征·{phase}】{ch.name} 的队伍深入「{exp.get('zone')}」({progress}%,"
                            f"消耗:{consumed_line or '无'}):{narration[:60]}…", world.name if world else "")
@@ -2258,6 +2282,8 @@ class Game:
         wn = world.name if world else ""
         zone_danger = max(1, min(5, int(exp.get("danger") or 3)))
         teammates = [str(t) for t in (exp.get("teammates") or [])]
+        team_lifes = [self.db.get_char(gid, tu) for tu in (exp.get("life_teammates") or [])]
+        team_lifes = [c for c in team_lifes if c]
         rate = self._exp_success_rate(ch, {"danger": zone_danger}, len(teammates))
         outcome = "success" if random.randint(1, 100) <= rate else "fail"
         changes: list[str] = []
@@ -2291,10 +2317,26 @@ class Game:
             for it in items_gain:
                 changes.append(f"🎒 获得「{it}」")
             self.db.kv_incr(gid, "defeats_total", zone_danger)
+            # 随行的持久角色同享战利品(分金币/经验,心情+;偶得一件战利品)
+            for c in team_lifes:
+                share_gold = max(10, gold // 3)
+                share_exp = max(5, exp_gain // 2)
+                c.gold += share_gold
+                t_changes = self._apply_effects(c, {"exp": share_exp, "mood": 5})
+                self.db.upsert_char(c)
+                if items_gain and random.random() < 0.5:
+                    loot_name = random.choice(items_gain)
+                    self.db.item_add(gid, c.uid, loot_name, 1, f"远征「{exp.get('zone')}」缴获"[:20])
+                    t_changes.append(f"🎒 获得「{loot_name}」")
+                changes.append(f"🎖 {c.name} 分得{share_gold}金币、经验+{share_exp}"
+                               + ("、" + "、".join(t_changes) if t_changes else ""))
+                await self.mem.remember(gid, c.uid, "char",
+                                        f"随「{exp.get('title')}」远征凯旋,分得{share_gold}金币、经验+{share_exp}",
+                                        ref=f"exp:{float(exp.get('started') or 0):.0f}")
             reward_line = (f"报酬 {gold} 金币;经验 +{exp_gain};声望 +{rep};"
                            + (f"战利品:{'、'.join(items_gain)};" if items_gain else "")
                            + (f"属性小幅提升(+{boost});" if attr_names else "")
-                           + "队伍凯旋,讨伐计数累计。")
+                           + f"同行者{'、'.join(c.name for c in team_lifes)}也各分了一份;队伍凯旋,讨伐计数累计。")
         else:
             hp_loss = random.randint(25, 45) + 3 * zone_danger
             gold_loss = random.randint(0, 40)
@@ -2306,9 +2348,15 @@ class Game:
             if gold_loss:
                 changes.append(f"金币-{gold_loss}")
             changes += self._apply_effects(ch, {"exp": 5, "reputation": -2})
+            # 随行的持久角色也带伤归来
+            for c in team_lifes:
+                t_chg = self._apply_hp(c, -random.randint(10, 25))
+                c.mood = max(0, c.mood - 3)
+                self.db.upsert_char(c)
+                changes.append(f"💔 {c.name} 带伤归来" + (f"({t_chg})" if t_chg else ""))
             reward_line = (f"远征失败:重伤(生命-{hp_loss})"
                            + (f",损失 {gold_loss} 金币" if gold_loss else "")
-                           + ",经验+5,声望-2。")
+                           + ",经验+5,声望-2;同行者也各自带伤。")
         # 成功归来:与生活角色队友的羁绊+
         if outcome == "success":
             life_names = {c.name: c.uid for c in self.db.list_chars(gid) if is_npc_uid(c.uid)}
@@ -3783,6 +3831,55 @@ class Game:
         """两人当前的关系名(特殊态优先,否则按好感阶梯)。"""
         info = self.db.get_rel_full(gid, a, b)
         return C.rel_stage_label(info["score"], info["state"])
+
+    async def fire_life_event(self, gid: str) -> dict | None:
+        """持久生活角色的日常小剧场:随机一位(不在远征/未被困),自带经验/心情/
+        金币/属性与好感变化,让群世界里的TA们活灵活现。"""
+        world = self.db.cur_world(gid)
+        if not world:
+            return None
+        world = self.ensure_world_content(gid) or world
+        lifes = [c for c in self._npc_chars(gid)
+                 if not self._is_locked(c) and not self._on_expedition(c)
+                 and not self._exp_companion_of(gid, c.uid)]
+        if not lifes:
+            return None
+        ch = random.choice(lifes)
+        # 另一位在场者:其他角色(生活/玩家)五成概率登场
+        others = [c for c in self.db.list_chars(gid)
+                  if c.uid != ch.uid and not self._is_locked(c)
+                  and not self._on_expedition(c) and not self._exp_companion_of(gid, c.uid)]
+        other = random.choice(others) if others and random.random() < 0.5 else None
+        mems = await self.mem.related(gid, f"{ch.name} 日常 生活", uid=ch.uid, k=3)
+        r = await self.brain.life_char_story(world=world, char=ch, other=other, memories=mems)
+        d = r.data
+        changes = self._apply_effects(ch, d.get("effects") or {})
+        changes += self._apply_items(gid, ch.uid, d.get("items_gain"), d.get("items_lose"))
+        if other is not None:
+            delta = int(d.get("rel_delta") or 0)
+            if delta:
+                self.db.bump_rel(gid, ch.uid, other.uid, delta, "日常交集")
+                changes.append(f"💞 与{other.name}好感{'+' if delta > 0 else ''}{delta}")
+        await self.mem.remember(gid, ch.uid, "char",
+                                d.get("memory") or f"{ch.name}度过了日常的一天:{(d.get('narration') or '')[:50]}",
+                                ref=f"lifestory:{_now():.0f}")
+        self.db.append_log(gid, ch.uid, "event",
+                           f"【日常】{ch.name}:{(d.get('narration') or '')[:80]}", world.name)
+        return {
+            "type": "result",
+            "gid": gid,
+            "uid": ch.uid,
+            "char_name": ch.name,
+            "world_name": world.name,
+            "card_title": f"🧵 日常 · {ch.name}",
+            "event_title": f"🧵 {ch.name} 的日常",
+            "chosen": "自行其是",
+            "narration": d.get("narration", ""),
+            "dialogues": d.get("dialogues") or [],
+            "avatars": self._avatar_map(gid),
+            "changes": changes or ["日子照常往前过"],
+            "ok_llm": r.ok,
+        }
 
     async def fire_morning(self, gid: str) -> dict | None:
         world = self.db.cur_world(gid)

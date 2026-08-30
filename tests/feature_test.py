@@ -29,7 +29,9 @@ from ocverse.llm_engine import Brain  # noqa: E402
 from ocverse.memory import MemoryStore  # noqa: E402
 from ocverse import config as C  # noqa: E402
 
-CFG = {"memory_top_k": 6, "event_expire_minutes": 45, "action_max_per_day": 99}
+CFG = {"memory_top_k": 6, "event_expire_minutes": 45, "action_max_per_day": 99,
+       "life_story_daily_percent": 100}
+REPORT_LOSE = ["阿灰:罐头"]   # 远征播报消耗(可按成员名:物品名 指定归属)
 
 WORLD_JSON = {
     "name": "灰烬荒原", "genre": "末世废土",
@@ -114,7 +116,14 @@ def llm_fake(system, user):
         return json.dumps({"narration": "队伍在废墟间推进,轮流探路,暂时平安。",
                            "dialogues": [{"speaker": "老周", "text": "跟紧点。"},
                                          {"speaker": "自己", "text": "明白。"}],
-                           "items_lose": ["罐头"]}, ensure_ascii=False)
+                           "items_lose": list(REPORT_LOSE)}, ensure_ascii=False)
+    if "日常小剧场" in user:
+        return json.dumps({"narration": "绫波把摊子支在老地方,雾从码头漫上来,她把最暖的那壶茶留给了熟悉的客人。",
+                           "dialogues": [{"speaker": "绫波", "text": "老规矩?"},
+                                         {"speaker": "路人", "text": "老规矩。"}],
+                           "effects": {"exp": 5, "mood": 3, "gold": 2},
+                           "rel_delta": 2,
+                           "memory": "绫波摆摊的一天。"}, ensure_ascii=False)
     if "远征大获全胜" in user or "远征折戟" in user:
         return json.dumps({"narration": "最终一战打完了,队伍带着战利品回到出发的地方,人人带伤,个个挺立。",
                            "dialogues": [{"speaker": "老周", "text": "活下来了。"},
@@ -360,8 +369,8 @@ async def main():
           and any("罐头" in c for c in rv["changes"]))
     check("有补给维持则生命无损", db.get_char(gid, "u1").hp == hp_before)
     _rp = REPORT_PROMPTS[-1] if REPORT_PROMPTS else ""
-    check("播报 prompt 含物资归属铁律(角色本人随身,严禁他人背包)", "物资归属铁律" in _rp
-          and "角色本人随身携带的补给" in _rp and "严禁写成从其他角色/NPC的背包" in _rp)
+    check("播报 prompt 含物资归属铁律(按成员分列,严禁张冠李戴)", "物资归属铁律" in _rp
+          and "按成员分列" in _rp and "成员名:物品名" in _rp and "严禁张冠李戴" in _rp)
     check("播报对话带头像", rv["avatars"].get("阿灰") == "fake_avatar.png")
     # 强制归来结算
     ch = db.get_char(gid, "u1")
@@ -484,9 +493,15 @@ async def main():
     ch = db.get_char(gid, "u1")
     ch.hp = C.HP_MAX; ch.flags.pop("_state", None); db.upsert_char(ch)
     # 缓存委托的目标区域消失(区域重绘/世界变动)→ ensure 时作废重生成
-    stale_zone = ov2["offer"]["zone_name"]
-    keep = [z for z in db.get_world(w.id).zones if z.get("name") != stale_zone]
-    db.update_world(w.id, zones=keep)
+    # (用「荧光沼泽」——重绘专属名,题材模板包补不回来,保证确定性)
+    stale_zone = "荧光沼泽"
+    assert any(z.get("name") == stale_zone for z in db.get_world(w.id).zones), "前置:荧光沼泽应在场"
+    day2 = game._day_key()
+    db.kv_set(gid, f"exp_offer:{day2}:u1", json.dumps(
+        {"zone_name": stale_zone, "title": "旧令", "danger": 3, "duration_h": 6,
+         "teammates": [], "issuer": "x", "rate": 50, "day": day2, "llm": False}, ensure_ascii=False))
+    # 该区域从世界消失(被重绘/平息)
+    db.update_world(w.id, zones=[z for z in db.get_world(w.id).zones if z.get("name") != stale_zone])
     ov3 = await game.ensure_expedition_offer(gid, "u1")
     check("缓存委托区域失效后自动作废重生成", ov3["offer"]["zone_name"] != stale_zone
           and ov3["offer"]["zone_name"] in {z["name"] for z in db.get_world(w.id).zones}
