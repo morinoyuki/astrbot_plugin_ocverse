@@ -150,4 +150,40 @@ async def main():
         assert tool.description, f"{n} 缺描述"
     print("✓ 工具集完整且每个都有描述")
 
+    # 10) 知识库自动采集(此前 KnowledgeStore 缺 count 方法 → AttributeError 被吞,永不采集)
+    calls = {"kb": 0}
+
+    async def no_web(s, u):
+        return None
+
+    async def kb_llm(s, u):
+        calls["kb"] += 1
+        return json.dumps({"source": "《雾中信号》", "theme": "都市怪谈", "kind": "work",
+                           "content": "一艘只在雾夜出现信号的小船,船员们用摩斯电码交换关于逝者的故事,"
+                                      "直到有人收到自己发出的那条旧消息——整座小镇开始失眠。"}
+                          , ensure_ascii=False)
+
+    pl._llm_raw_enriched = no_web
+    pl._llm_raw = kb_llm
+    await pl._kb_maintenance()
+    assert pl.kb.count("g1") == 1, f"空库首次应立即采集,实际 {pl.kb.count('g1')}"
+    kb_total_before = pl.kb.count("g1")
+    await pl._kb_maintenance()
+    assert pl.kb.count("g1") == kb_total_before, "当日第二次应跳过(已标记 kb_last2)"
+    print("✓ 知识库自动采集:空库即采 + 当日去重跳过")
+
+    # 失败重试:LLM 连续失败 → 计数,3 次后当日放弃(不再打 LLM)
+    async def kb_none(s, u):
+        calls["kb"] += 1
+        return None
+
+    pl._llm_raw = kb_none
+    await pl._kb_maintenance()   # fail 1
+    await pl._kb_maintenance()   # fail 2
+    await pl._kb_maintenance()   # fail 3 → 放弃
+    fails3 = calls["kb"]
+    await pl._kb_maintenance()   # 应直接跳过,不再调用
+    assert calls["kb"] == fails3, "放弃后不应再调用 LLM"
+    print("✓ 知识库采集失败:重试 3 次/天上限,防风暴")
+
 asyncio.run(main())

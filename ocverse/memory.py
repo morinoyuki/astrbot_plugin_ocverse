@@ -153,6 +153,10 @@ class KnowledgeStore:
         self.top_k = max(1, top_k)
         self.max_items = max(1, max_items)
 
+    def count(self, gid: str) -> int:
+        """当前群知识库条数(采集调度/上限判断用)。"""
+        return self.db.kb_count(gid)
+
     async def _vec(self, text: str) -> list[float]:
         try:
             return await self.embedder.embed(text)

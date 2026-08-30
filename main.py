@@ -678,28 +678,53 @@ class OcversePlugin(Star):
 
     # ── 知识库定时采集:每天每组入库一条素材(联网/LLM),供所有生成功能注入 ──
     async def _kb_maintenance(self):
+        """知识库日常采集:每群每天 1~3 条(失败次日重试;全天至多失败 3 次后放弃)。"""
         day = self.game._day_key()
         for g in self.db.list_groups():
             gid = g["gid"]
-            if self.db.kv_get(gid, "kb_last") == day:
-                continue
-            self.db.kv_set(gid, "kb_last", day)  # 占位防重复
-            if not self._cfg("knowledge_collect_enabled", True) or self.kb.count(gid) >= self._cfgi("knowledge_base_max", 40):
-                continue
-            # 每群每天采集(默认1条,可配置),用序号错开题材,避免同批同主题重复
-            n = max(0, min(3, self._cfgi("knowledge_collect_daily", 1)))
-            base = self.kb.count(gid)
-            for i in range(n):
-                if self.kb.count(gid) >= self._cfgi("knowledge_base_max", 40):
-                    break
-                try:
-                    await self._collect_kb(gid, offset=base + i)
-                except Exception as e:
-                    logger.warning(f"ocverse: 知识库采集失败: {e}")
+            try:
+                await self._kb_collect_group(gid, day)
+            except Exception as e:
+                logger.warning(f"ocverse: 知识库维护异常(群{gid}): {e}")
 
-    async def _collect_kb(self, gid: str, offset: int = 0):
+    async def _kb_collect_group(self, gid: str, day: str):
+        """单群的当日采集调度(标记键 kb_last2;失败计数 kb_fail:<day>,至多 3 次)。"""
+        done_key, fail_key = "kb_last2", f"kb_fail:{day}"
+        max_n = self._cfgi("knowledge_base_max", 40)
+        if self.kb.count(gid) >= max_n:
+            self.db.kv_set(gid, done_key, day)
+            return
+        if self.db.kv_get(gid, done_key) == day:
+            return
+        try:
+            fails = int(self.db.kv_get(gid, fail_key) or 0)
+        except (TypeError, ValueError):
+            fails = 0
+        if fails >= 3:
+            self.db.kv_set(gid, done_key, day)   # 今日放弃,明天再试
+            return
+        # 每群每天采集(默认1条,可配置),用序号错开题材,避免同批同主题重复
+        n = max(0, min(3, self._cfgi("knowledge_collect_daily", 1)))
+        base = self.kb.count(gid)
+        ok = True
+        for i in range(n):
+            if self.kb.count(gid) >= max_n:
+                break
+            try:
+                if not await self._collect_kb(gid, offset=base + i):
+                    ok = False
+            except Exception as e:
+                logger.warning(f"ocverse: 知识库采集失败(群{gid}): {e}")
+                ok = False
+        if ok:
+            self.db.kv_set(gid, done_key, day)
+            self.db.kv_set(gid, fail_key, "")
+        else:
+            self.db.kv_incr(gid, fail_key)
+
+    async def _collect_kb(self, gid: str, offset: int = 0) -> bool:
         """采集一条轻小说/动漫/漫画风格的著作素材,提炼成可复用条目存入知识库。
-        offset: 同批内第几条,用于错开本轮题材(避免一条批次全同题)。"""
+        offset: 同批内第几条,用于错开本轮题材(避免一条批次全同题)。返回是否成功入库。"""
         from .ocverse.llm_engine import _extract_json, now_stamp
         themes = ["异世界转生", "校园异能", "末世求生", "机甲战争", "修仙问道", "都市怪谈",
                   "奇幻冒险", "科幻末日", "怪盗群像", "婚约恋爱", "英灵群像", "蒸汽朋克"]
@@ -721,17 +746,26 @@ class OcversePlugin(Star):
         if not text:
             text = await self._llm_raw(system, user)        # 回退普通
         if not text:
-            return
+            logger.warning("ocverse: 知识库采集失败(本轮):LLM 无可用输出")
+            return False
         d = _extract_json(text) or {}
         content = (str(d.get("content") or "")).strip()
         if len(content) < 40:  # 内容过短(拆不出可用素材)则丢弃,不进库
-            return
-        await self.kb.add(gid,
-                          str(d.get("source") or "")[:60],
-                          str(d.get("theme") or theme)[:30],
-                          str(d.get("kind") or "work")[:12],
-                          content[:1500])
+            logger.warning("ocverse: 知识库采集失败(本轮):素材内容过短,已丢弃")
+            return False
+        source = str(d.get("source") or "")[:60]
+        theme_used = str(d.get("theme") or theme)[:30]
+        nid = await self.kb.add(gid,
+                                source,
+                                theme_used,
+                                str(d.get("kind") or "work")[:12],
+                                content[:1500])
+        if nid is None:   # 查重拒绝或入库异常 → 视为本轮失败(有重试上限,不会风暴)
+            logger.warning("ocverse: 知识库采集失败(本轮):内容与库内重复或入库异常")
+            return False
+        logger.info(f"ocverse: 知识库采集入库 #{nid}《{source or '?'}》({theme_used})")
         await asyncio.sleep(0)  # 让出事件循环
+        return True
 
     async def _fire_plan_item(self, gid: str, item: dict, forced: bool = False) -> dict | None:
         kind = item["kind"]
