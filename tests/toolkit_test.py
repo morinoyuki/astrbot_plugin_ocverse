@@ -204,11 +204,15 @@ async def main():
             return [At(qq=self._at)] if self._at else []
 
     ev2 = FakeEvent("u2")   # u2 的分身「阿澈」在前文互动工具测试中已创建
-    # ① At 组件(平台原生;官方 openid 非数字同样接受)
+    # ① At 组件(平台原生;官方 openid 非数字同样接受 —— 该 uid 需有分身)
+    from ocverse.models import Char
+    pl.db.upsert_char(Char(gid="g1", uid="OPENID_ABC", name="官方君"))
     t, rest = pl._resolve_interact_target("g1", AtEvent("u1", at="u2"), "@阿澈 打个招呼")
     assert t == "u2" and rest == "打个招呼", (t, rest)
     t, _ = pl._resolve_interact_target("g1", AtEvent("u1", at="OPENID_ABC"), "闲聊")
     assert t == "OPENID_ABC", t
+    t, rest = pl._resolve_interact_target("g1", AtEvent("u1", at="NOCHAR_999"), "阿澈 闲聊")
+    assert t == "u2" and rest == "闲聊", (t, rest)
     # ② 无 At 组件:文本「@名字」(官方接口常见形态)
     t, rest = pl._resolve_interact_target("g1", AtEvent("u1"), "@阿澈 请客")
     assert t == "u2" and rest == "请客", (t, rest)
@@ -218,7 +222,17 @@ async def main():
     # ④ 陌生名字 → None(由上层给出名单帮助)
     t, _ = pl._resolve_interact_target("g1", AtEvent("u1"), "不存在的人 闲聊")
     assert t is None
-    print("✓ 互动目标解析:@组件 → 文本@名字 → 角色名,官方接口兼容")
+    # ⑤ 官方接口唤醒:消息自带 At(机器人自身)/At(无分身者)/At(全体) → 全部回落名字解析
+    bot_id = "BOT_SELF"
+    ev_bot = AtEvent("u1", at=bot_id)
+    ev_bot.get_self_id = lambda: bot_id
+    t, rest = pl._resolve_interact_target("g1", ev_bot, "阿澈 打个招呼")
+    assert t == "u2" and rest == "打个招呼", (t, rest)
+    t, rest = pl._resolve_interact_target("g1", AtEvent("u1", at="all"), "@阿澈 请客")
+    assert t == "u2" and rest == "请客", (t, rest)
+    t, rest = pl._resolve_interact_target("g1", AtEvent("u1", at="NOCHAR_999"), "阿澈 闲聊")
+    assert t == "u2" and rest == "闲聊", (t, rest)
+    print("✓ 互动目标解析:@组件 → 文本@名字 → 角色名,官方接口兼容(唤醒At/全体/无分身均回落名字)")
 
     # 12) 非个人剧情(晨报/主动事件/远征等)一律走 _send_to 主动通道,不引用群友消息
     pl._remember_umo(ev)

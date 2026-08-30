@@ -392,13 +392,20 @@ class OcversePlugin(Star):
         return out
 
     def _at_target(self, event: AstrMessageEvent) -> str:
-        """从消息组件解析被 @ 的目标(QQ 官方接口的 openid 可能是非数字,同样接受)。"""
+        """从消息组件解析被 @ 的目标。
+        排除:发送者本人、机器人自身(QQ 官方接口唤醒时消息自带 At(bot),
+        此前被误当成互动目标 →「找不到这个目标」)、@全体。
+        QQ 官方接口的 openid 可能是非数字,同样接受。"""
         try:
             me = self._uid(event)
+            try:
+                bot = str(event.get_self_id() or "")
+            except Exception:
+                bot = ""
             for c in event.get_messages():
                 if isinstance(c, At):
                     t = str(getattr(c, "qq", "") or getattr(c, "target_id", "") or "")
-                    if t and t != me:
+                    if t and t not in (me, bot, "all"):
                         return t
         except Exception:
             pass
@@ -409,10 +416,11 @@ class OcversePlugin(Star):
         返回 (目标uid 或 None, 互动方式文本)。"""
         raw = (raw or "").strip()
         text_wo_at = re.sub(r"@\S+", "", raw).strip()
-        # 1) @ 消息组件(平台原生)
-        target = self._at_target(event)
-        if target:
-            return target, text_wo_at
+        # 1) @ 消息组件(平台原生):指向的对象必须有分身,
+        #    否则视为无效(官方接口的唤醒 At、@ 了没分身的人等)→ 回落文本名字解析
+        at_uid = self._at_target(event)
+        if at_uid and self.db.get_char(gid, at_uid) is not None:
+            return at_uid, text_wo_at
         # 2) 文本首段当名字:兼容「@名字」(官方接口只有纯文本)与直接写角色名
         if raw:
             first, rest = (raw.split(None, 1) + [""])[:2]
