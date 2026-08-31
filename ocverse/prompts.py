@@ -49,6 +49,22 @@ SCRIPT_SPEC = (
     "对白也可用 av 属性借用某张现有头像: <d name=发言者 av=头像名字>台词</d>(av 值从下方『本群头像名单』里选,一般不需要写)。\n"
 )
 
+# 数值与叙述一致铁律(所有涉及 effects 数值的结算共用):
+# 防止 LLM 为了渲染惨烈而写夸张数字、导致剧情表现与实际结算脱节。
+NUM_CONSISTENCY = (
+    "\n.〔数值与叙述一致铁律——务必遵守〕effects 里的数值就是本幕真正结算到角色身上的数值,"
+    "叙述与对白中的损失/获得必须与之严格对应,绝不可写超出 effects 数额的变化:血量(如 effects.hp=-30"
+    "却写『掉了 700 血』)、金币(如 effects.gold=+20 却写『发了大财,一掷千金』)、经验/属性/声望同理。"
+    "受伤/失血的严重程度、钱财的多少,都用描述性语言表达(眼前发黑/伤势不轻/受了轻伤/血流不止/"
+    "小有进账/发了一笔小财/破费不少),不要写具体到个位的血条或金币数字。\n"
+    "若某次抉择伤势很重或盈亏很大,请直接在 effects.hp/-gold 里给相应大数值(生命 -60~-99;金钱比如"
+    " ±200~800 视剧情),叙述同步表达——两者必须对上。\n"
+    "【主角铁律】本幕主角就是被结算的这位角色(或群事件的群像),叙述/对白/心理都以 TA 为主视角、忠实于 TA 的设定;"
+    "其余角色只能是被 TA 遭遇的对象或配角,严禁让别的角色抢走主角位、替主角做决定、或说出与主角设定不符的话。\n"
+    "【配角设定铁律】若剧情提到其他角色(世界NPC/群友/生活角色),其台词与行为必须贴合 TA 们自身的已知设定"
+    "(性格/身份/背景),严禁随口编造与 TA 设定冲突的话、严禁让配角做出违背自身人设的举动。\n"
+)
+
 # ═══ 头像名单注入:让 LLM 知道本群有哪些可用头像,供 <d> 标签 av 属性借用 ═══
 def avatar_note(names: list[str] | None) -> str:
     """可用头像名单注入块(游戏层按当前群组装;空则返回空串)。"""
@@ -403,6 +419,7 @@ def resolve_event(*, world, char=None, event: dict, choice_idx: int,
         + ITEM_OWNERSHIP_RULE + "\n"
         "数值克制:大部分±5~15,exp 5~20;负反馈不要毁灭性。memory 一句话,30字内。"
         "state 与 state_lift 只在处境发生变化时才输出(见上),否则两字段都不要出现。"
+        + NUM_CONSISTENCY
     )
     if state_note:
         user += (
@@ -498,6 +515,7 @@ def resolve_interaction(*, world, a, b=None, npc=None, mode: str, detail: str,
         "(state/state_lift 仅在救援场景、且B的处境发生变化时按上面的规则输出,否则不要出现)"
         "(reputation:A 在本世界的声望微调,仅在互动明显体现品性/义举/恶行时输出,一般可不输出)"
         "(hp:仅在互动中受伤/疗愈时输出,一般不要输出)"
+        + NUM_CONSISTENCY
     ) + previous_block(previous)
 
 
@@ -606,6 +624,7 @@ def resolve_action(*, world, char, action_name: str, detail: str, kind: str = "s
         + ITEM_OWNERSHIP_RULE +
         "数值克制:日常型大部分±5~15、exp 5~18、金币±0~40;风险型可到 exp 5~30、金币 0~80,失败时给负反馈但不要毁灭性打击。"
         "state 与 state_lift 只在处境变化时输出(见规则说明),否则两字段都不要出现。"
+        + NUM_CONSISTENCY
     ) + _heal_line(world, heal_note)
 
 
@@ -628,6 +647,7 @@ def facility_event(*, world, char, facility: dict, action: str,
         "属性键:" + attr_names_line() + "。\n"
         '严格输出 JSON:{"narration":"演出脚本","effects":{"mood":±,"gold":±,"exp":0-10,"attrs":{"force":0}},"memory":"一句话存档", "items_gain":[{"name":"可选≤12字","note":"≤20字"}]}\n'
         "数值克制(大部分±3~12);items_gain 只在自然得到时才给(如买到的纪念品),通常为空;不要输出体力。"
+        + NUM_CONSISTENCY
     )
 
 
@@ -674,15 +694,21 @@ def resolve_mainline(*, world, char, stage: dict, goal_note: str = "",
     """结算世界主线一小节(user prompt)。goal_note: 门槛达成说明;weight: 剧情权重。"""
     goal_line = (f"\n【阶段门槛已达成】{goal_note}" if goal_note else "")
     narr_spec, _ = story_spec(weight, "90~180", "1~3")
+    bg = (char.backstory[:500] if getattr(char, "backstory", None) else "")
+    bg_line = (f"\n【主角完整设定】{bg}" if bg else "")
     return (
         f"{_world_line(world)}\n"
-        f"主角:{char.persona_line()},{_rep_short(world, char)}\n"
+        f"主角:{char.persona_line()},{_rep_short(world, char)}{bg_line}\n"
         f"\n当前主线小节:{stage.get('stage','')} —— {stage.get('desc','')}{goal_line}\n"
         "角色主动去推进这段世界主线。请写出这一步的经过与结果:按『演出脚本』写成(轻小说式,"
         f"{narr_spec}字),"
         "扣住主线目标、有画面感、结果交代清楚(这一步达成与否、拿到的线索或代价都写明),并给出数值变化(克制:±3~10);"
         "主线推进有广泛影响,reputation 可在 -5~10 之间。\n"
-        + SCRIPT_SPEC +
+        "【主角铁律】本幕主角就是这位推进者,剧情全程以 TA 为唯一主视角、忠实于TA上面给出的设定"
+        "(性格/身份/经历);其余角色(世界NPC、群友、生活角色)只能作为配角配合推进,严禁被当成主角、"
+        "严禁说出与主角设定无关的话、严禁替主角做决定。\n"
+        + NUM_CONSISTENCY +
+        SCRIPT_SPEC +
         "这段推进中至少 2 个不同说话人开口;『dialogues』只是兜底,对白已入脚本则填 []。\n"
         + story_weight_line(weight) +
         '严格输出 JSON:{"narration":"演出脚本","dialogues":[{"speaker":"","text":""}],'
@@ -761,6 +787,7 @@ def npc_chat(*, world, npc: dict, char, action: str,
         '"narration":"演出脚本",'
         '"effects":{"mood":±,"gold":±,"exp":0-8,"hp":±,"reputation":-5~5}, "memory":"一句话存档", "state":{...}, "state_lift":true}'
         "(reputation/hp 仅在剧情明显涉及时输出,一般可不输出)"
+        + NUM_CONSISTENCY
     ) + previous_block(previous)
 
 
@@ -930,6 +957,7 @@ def finish_quest(*, world, char, quest: str, giver: str = "", place: str = "",
         '严格输出 JSON:{"narration":"演出脚本","effects":{"exp":5~12,"gold":0~25,"mood":0~3,"reputation":0~8},'
         '"items_gain":[{"name":"可选:委托人额外送的谢礼≤12字","note":"≤20字(可为世界治疗物品)"}]}'
         "items_gain 只在委托人明确会给实物谢礼时才输出,通常为空;reputation 为完成任务后的声望上升(1~8)。"
+        + NUM_CONSISTENCY
     )
 
 
