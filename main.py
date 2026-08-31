@@ -510,13 +510,46 @@ class OcversePlugin(Star):
         return None
 
     # ── 主动发送 / 积压补发 ─────────────────────────────────────────
+    def _prime_qqscene(self, umo: str) -> None:
+        """QQ 官方适配器主动群消息强依赖其内存里的 scene 缓存(收到群消息时才
+        填充);机器人重启后缓存清空,晨报/事件/远征等主动推送会被
+        send_by_session 静默 skip("No cached msg_id")而丢弃。这里主动补记
+        'group' 场景,使其能走主动推送(配合 _allow_group_proactive_send,不要求 msg_id)。"""
+        if not umo or ":" not in umo:
+            return
+        try:
+            from astrbot.core.platform.message_session import MessageSesion
+            sess = MessageSesion.from_str(umo)
+            if sess.message_type.value != "GroupMessage":
+                return
+            pm = getattr(self.context, "platform_manager", None)
+            insts = getattr(pm, "platform_insts", None) if pm else None
+            if not insts:
+                return
+            for p in insts:
+                try:
+                    if getattr(p.meta(), "id", None) != sess.platform_name:
+                        continue
+                    rs = getattr(p, "remember_session_scene", None)
+                    if rs is not None:
+                        rs(sess.session_id, "group")
+                except Exception:
+                    continue
+        except Exception:
+            return
+
     async def _send_to(self, umo: str, chain: list) -> bool:
         fn = getattr(self.context, "send_message", None)
         if fn is None or not chain:
             return False
         try:
-            await fn(umo, MessageChain(chain=chain))
-            return True
+            # 主动发送命中匹配平台;对 qq-official 的问题是重启后 scene 缓存丢失,
+            # send_by_session 会静默 return(不抛异常),插件此前误判为成功。
+            self._prime_qqscene(umo)
+            ok = await fn(umo, MessageChain(chain=chain))
+            if not ok:
+                logger.debug(f"ocverse: 主动发送未命中平台(umo={umo})")
+            return bool(ok)
         except Exception as e:
             logger.debug(f"ocverse: 主动发送失败: {e}")
         return False
