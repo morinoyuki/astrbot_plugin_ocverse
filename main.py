@@ -511,42 +511,39 @@ class OcversePlugin(Star):
         return None
 
     # ── 主动发送 / 积压补发 ─────────────────────────────────────────
-    def _prime_qqscene(self, umo: str) -> None:
-        """QQ 官方适配器主动群消息强依赖其内存里的 scene 缓存(收到群消息时才
-        填充);机器人重启后缓存清空,晨报/事件/远征等主动推送会被
-        send_by_session 静默 skip("No cached msg_id")而丢弃。这里主动补记
-        'group' 场景,使其能走主动推送(配合 _allow_group_proactive_send,不要求 msg_id)。"""
+    def _is_qq_official(self, umo: str) -> bool:
+        """判断 umo 对应的平台是否为 QQ 官方接口(主动消息受限,无法可靠推送)。
+        命中时主动发送不可用,卡片先积压、等群消息(@bot 触发)时用消息上下文补发。"""
         if not umo or ":" not in umo:
-            return
+            return False
         try:
             from astrbot.core.platform.message_session import MessageSesion
             sess = MessageSesion.from_str(umo)
-            if sess.message_type.value != "GroupMessage":
-                return
             pm = getattr(self.context, "platform_manager", None)
             insts = getattr(pm, "platform_insts", None) if pm else None
             if not insts:
-                return
+                return False
             for p in insts:
                 try:
                     if getattr(p.meta(), "id", None) != sess.platform_name:
                         continue
-                    rs = getattr(p, "remember_session_scene", None)
-                    if rs is not None:
-                        rs(sess.session_id, "group")
+                    return getattr(p.meta(), "name", "") == "qq_official"
                 except Exception:
                     continue
         except Exception:
-            return
+            return False
+        return False
 
     async def _send_to(self, umo: str, chain: list) -> bool:
         fn = getattr(self.context, "send_message", None)
         if fn is None or not chain:
             return False
         try:
-            # 主动发送命中匹配平台;对 qq-official 的问题是重启后 scene 缓存丢失,
-            # send_by_session 会静默 return(不抛异常),插件此前误判为成功。
-            self._prime_qqscene(umo)
+            # QQ 官方接口主动消息不可靠:识别到该平台不尝试主动发送,
+            # 直接返回 False → 调用方把卡片积压,等群消息(@bot)时补发。
+            if self._is_qq_official(umo):
+                logger.debug(f"ocverse: qq-official 平台不主动发送,卡片积压(umo={umo})")
+                return False
             ok = await fn(umo, MessageChain(chain=chain))
             if not ok:
                 logger.debug(f"ocverse: 主动发送未命中平台(umo={umo})")
@@ -584,15 +581,26 @@ class OcversePlugin(Star):
             if not gviews:
                 continue
             umo = self._umo_map.get(gid) or (self.db.kv_get(gid, "umo") or "")
+            # QQ 官方平台:主动发送不可用,一律直接积压(有上限),等群消息 @bot 补发
+            if umo and self._is_qq_official(umo):
+                self._queue_pending(gid, gviews)
+                continue
             chain = self._chain_views(gviews)
             if umo and await self._send_to(umo, chain):
                 for v in gviews:
                     self._mark_sent(v)  # 主动送达成功 → 事件可被抉择
                 continue
             # 无法主动发送 → 积压,等群消息时补发(补发送达后同样标记,之后才可抉择)
-            pend = self._pending.setdefault(gid, [])
-            pend.extend(gviews)
-            del pend[3:]
+            self._queue_pending(gid, gviews)
+
+    def _queue_pending(self, gid: str, gviews: list):
+        """把卡片加入积压队列,并限制上限(防无限积压溢出)。"""
+        cap = max(1, self._cfgi("pending_send_max", 10))
+        pend = self._pending.setdefault(gid, [])
+        pend.extend(gviews)
+        if len(pend) > cap:
+            # 丢弃超限最旧的卡片(通常是最早的事件,已过期概率最大)
+            pend[:] = pend[-cap:]
 
     # ── 后台调度 ──────────────────────────────────────────────────
     async def initialize(self):
@@ -890,30 +898,64 @@ class OcversePlugin(Star):
             logger.warning(f"ocverse: 静默生活角色唤醒异常: {e}")
         pend = self._pending.get(gid)
         if pend:
-            v = None
-            while pend:  # 跳过已失效的事件卡(被顶替/过期/结算),死卡补发只会误导抉择
-                cand = pend.pop(0)
-                if self._view_deliverable(cand):
-                    v = cand
-                    break
-            if v is not None:
-                # 非个人剧情(晨报/主动事件/远征等)一律走主动通道发送:
-                # 以消息上下文回复会把卡片挂在触发消息上,引用无关群友的信息
-                sent = False
-                try:
-                    chain = self._chain_views([v])
-                    umo = self._umo_map.get(gid) or (self.db.kv_get(gid, "umo") or "")
-                    if chain and umo:
-                        sent = await self._send_to(umo, chain)
-                except Exception as e:
-                    logger.warning(f"ocverse: 补发卡片异常: {e}")
-                if sent:
-                    self._mark_sent(v)  # 送出才算「发送过」,之后才可回落结算
+            umo = self._umo_map.get(gid) or (self.db.kv_get(gid, "umo") or "")
+            if umo and self._is_qq_official(umo):
+                # QQ 官方平台:主动推送不可用 → 用消息上下文(chain_result)
+                # 把积压的可投递卡片一次性补发出去(挂在触发消息上)。
+                sent_any = False
+                batch = []
+                kept = []
+                # 单次补发最多 MAX 张,避免单条消息图片过多;剩余积压等下次消息再发
+                max_batch = max(1, self._cfgi("pending_send_batch", 3))
+                for cand in pend:
+                    if self._view_deliverable(cand):
+                        if len(batch) < max_batch:
+                            batch.append(cand)
+                        else:
+                            kept.append(cand)
+                    else:
+                        kept.append(cand)  # 失效卡暂留,下轮再清
+                if batch:
+                    try:
+                        chain = self._chain_views(batch)
+                        if chain:
+                            for v in batch:
+                                self._mark_sent(v)
+                            sent_any = True
+                            yield event.chain_result(chain)
+                    except Exception as e:
+                        logger.warning(f"ocverse: qq-补发卡片异常: {e}")
+                if not sent_any:
+                    pend[:] = kept  # 这次没能发出,保留+重排,等下次
                 else:
-                    pend.insert(0, v)   # 主动通道暂不可用 → 重新排队,下条消息再试
-                    logger.warning(f"ocverse: 群{gid} 积压卡片主动补发失败,已重新排队")
-            if sent:
-                return
+                    pend[:] = kept  # 已发的已从 kept 中剔除,剩积压存回
+                if sent_any:
+                    return
+            else:
+                v = None
+                sent = False
+                while pend:  # 跳过已失效的事件卡(被顶替/过期/结算)
+                    cand = pend.pop(0)
+                    if self._view_deliverable(cand):
+                        v = cand
+                        break
+                if v is not None:
+                    # 非个人剧情(晨报/主动事件/远征等)一律走主动通道发送
+                    sent = False
+                    try:
+                        chain = self._chain_views([v])
+                        umo = self._umo_map.get(gid) or (self.db.kv_get(gid, "umo") or "")
+                        if chain and umo:
+                            sent = await self._send_to(umo, chain)
+                    except Exception as e:
+                        logger.warning(f"ocverse: 补发卡片异常: {e}")
+                    if sent:
+                        self._mark_sent(v)
+                    else:
+                        pend.insert(0, v)
+                        logger.warning(f"ocverse: 群{gid} 积压卡片主动补发失败,已重新排队")
+                if sent:
+                    return
             # 主动通道失败时不阻断:继续检查被动事件引爆(引爆卡是个人的,走消息上下文)
         # 被动事件:群里有动静,伏笔引爆(每次消息最多一个,自然限流)
         # 被动事件:群里有动静,伏笔引爆(每次消息最多一个,自然限流)

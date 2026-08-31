@@ -151,6 +151,10 @@ pip install -r requirements.txt   # pillow / numpy / aiohttp
 | `action_max_per_day` | 4 | 每人每日主动行动次数上限(练习/健身/打怪/冒险;兼职另有独立每日限次) |
 | `interactions_max_per_day` | 10 | 每人每日互动次数上限(与NPC/群友共享,0=不限;内置防复读守卫) |
 | `max_npcs_per_world` | 20 | 每个世界手动添加的 NPC 数上限 |
+| `pending_send_max` | 10 | 主动消息积压上限(条),超过丢弃最旧卡片防溢出 |
+| `pending_send_batch` | 3 | 每次群消息补发积压卡片的批次上限(张) |
+
+> **QQ 官方接口适配**:检测到 umo 对应平台为 `qq_official` 时,不尝试主动推送(该接口主动消息受限、大概率发不出),卡片先积压;每次有人 `@bot` 触发群消息时,用消息上下文一次性补发最多 `pending_send_batch` 张积压卡片(其余留待下次)。积压总量由 `pending_send_max` 封顶。OneBot 等支持主动推送的平台不受影响,依旧到点直接推送。
 
 完整项见 `_conf_schema.json`。
 
