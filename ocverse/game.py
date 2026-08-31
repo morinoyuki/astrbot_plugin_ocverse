@@ -991,6 +991,9 @@ class Game:
                                         state_note=self._state_note(char) if char else "",
                                         previous=prev_logs,
                                         material=await self._kb_ctx(gid, f"随机事件 剧情 钩子 {world.name}"))
+        # 即时生效的通知事件:LLM 直接定局,不落 pending 抉择表,消息只是通知
+        if r.ok and r.data.get("instant"):
+            return await self._settle_instant_event(gid, world, char, r.data, npc=npc)
         ev = EventRow(
             gid=gid,
             uid="" if is_group else char.uid,
@@ -1010,6 +1013,56 @@ class Game:
             "payload": r.data,
             "ok_llm": r.ok,
             "expires_min": self._cfgi("event_expire_minutes", 45),
+        }
+
+    async def _settle_instant_event(self, gid: str, world, char, data: dict, npc=None) -> dict:
+        """即时生效的通知事件:LLM 直接定局,不落抉择表,消息只是通知大家发生了什么。
+
+        char 为 None 表示全员群事件;effects 落到每个在场角色(金币不重复发放)。
+        返回 result 型 view(带 card_title 区分),渲染为『通知卡』。"""
+        changes: list[str] = []
+        narration = str(data.get("narration") or "")
+        title = str(data.get("title") or "突发状况")
+        if char is None:
+            # 全员事件:效果落到每个在场角色
+            ge = dict(data.get("effects") or {})
+            ge.pop("gold", None)
+            parts = []
+            for c in self.db.list_chars(gid):
+                if self._on_expedition(c) or self._exp_companion_of(gid, c.uid):
+                    continue
+                parts += self._apply_effects(c, ge)[:2]
+            changes = ["全体: "] + parts[:6]
+            mem_owner = ""
+            mem_text = data.get("memory") or f"全群遭遇「{title}」——{self._narr_plain(narration, 40)}"
+        else:
+            changes = self._apply_effects(char, data.get("effects") or {})
+            changes += self._apply_items(gid, char.uid, data.get("items_gain"), data.get("items_lose"))
+            mem_owner = char.uid
+            mem_text = data.get("memory") or f"{char.name}:{title}——{self._narr_plain(narration, 40)}"
+        # 记忆 & 日志(即时事件不入 events 表,用时间戳当 ref)
+        ref = f"instant:{_now():.0f}"
+        if mem_owner:
+            await self.mem.remember(gid, mem_owner, "char", mem_text, ref=ref)
+        await self.mem.remember(gid, "", "world",
+                                f"《{world.name}》{title}:{self._narr_plain(narration, 80)}", ref=ref)
+        who = char.name if char else "全群"
+        self.db.append_log(gid, mem_owner or "", "event",
+                           f"【即时】{title}·{who}:{self._narr_plain(narration, 90)}", world.name)
+        return {
+            "type": "notice",
+            "gid": gid,
+            "uid": char.uid if char else "",
+            "char_name": char.name if char else "",
+            "world_name": world.name,
+            "card_title": f"📜 天意 · {title}",
+            "event_title": title,
+            "chosen": "(",
+            "narration": narration,
+            "dialogues": [],
+            "avatars": self._avatar_map(gid),
+            "changes": changes or ["世界照常运转"],
+            "ok_llm": True,
         }
 
     def _pick_life_group(self, gid: str) -> list[Char]:
@@ -1140,11 +1193,12 @@ class Game:
             return not self._multi_includes(ev, uid)
         return False
 
-    async def choose(self, gid: str, uid: str, idx: int, ev=None) -> dict:
+    async def choose(self, gid: str, uid: str, idx: int, ev=None, custom: str = "") -> dict:
         """结算某人「选择 idx」。
 
         ev: 要结算的事件(指令层从引用(回复)的事件卡 №标签识别后传入);
-        不传则回落到最新一张「该用户可抉择」的已送达事件。"""
+        不传则回落到最新一张「该用户可抉择」的已送达事件。
+        custom: 选 4(自定义行动)时用户附言,≤30 字。"""
         ch = self.db.get_char(gid, uid)
         if not ch:
             raise GameError("你还没有创建分身,先「/分身 创建 名字」")
@@ -1167,12 +1221,23 @@ class Game:
         if ev.kind == "life_multi" and not self._multi_includes(ev, uid):
             names = "、".join(str(p.get("name", "")) for p in (ev.payload.get("participants") or []))
             raise GameError(f"这场交集是「{names}」的,没带上你就不能替他们做主啦")
+        # 自定义行动(选 4):必须有附言,且限长,防用户长文本预写后续、把走向焊死
+        custom = (custom or "").strip()
+        opts = ev.payload.get("options") or []
+        if idx >= len(opts):
+            if idx != 3:
+                raise GameError(f"请选择 1~{len(opts)} 之间的编号(选 4 可自定义行动)")
+            if not custom:
+                raise GameError("选 4 自定义行动,请附上你的行动,如:「/分身 选择 4 上前搭话」")
+            if len(custom) > 30:
+                raise GameError(f"自定义行动最多 30 字(当前 {len(custom)} 字),请精简成一句动作,后续交给世界演绎")
+        elif custom:
+            raise GameError("选 1~3 直接回复编号即可,无需附言;自定义行动请选 4")
         # 有效期严格校验(清理循环约1分钟一次,存在短暂窗口期)
         if 0 < ev.expires_at < _now():
             self.db.expire_event(ev.id)
             raise GameError("这张事件卡已经过了有效期,悄然错过了")
-        opts = ev.payload.get("options") or []
-        if not (0 <= idx < len(opts)):
+        if not (0 <= idx < len(opts) + 1):
             raise GameError(f"请选择 1~{len(opts)} 之间的编号")
         world = self.db.get_world(ev.world_id) or self.db.cur_world(gid)
         if world is None:
@@ -1182,17 +1247,18 @@ class Game:
             raise GameError("这个事件刚被处理完了")
         # 群像生活事件(多角色偶遇/结伴):结算时对每个参与者应用效果并更新彼此羁绊
         if ev.kind == "life_multi":
-            return await self._settle_life_multi(gid, uid, ev, world, idx)
+            return await self._settle_life_multi(gid, uid, ev, world, idx, custom=custom)
         target_char = self.db.get_char(gid, ev.uid) if ev.uid else None
         # 防复读:同事件+同选项最近发生过的,要求 AI 这次明显不同
-        pick_label = opts[idx]["label"] if idx < len(opts) else ""
+        is_custom = idx >= len(opts)
+        pick_label = custom if is_custom else (opts[idx]["label"] if idx < len(opts) else "")
         prev = self.db.recent_similar_logs(
             gid, ev.uid or uid, [str(ev.payload.get("title", "")), pick_label], k=2)
         state_note = self._state_note(target_char) if target_char else ""
         heal_note = self._backpack_heal_note(gid, target_char.uid, world) if target_char else ""
         r = await self.brain.resolve_event(
             world=world, char=target_char, event=ev.payload, choice_idx=idx, previous=prev,
-            state_note=state_note, heal_note=heal_note,
+            state_note=state_note, heal_note=heal_note, custom_action=custom,
             material=await self._kb_ctx(gid, "事件结算 结果 剧情 氛围"),
             avatars=self._avatar_names(gid))
         data = r.data
@@ -1214,15 +1280,15 @@ class Game:
                 parts += self._apply_effects(c, ge)[:2]
             changes = ["全体: "] + parts[:6]
         mem_owner = ev.uid or uid  # 全员事件的记忆记在抉择者名下
-        mem_text = data.get("memory") or f"{target_char.name if target_char else '众人'}:「{opts[idx]['label']}」——{ev.payload.get('title','')}"
+        mem_text = data.get("memory") or f"{target_char.name if target_char else '众人'}:「{pick_label}」——{ev.payload.get('title','')}"
         await self.mem.remember(gid, mem_owner, "char", mem_text, ref=f"event:{ev.id}")
         await self.mem.remember(gid, "", "world", f"《{world.name}》{ev.payload.get('title','')}:{self._narr_plain(data.get('narration'), 80)}", ref=f"event:{ev.id}")
         self.db.append_log(gid, ev.uid or uid, "event",
-                           f"「{ev.payload.get('title')}」选了「{opts[idx]['label']}」:{self._narr_plain(data.get('narration'), 90)}",
+                           f"「{ev.payload.get('title')}」选了「{pick_label}」:{self._narr_plain(data.get('narration'), 90)}",
                            world.name)
         # 记忆压缩检查
         await self._maybe_compress(gid, mem_owner)
-        echo = await self.mainline_echo(gid, mem_owner, ctx=f"{ev.payload.get('title','')}:「{opts[idx]['label']}」{self._narr_plain(data.get('narration'), 60)}")
+        echo = await self.mainline_echo(gid, mem_owner, ctx=f"{ev.payload.get('title','')}:「{pick_label}」{self._narr_plain(data.get('narration'), 60)}")
         return {
             "type": "result",
             "echo": echo,
@@ -1231,7 +1297,7 @@ class Game:
             "char_name": target_char.name if target_char else ch.name,
             "world_name": world.name if world else "",
             "event_title": ev.payload.get("title", ""),
-            "chosen": opts[idx]["label"],
+            "chosen": pick_label,
             "narration": data.get("narration", ""),
             "dialogues": data.get("dialogues") or [],
             "avatars": self._avatar_map(gid),
@@ -1239,7 +1305,7 @@ class Game:
             "ok_llm": r.ok,
         }
 
-    async def _settle_life_multi(self, gid: str, uid: str, ev, world, idx: int) -> dict:
+    async def _settle_life_multi(self, gid: str, uid: str, ev, world, idx: int, custom: str = "") -> dict:
         """结算群像生活事件:对各参与者应用个体效果、更新两两羁绊、记录记忆与日志。"""
         parts = [p for p in (ev.payload.get("participants") or []) if isinstance(p, dict) and p.get("uid")]
         if not parts:
@@ -1247,10 +1313,13 @@ class Game:
         chars = [self.db.get_char(gid, p["uid"]) for p in parts]
         chars = [c for c in chars if c]  # 角色可能被删
         opts = ev.payload.get("options") or []
-        pick = opts[idx] if 0 <= idx < len(opts) else {"label": "顺其自然", "hint": ""}
+        is_custom = idx >= len(opts)
+        pick = {"label": custom, "hint": "自定义行动"} if is_custom else \
+            (opts[idx] if 0 <= idx < len(opts) else {"label": "顺其自然", "hint": ""})
         rels = self._group_rels(gid, chars)
         r = await self.brain.resolve_life_event(
             world=world, chars=chars, event=ev.payload, choice_idx=idx, rels=rels,
+            custom_action=custom,
             material=await self._kb_ctx(gid, "日常 交集 结果 羁绊"),
             avatars=self._avatar_names(gid),
         )

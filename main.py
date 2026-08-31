@@ -2815,12 +2815,15 @@ class OcversePlugin(Star):
     @oc.command("选择", alias={"choose"})
     @_guard
     async def cmd_choose(self, event: AstrMessageEvent, idx: str = ""):
-        """分身 选择 <编号> - 回复(引用)事件卡后,对 TA 的遭遇做出抉择"""
+        """分身 选择 <编号> - 回复(引用)事件卡后,对 TA 的遭遇做出抉择;选 4 可自定义行动"""
         gid = self._need_gid(event)
         uid = self._uid(event)
-        n = re.sub(r"\D", "", idx or self._rest(event, "选择", "choose"))
+        raw = idx or self._rest(event, "选择", "choose")
+        m = re.match(r"\s*(\d+)\s*(.*)", raw)
+        n = m.group(1) if m else ""
+        custom = (m.group(2) or "").strip() if m else ""
         if not n:
-            yield event.plain_result("格式:回复要抉择的事件卡,发送「/分身 选择 <编号>」(选项编号见卡片)")
+            yield event.plain_result("格式:回复要抉择的事件卡,发送「/分身 选择 <编号>」;选 4 可附自定义行动(≤30字)")
             return
         # 强制引用识别:没引用/解析不出№标签 → 不执行,提示后返回
         eid = await self._quoted_event_id(event)
@@ -2846,7 +2849,11 @@ class OcversePlugin(Star):
                 names = "、".join(str(p.get("name", "")) for p in (ev.payload.get("participants") or []))
                 yield event.plain_result(f"这场交集是「{names}」的,没带上你就不能替他们做主啦")
                 return
-            v = await self.game.choose(gid, uid, int(n) - 1, ev=ev)
+            try:
+                v = await self.game.choose(gid, uid, int(n) - 1, ev=ev, custom=custom)
+            except GameError as e:
+                yield event.plain_result(f"❌ {e}")
+                return
         imgs = render_views([v], self._card_cfg())
         chain = self._chain(imgs)
         if chain:

@@ -318,9 +318,17 @@ def make_event(*, world, char=None, npc=None, memories: list[str] | None = None,
         f"{mem}\n"
         + recent_events_block(previous) + "\n"
         "生成一次突发遭遇:结合世界设定与角色性格/状态,事件要具体、有钩子、能做出选择。\n"
+        "大部分事件需要玩家抉择,生成 3 个选项:\n"
         '严格输出 JSON:{"title":"标题≤10字","scene":"场景描述70-120字",'
         '"options":[{"label":"选项≤8字","hint":"后果暗示≤14字"},{"label":"","hint":""},{"label":"","hint":""}]}'
-        "\n恰好3个选项,风格各异(稳健/冒险/离谱皆可)。"
+        "\n恰好3个选项,风格各异(稳健/冒险/离谱皆可)。\n"
+        "\n也可生成『即时生效』的通知事件(约占四分之一,适合:世界异象/天降馈赠/公众传闻/季节变化/"
+        "NPC 的悄悄话/天气骤变等无需群友做主的状况):这种事件不设选项、直接定局,消息只是通知大家发生了什么。\n"
+        '即时事件严格输出 JSON:{"title":"标题≤10字","scene":"场景描述40-80字","instant":true,'
+        '"narration":"演出脚本(短:80~160字,叙述+胶囊+对白自由穿插,已发生或正在发生)",'
+        '"effects":{"mood":±5~15,"stamina":±,"gold":±,"exp":0-20,"reputation":-10~10},'
+        '"memory":"一句话存档"}。'
+        "\n注意:即时事件 effects 数值克制(多数±5~15),即时事件不伤害到重伤/毁灭性程度。"
     )
 
 
@@ -352,15 +360,28 @@ def make_life_event(*, world, chars, rels: str = "",
 
 def resolve_event(*, world, char=None, event: dict, choice_idx: int,
                   state_note: str = "", previous: list[str] | None = None,
-                  heal_note: str = "") -> str:
-    """结算一次选择的 user prompt(含连贯性铁律与新文风要求)。"""
+                  heal_note: str = "", custom_action: str = "") -> str:
+    """结算一次选择的 user prompt(含连贯性铁律与新文风要求)。
+    custom_action: 选 4 自定义行动(≤30字),LLM 据此展开但保留随机性。"""
     who = char.persona_line() if char else "群里的众人"
     hp_line = (f"当前生命{char.hp}/100。" if char else "")
     opts = event.get("options") or []
-    pick = opts[choice_idx] if 0 <= choice_idx < len(opts) else {"label": "顺其自然", "hint": ""}
+    custom = (custom_action or "").strip()
+    if custom:
+        chosen_line = (
+            f"TA没有按预设选项走,而是采取了自定义行动:「{custom}」(≤30字,一句动作)。\n"
+            "【自定义行动纪律】玩家这句行动只是动作起点:LLM 负责续写出事件真正的展开——"
+            "对方怎么反应、过程中出现什么意外、结果落在哪,全部由世界/命运决定,"
+            "必须保留随机性与不可预知性。严禁把玩家没写的内容脑补成既定结局,"
+            "也绝不允许玩家那句行动之外的意图决定一切;若自定义行动超出常理(如凭空获得宝物/"
+            "直接杀死主角/操控 NPC 意志),可给出被现实打脸、或代价沉重的展开。"
+        )
+    else:
+        pick = opts[choice_idx] if 0 <= choice_idx < len(opts) else {"label": "顺其自然", "hint": ""}
+        chosen_line = f"TA选择了「{pick['label']}」({pick.get('hint','')})。"
     user = (
         f"世界:《{world.name}》。{who}遭遇了:「{event.get('title')}」——{event.get('scene')}\n"
-        f"TA选择了「{pick['label']}」({pick.get('hint','')})。{hp_line}\n"
+        f"{chosen_line}{hp_line}\n"
         "【连贯性铁律】结算必须紧接上面这场遭遇续写:同一时间、同一地点、同一批在场人物,"
         "从做出选择之后的下一秒写起。严禁跳跃到新的时间/地点,严禁引入遭遇场景里没有的新人物;"
         "dialogues 的 speaker 必须使用遭遇中出现过的角色本名(禁止「少女」「神秘人」之类代称)。\n"
@@ -394,10 +415,20 @@ def resolve_event(*, world, char=None, event: dict, choice_idx: int,
 
 
 def resolve_life_event(*, world, chars, event: dict, choice_idx: int,
-                       rels: str = "") -> str:
-    """结算群像生活事件的 user prompt。"""
+                       rels: str = "", custom_action: str = "") -> str:
+    """结算群像生活事件的 user prompt。custom_action: 选 4 自定义行动。"""
     opts = event.get("options") or []
-    pick = opts[choice_idx] if 0 <= choice_idx < len(opts) else {"label": "顺其自然", "hint": ""}
+    custom = (custom_action or "").strip()
+    if custom:
+        chosen_line = (
+            f"大家没有按预设选项走,而是采取了自定义行动:「{custom}」(一句动作)。\n"
+            "【自定义行动纪律】玩家这句行动只是动作起点:由世界/命运决定真实展开——"
+            "各角色反应、意外与结果都要保留随机性,不得让玩家一句行动直接预定结局;"
+            "若行动超常理(凭空获宝/操控他人等),可给出现实打脸或代价沉重的展开。"
+        )
+    else:
+        pick = opts[choice_idx] if 0 <= choice_idx < len(opts) else {"label": "顺其自然", "hint": ""}
+        chosen_line = f"大家共同选择了「{pick['label']}」({pick.get('hint','')})。"
     cast = "\n".join(
         f"角色{i}:{c.persona_line()},背景:{c.backstory[:600] or '未详'},体力{c.stamina}/心情{c.mood}/金币{c.gold}"
         for i, c in enumerate(chars, 1)
@@ -406,7 +437,7 @@ def resolve_life_event(*, world, chars, event: dict, choice_idx: int,
     return (
         f"世界:《{world.name}》[{world.genre}] {world.desc}\n{cast}{rel_line}\n"
         f"他们正在这场交集里:「{event.get('title')}」——{event.get('scene')}\n"
-        f"大家共同选择了「{pick['label']}」({pick.get('hint','')})。\n"
+        f"{chosen_line}\n"
         "【连贯性铁律】结算必须紧接这场交集续写:同一时间、同一地点、同一批在场角色,"
         "严禁跳到新的时间/地点或引入场景里没有的新人物;dialogues 的 speaker 用角色本名。\n"
         "请结算这段共同经历的结果:结果按『演出脚本』写成(轻小说式,合计110~200字:画面感+心理细节+结果交代清楚),"

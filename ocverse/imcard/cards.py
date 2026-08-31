@@ -272,8 +272,9 @@ def event_card(view: dict, cfg: dict) -> list[Image.Image]:
     rows.append(EmptyRow(r, 6))
     for i, opt in enumerate(p.get("options") or [], 1):
         rows.append(ChoiceRow(r, i, str(opt.get("label", "?")), str(opt.get("hint", ""))))
+    rows.append(ChoiceRow(r, 4, "✍ 自定义行动", "用自己的话行动(≤30字,附在编号后)"))
     rows.append(EmptyRow(r, 4))
-    rows.append(_para(r, f"回复本卡 +「/分身 选择 编号」做出抉择 · {view.get('expires_min', 45)} 分钟内有效",
+    rows.append(_para(r, f"回复本卡 +「/分身 选择 编号」做出抉择 · 自定义:「选择 4 + 你的行动」 · {view.get('expires_min', 45)} 分钟内有效",
                       size=int(r.font_size * 0.72), color=r.t.text_muted))
     return r.render_rows(rows, title=f"遭遇 · {p.get('title', '突发状况')}")
 
@@ -298,6 +299,23 @@ def result_card(view: dict, cfg: dict) -> list[Image.Image]:
         rows.append(TagRow(r, changes))
     rows += _echo_row(r, view.get("echo"))
     return r.render_rows(rows, title=view.get("card_title") or "抉择 · 结算")
+
+
+def notice_card(view: dict, cfg: dict) -> list[Image.Image]:
+    """即时生效的通知卡:无选项、无抉择,消息只是通知,已经定局。"""
+    r = _mk(cfg)
+    lead = view.get("char_name") or "全群"
+    rows = []
+    rows.append(PillRow(r, f"📜 {view.get('world_name', '')} · {lead} 遭遇了天意"))
+    rows += _script_block(r, view)
+    changes = view.get("changes") or []
+    if changes:
+        rows.append(EmptyRow(r, 4))
+        rows.append(TagRow(r, changes))
+    rows.append(EmptyRow(r, 4))
+    rows.append(_para(r, "(这是一则通知,没有选项,命运已经落定)",
+                      size=int(r.font_size * 0.72), color=r.t.text_muted))
+    return r.render_rows(rows, title=view.get("card_title") or "天意 · 即时事件")
 
 
 # ══════════════════════════ 主线卡 ══════════════════════════
@@ -723,6 +741,8 @@ def render_views(views: list[dict], cfg: dict) -> list[Image.Image]:
             out += event_card(v, cfg)
         elif t == "result":
             out += result_card(v, cfg)
+        elif t == "notice":
+            out += notice_card(v, cfg)
         elif t == "morning":
             out += morning_card(v, cfg)
         elif t == "arrive":
@@ -772,7 +792,9 @@ def help_card(cfg: dict, sub_prefix: str = "/分身") -> list[Image.Image]:
         ]),
         sec("📜 每天的生活(事件与卡片)", [
             "每天活跃时段随机触发事件;被动伏笔在有人说话时引爆(冲着说话的人来)",
+            "· 事件有两类:需要抉择的(选 1~3)与即时生效的(命运已定,仅通知)",
             f"回复事件卡 + {sub_prefix} 选择 <编号> — 回复(引用)事件卡后再发,按№编号精确定位并抉择",
+            f'选 4 可自定义行动:{sub_prefix} 选择 4 <你的动作> — 一句动作(≤30字),后续交给世界演绎',
             f"{sub_prefix} 找 <名字 或 @群友> [互动方式…] — 与玩家分身/生活角色互动(@ 失效时直接写名字)",
             f"{sub_prefix} npc <名字> <想做什么> — 找世界 NPC 搭话;{sub_prefix} 背包 [丢弃 <物品>] — 看随身物品",
             f"{sub_prefix} 世界 / 世界列表 — 当前世界档案(含主线进度/危险区域) / 可穿越的世界书",

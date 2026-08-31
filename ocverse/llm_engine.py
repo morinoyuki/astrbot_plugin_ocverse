@@ -429,6 +429,19 @@ class Brain:
         user = self._with_material(user, material)
         d = await self._ask_json(sys, user)
         if d and d.get("scene"):
+            # 即时生效事件:LLM 直接给出演出脚本结果与数值变化,无需玩家抉择
+            if bool(d.get("instant")):
+                ev = {
+                    "title": str(d.get("title", "突发状况"))[:12],
+                    "scene": str(d["scene"])[:180],
+                    "instant": True,
+                    "narration": str(d.get("narration") or ""),
+                    "effects": d.get("effects") if isinstance(d.get("effects"), dict) else {},
+                    "memory": str(d.get("memory", ""))[:120],
+                }
+                if npc:
+                    ev["npc"] = npc.get("name", "")
+                return BrainResult(True, ev)
             opts = []
             for o in (d.get("options") or [])[:3]:
                 if isinstance(o, dict) and o.get("label"):
@@ -529,14 +542,17 @@ class Brain:
     async def resolve_event(self, *, world, char=None, event: dict, choice_idx: int,
                             previous: list[str] | None = None,
                         state_note: str = "", material: str = "",
-                        heal_note: str = "", avatars: list[str] | None = None) -> BrainResult:
+                        heal_note: str = "", avatars: list[str] | None = None,
+                        custom_action: str = "") -> BrainResult:
         """结算一次选择。char=None(群事件)时叙述群体结果。
         state_note: 若角色当前被困,提示本次抉择可脱困;输出 state 施加特殊状态 / state_lift 解除。
-        heal_note: 角色生命与背包治疗物品提示(供 LLM 在剧情中自然使用)。"""
+        heal_note: 角色生命与背包治疗物品提示(供 LLM 在剧情中自然使用)。
+        custom_action: 选 4 自定义行动(≤30字),LLM 据此展开但保留世界随机性。"""
         sys = self.style
         user = prompts.resolve_event(
             world=world, char=char, event=event, choice_idx=choice_idx,
-            state_note=state_note, previous=previous, heal_note=heal_note)
+            state_note=state_note, previous=previous, heal_note=heal_note,
+            custom_action=custom_action)
         user = self._with_material(user, material)
         user = self._with_avatars(user, avatars)
         d = await self._ask_fixed_dialogues(
@@ -571,11 +587,13 @@ class Brain:
 
     async def resolve_life_event(self, *, world, chars, event: dict, choice_idx: int,
                                  rels: str = "", material: str = "",
-                                 avatars: list[str] | None = None) -> BrainResult:
+                                 avatars: list[str] | None = None,
+                                 custom_action: str = "") -> BrainResult:
         """结算一次群像生活事件:叙述这次交集的结果 + 各角色效果 + 羁绊变化。"""
         sys = self.style
         user = prompts.resolve_life_event(
-            world=world, chars=chars, event=event, choice_idx=choice_idx, rels=rels)
+            world=world, chars=chars, event=event, choice_idx=choice_idx, rels=rels,
+            custom_action=custom_action)
         user = self._with_material(user, material)
         user = self._with_avatars(user, avatars)
         d = await self._ask_fixed_dialogues(sys, user, limit=6)
