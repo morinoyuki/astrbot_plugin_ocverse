@@ -499,6 +499,26 @@ class Database:
             r = self._ex("SELECT COUNT(*) c FROM timeline WHERE gid=?", (gid,), "one")
         return int(r["c"])
 
+    def char_last_active(self, gid: str, uid: str) -> float:
+        """角色最近一次被任何记录触达的时间(时间线/记忆/遭遇取最大),用于判断沉默时长。
+        无任何记录时返回 0。"""
+        r = self._ex(
+            "SELECT COALESCE(MAX(ts),0) m FROM timeline WHERE gid=? AND uid=?",
+            (gid, uid), "one",
+        )
+        t = float(r["m"] or 0)
+        r2 = self._ex(
+            "SELECT COALESCE(MAX(created_at),0) m FROM memories WHERE gid=? AND uid=?",
+            (gid, uid), "one",
+        )
+        t2 = float(r2["m"] or 0)
+        r3 = self._ex(
+            "SELECT COALESCE(MAX(created_at),0) m FROM events WHERE gid=? AND uid=?",
+            (gid, uid), "one",
+        )
+        t3 = float(r3["m"] or 0)
+        return max(t, t2, t3)
+
     def recent_similar_logs(self, gid: str, uid: str, patterns: list[str], k: int = 3) -> list[str]:
         """最近 k 条同时命中所有 patterns 的日志原文(防复读:喂给 LLM 要求情节明显不同)。"""
         rows = self._ex(

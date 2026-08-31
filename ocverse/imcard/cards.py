@@ -175,7 +175,6 @@ def profile_card(ch, world, rels: list[tuple[str, int]], memories: list[str], cf
                  rel_names: dict[str, str] | None = None, extra_badges: list[str] | None = None,
                  rep: dict | None = None, items: list | None = None) -> list[Image.Image]:
     from ..config import ATTRS, exp_need
-    from ..config import rel_label
 
     r = _mk(cfg)
     rows = []
@@ -233,15 +232,23 @@ def profile_card(ch, world, rels: list[tuple[str, int]], memories: list[str], cf
                                  color=r.t.text_muted, size=int(r.font_size * 0.7)))
             return out
         rows.append(PanelRow(r, f"背包({len(items)} 件)", item_rows))
-    # 羁绊
+    # 羁绊(详细:人名 + 好感度 + 关系名)
     if rels:
         rel_rows = []
-        for uid, score in rels[:4]:
-            nm = (rel_names or {}).get(uid, uid[:8])
-            bar = "♥" * max(1, min(5, int(abs(score) / 20) + 1))
-            rel_rows.append(_para(r, f"{nm}  {score:+d} 「{rel_label(score)}」 {bar if score > 0 else '〰'}",
+        for nm, score in rels[:10]:
+            rel_name = (rel_names or {}).get(nm, "")  # 注意:这里 rel_names 实为关系名映射
+            stage = f"「{rel_name}」" if rel_name else ""
+            if score > 40:
+                mark = "💞"
+            elif score > 0:
+                mark = "💛"
+            elif score < 0:
+                mark = "🥶"
+            else:
+                mark = "〰️"
+            rel_rows.append(_para(r, f"{mark} {nm}  {score:+d} {stage}",
                                   size=int(r.font_size * 0.78), color=r.t.text_secondary))
-        rows.append(PanelRow(r, "羁绊", rel_rows))
+        rows.append(PanelRow(r, f"羁绊({len(rels[:10])})", rel_rows))
     # 近期记忆
     if memories:
         rows.append(PanelRow(r, "近期记忆", lambda: [

@@ -731,10 +731,13 @@ class Brain:
 
     async def life_char_story(self, *, world, char, other=None,
                               memories: list[str] | None = None,
-                              avatars: list[str] | None = None) -> BrainResult:
-        """持久生活角色的日常小剧场:自带经验/心情/金钱/好感等变化。"""
+                              avatars: list[str] | None = None,
+                              idle_hours: float = 0.0) -> BrainResult:
+        """持久生活角色的日常小剧场:自带经验/心情/金钱/好感等变化。
+        idle_hours: 该角色已被冷落(无任何交互)的小时数;>0 时写这段沉默期的遭遇。"""
         sys = self.style
-        user = prompts.life_char_story(world=world, char=char, other=other, memories=memories)
+        user = prompts.life_char_story(world=world, char=char, other=other,
+                                       memories=memories, idle_hours=idle_hours)
         user = self._with_avatars(user, avatars)
         d = await self._ask_fixed_dialogues(
             sys, user,

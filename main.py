@@ -168,6 +168,7 @@ class OcversePlugin(Star):
         self._task: asyncio.Task | None = None
         self._admin: AdminPanel | None = None
         self._sem = asyncio.Semaphore(2)
+        self._life_idle_cd: dict[str, float] = {}  # gid -> 上次触发静默遭遇的时间(限频)
         self._umo_map: dict[str, str] = {}      # gid -> unified_msg_origin(本会话内观察)
         self._pending: dict[str, list] = {}     # gid -> 主动卡片积压(无法主动发时)
         self._glocks: dict[str, asyncio.Lock] = {}  # 每群一把锁:LLM 调用期间锁定改数据的指令,防竞态
@@ -861,11 +862,32 @@ class OcversePlugin(Star):
     @filter.event_message_type(EventMessageType.GROUP_MESSAGE)
     @_guard
     async def on_group_msg(self, event: AstrMessageEvent):
-        """观察群消息:记录 umo + 补发积压 + 引爆已武装的被动事件。"""
+        """观察群消息:记录 umo + 补发积压 + 引爆已武装的被动事件 + 顺带唤醒静默的生活角色。"""
         gid = self._gid(event)
         if not gid:
             return
         self._remember_umo(event)
+        # 静默生活角色“活起来”:群里有动静时,若有长期没人搭理的生活角色,
+        # 低概率顺带生成TA们的沉默期遭遇(属性/生命/经验/记忆随之变化)。
+        try:
+            async with self._glock(gid):
+                threshold = self._cfgi("life_idle_trigger_hours", 0)
+                if threshold > 0:
+                    now = time.time()
+                    # 每群至多每 30 分钟触发一次,避免刷屏
+                    if now - self._life_idle_cd.get(gid, 0) > 1800:
+                        idle = self.game.idle_life_chars(gid, float(threshold))
+                        if idle:
+                            c, hrs = idle[0]
+                            v = await self.game.fire_life_event(gid, idle_hours=hrs)
+                            self._life_idle_cd[gid] = now
+                            if v:
+                                chain = self._chain_views([v])
+                                umo = self._umo_map.get(gid) or (self.db.kv_get(gid, "umo") or "")
+                                if chain and umo:
+                                    await self._send_to(umo, chain)
+        except Exception as e:
+            logger.warning(f"ocverse: 静默生活角色唤醒异常: {e}")
         pend = self._pending.get(gid)
         if pend:
             v = None
@@ -1448,7 +1470,7 @@ class OcversePlugin(Star):
 
         Args:
             name(string): 角色名字(1~12字)
-            description(string): 可选,外貌/性格/背景等设定描述
+            description(string): 必填,外貌/性格/背景等设定描述(供 AI 整理人设)
         """
         gid = self._need_gid(event)
         uid = self._uid(event)
@@ -1458,13 +1480,13 @@ class OcversePlugin(Star):
         if not name:
             return "名字不能为空。"
         desc = (description or "").strip()
-        gender, tags, backstory, llm_attrs = "保密", [], "", None
-        if desc:
-            r = await self.brain.parse_persona(desc)
-            if r.ok:
-                gender, tags, backstory, llm_attrs = r.data["gender"], r.data["tags"], r.data["backstory"], r.data.get("attrs")
-            else:
-                backstory = desc[:4000]
+        if not desc:
+            return "设定描述不能为空:请提供外貌/性格/背景等描述,让 AI 整理成人设(如:「白发蓝瞳,性格温柔沉稳,擅长剑术」)。"
+        r = await self.brain.parse_persona(desc)
+        if r.ok:
+            gender, tags, backstory, llm_attrs = r.data["gender"], r.data["tags"], r.data["backstory"], r.data.get("attrs")
+        else:
+            gender, tags, backstory, llm_attrs = "保密", [], desc[:4000], None
         async with self._glock(gid):
             ch = self.game.create_char(gid, uid, name, gender, tags, backstory, attrs=llm_attrs)
         return (
@@ -1511,13 +1533,15 @@ class OcversePlugin(Star):
 
         Args:
             name(string): 生活角色名字
-            description(string): 可选,TA 的设定/性格/来历
+            description(string): 必填,TA 的设定/性格/来历(供 AI/本地整理)
         """
         gid = self._need_gid(event)
         name = (name or "").strip()[:12]
         if not name:
             return "名字不能为空。"
         desc = (description or "").strip()
+        if not desc:
+            return "设定描述不能为空:请提供 TA 的性格/来历/特征等,让 AI 整理成档案(如:「住在雾码头的老婆婆,神秘而热心」)。"
         existing = self.db.get_char(gid, npc_uid(gid, name))
         async with self._glock(gid):
             ch = self.game.define_npc_char(gid, name, desc, self._uid(event))
@@ -2066,6 +2090,11 @@ class OcversePlugin(Star):
             return
         name = parts[0][:12]
         desc = (parts[1] if len(parts) > 1 else "").strip()
+        if not desc:
+            yield event.plain_result(
+                "❌ 定义生活角色需要设定描述:请提供 TA 的性格/来历/特征,让 AI 整理成档案。\n"
+                "例:/分身 定义角色 绫波 住在雾码头的老婆婆,神秘而热心")
+            return
         existing = self.db.get_char(gid, npc_uid(gid, name))
         async with self._glock(gid):
             ch = self.game.define_npc_char(gid, name, desc, self._uid(event))
@@ -2156,19 +2185,24 @@ class OcversePlugin(Star):
             tags = [t for t in re.split(r"[、,，/]", parts[2]) if t.strip()][:6] if len(parts) > 2 else []
             backstory = parts[3][:4000] if len(parts) > 3 else ""
         else:
-            # 自然语言:首词为名字,余下整段描述交给 AI 整理成人设
+            # 自然语言:首词为名字,余下整段描述交给 AI 整理成人设(描述必填)
             toks = rest.split(None, 1)
             name = toks[0][:12]
             desc = (toks[1] if len(toks) > 1 else "").strip()
-            gender, tags, backstory, llm_attrs = "保密", [], "", None
-            if desc:
-                yield event.plain_result("⏳ 正在整理人设,请稍候…")
-                r = await self.brain.parse_persona(desc)
-                if r.ok:
-                    gender, tags, backstory = r.data["gender"], r.data["tags"], r.data["backstory"]
-                    llm_attrs = r.data.get("attrs") or None
-                else:
-                    backstory = desc[:4000]  # AI 不可用:描述原文入背景,不丢信息
+            if not desc:
+                yield event.plain_result(
+                    "❌ 创建分身需要设定描述:请带上外貌/性格/背景等描述,让 AI 整理成人设。\n"
+                    "例:/分身 创建 森森 白发蓝瞳戴眼镜的帅哥,超级聪明的大天才,性格冷静缜密\n"
+                    "也兼容竖线速写:/分身 创建 <名字> |性别|性格,性格|背景设定…")
+                return
+            yield event.plain_result("⏳ 正在整理人设,请稍候…")
+            r = await self.brain.parse_persona(desc)
+            if r.ok:
+                gender, tags, backstory = r.data["gender"], r.data["tags"], r.data["backstory"]
+                llm_attrs = r.data.get("attrs") or None
+            else:
+                gender, tags, backstory = "保密", [], desc[:4000]
+                llm_attrs = None
         async with self._glock(gid):
             ch = self.game.create_char(gid, self._uid(event), name, gender, tags, backstory, attrs=llm_attrs)
             tip = "" if (tags and backstory) else "\n💡 建议用「/分身 编辑 性格/背景 <内容>」补全人设,事件会更有戏"
@@ -2325,7 +2359,7 @@ class OcversePlugin(Star):
     async def _profile_view(self, gid: str, uid: str) -> dict:
         ch = self.db.get_char(gid, uid)
         world = self.db.cur_world(gid)
-        rels = self.db.list_rels_for(gid, uid, 4)
+        rels = self.db.list_rels_for(gid, uid, 10)
         name_map = {c.uid: c.name for c in self.db.list_chars(gid)}
         rel_named = [(name_map.get(u, u[:8]), s) for u, s in rels]
         rel_labels = {name_map.get(u, u[:8]): self.game.rel_stage_label(gid, uid, u)

@@ -3972,9 +3972,10 @@ class Game:
         info = self.db.get_rel_full(gid, a, b)
         return C.rel_stage_label(info["score"], info["state"])
 
-    async def fire_life_event(self, gid: str) -> dict | None:
+    async def fire_life_event(self, gid: str, idle_hours: float = 0.0) -> dict | None:
         """持久生活角色的日常小剧场:随机一位(不在远征/未被困),自带经验/心情/
-        金币/属性与好感变化,让群世界里的TA们活灵活现。"""
+        金币/属性与好感变化,让群世界里的TA们活灵活现。
+        idle_hours>0: 该角色已沉默多时,写这段沉默期的遭遇(属性/生命/经验/记忆随之变化)。"""
         world = self.db.cur_world(gid)
         if not world:
             return None
@@ -3984,7 +3985,12 @@ class Game:
                  and not self._exp_companion_of(gid, c.uid)]
         if not lifes:
             return None
-        ch = random.choice(lifes)
+        if idle_hours and idle_hours > 0:
+            # 沉默期触发:挑最久没动静的那个(且确已沉默超过阈值)
+            ranked = sorted(lifes, key=lambda c: self.db.char_last_active(gid, c.uid))
+            ch = ranked[0]
+        else:
+            ch = random.choice(lifes)
         # 另一位在场者:其他角色(生活/玩家)五成概率登场
         others = [c for c in self.db.list_chars(gid)
                   if c.uid != ch.uid and not self._is_locked(c)
@@ -3992,7 +3998,7 @@ class Game:
         other = random.choice(others) if others and random.random() < 0.5 else None
         mems = await self.mem.related(gid, f"{ch.name} 日常 生活", uid=ch.uid, k=3)
         r = await self.brain.life_char_story(world=world, char=ch, other=other, memories=mems,
-                                             avatars=self._avatar_names(gid))
+                                             avatars=self._avatar_names(gid), idle_hours=idle_hours)
         d = r.data
         changes = self._apply_effects(ch, d.get("effects") or {})
         changes += self._apply_items(gid, ch.uid, d.get("items_gain"), d.get("items_lose"))
@@ -4001,11 +4007,16 @@ class Game:
             if delta:
                 self.db.bump_rel(gid, ch.uid, other.uid, delta, "日常交集")
                 changes.append(f"💞 与{other.name}好感{'+' if delta > 0 else ''}{delta}")
+        tag = f"lifestory:{_now():.0f}"
         await self.mem.remember(gid, ch.uid, "char",
                                 d.get("memory") or f"{ch.name}度过了日常的一天:{self._narr_plain(d.get('narration'), 50)}",
-                                ref=f"lifestory:{_now():.0f}")
-        self.db.append_log(gid, ch.uid, "event",
-                           f"【日常】{ch.name}:{self._narr_plain(d.get('narration'), 80)}", world.name)
+                                ref=tag)
+        if idle_hours and idle_hours > 0:
+            self.db.append_log(gid, ch.uid, "event",
+                               f"【沉默期】{ch.name}(已静默约{idle_hours:.0f}小时):{self._narr_plain(d.get('narration'), 80)}", world.name)
+        else:
+            self.db.append_log(gid, ch.uid, "event",
+                               f"【日常】{ch.name}:{self._narr_plain(d.get('narration'), 80)}", world.name)
         return {
             "type": "result",
             "gid": gid,
@@ -4047,6 +4058,23 @@ class Game:
         if not w:
             return 1
         return max(1, int((_now() - w.created_at) // 86400) + 1)
+
+    def idle_life_chars(self, gid: str, threshold_h: float) -> list[tuple[object, float]]:
+        """返回静默时长超过 threshold_h 小时的生活角色 [(角色, 静默小时数)],按静默时长降序。
+        threshold_h<=0 视为不触发。"""
+        if not threshold_h or threshold_h <= 0:
+            return []
+        now = _now()
+        out = []
+        for c in self._npc_chars(gid):
+            if self._is_locked(c) or self._on_expedition(c) or self._exp_companion_of(gid, c.uid):
+                continue
+            last = self.db.char_last_active(gid, c.uid)
+            idle = (now - last) / 3600.0 if last else 1e9  # 从未有过记录视为长期静默
+            if idle >= threshold_h:
+                out.append((c, idle))
+        out.sort(key=lambda x: -x[1])
+        return out
 
     # ══════════════ 运势 ══════════════
     def fortune(self, uid: str, name: str) -> dict:

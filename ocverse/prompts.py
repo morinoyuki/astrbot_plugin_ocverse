@@ -960,23 +960,36 @@ def expedition_offer(*, world, char, zone: dict, issuer: str, teammates: list[st
     )
 
 
-def life_char_story(*, world, char, other=None, memories=None) -> str:
-    """持久生活角色的日常小剧场:TA 自己的经历与变化(让群世界里的TA们活起来)。"""
+def life_char_story(*, world, char, other=None, memories=None, idle_hours: float = 0.0) -> str:
+    """持久生活角色的日常小剧场:TA 自己的经历与变化(让群世界里的TA们活起来)。
+    idle_hours: 该角色已被冷落(无任何交互)的小时数;>0 时写这段沉默期的遭遇。"""
     other_line = ""
     if other is not None:
         other_line = (f"\n在场者:{other.persona_line()},背景:{other.backstory[:300] or '未详'}"
                       "(TA恰好在场,可以互动、结伴,也可以只是擦肩)。")
     mem = "\n".join(memories[:3]) if memories else ""
+    if idle_hours and idle_hours > 0:
+        span = f"已过去 {idle_hours:.0f} 小时"
+        idle_line = (
+            f"\n【情况】{char.name} 已有多时没有出现在群友视野里({span}),这段时间TA一直在按自己的节奏生活。"
+            "请写这段沉默期的遭遇(120~220字):TA 这几天/几小时各自忙了什么、碰到什么、心情如何,可以是"
+            "一段进展/一次小小的麻烦/一个意外/与某个过路人的交集。不要写成『日常的一天』,而要写出『这段时间TA经历的片段』,"
+            "有始有落点,活灵活现。\n"
+            "effects 可据此给真实波动:exp 0~12、mood ±8、gold ±10、hp 轻微波动(小磕碰-5~-15或养伤恢复+5~+15)、attrs 偶尔±2(沉默期在练习/钻研什么)。"
+        )
+    else:
+        idle_line = (
+            "\n写一段TA自己的日常小剧场(120~220字,轻小说式):贴合TA的人设与世界观,"
+            "有画面、有小事件、有落点(做成了什么/心情如何/日子往前挪了一步);"
+            "不超展开,像真实生活里的一帧。对话与叙述必须贴合该世界的题材与时代。\n"
+            "effects:TA自己的变化(exp 0~8,mood ±5,gold ±5,attrs 偶尔±1,克制)。"
+        )
     return (
         f"{_world_line(world)}\n"
         f"主角(持久生活角色):{char.name} —— {char.backstory[:400] or '一名生活在群世界里的角色'}\n"
-        f"{other_line}{mem}\n"
-        "写一段TA自己的日常小剧场(120~220字,轻小说式):贴合TA的人设与世界观,"
-        "有画面、有小事件、有落点(做成了什么/心情如何/日子往前挪了一步);"
-        "不超展开,像真实生活里的一帧。对话与叙述必须贴合该世界的题材与时代。\n"
+        f"{other_line}{mem}\n{idle_line}\n"
         + SCRIPT_SPEC +
         "有在场者时至少2人开口,无在场者时可与路人交谈或自言自语;『dialogues』只是兜底,对白已入脚本则填 []。\n"
-        "effects:TA自己的变化(exp 0~8,mood ±5,gold ±5,attrs 偶尔±1,克制)。\n"
         "rel_delta:与在场者的好感变化(-3~4;无在场者时输出0)。\n"
         "items_gain/items_lose:仅在自然涉及时输出一件(捡到/买了个小东西/用掉了什么),通常为空。\n"
         '严格输出 JSON:{"narration":"演出脚本","dialogues":[{"speaker":"","text":""}],'
