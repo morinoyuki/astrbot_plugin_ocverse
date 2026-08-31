@@ -534,16 +534,43 @@ class OcversePlugin(Star):
             return False
         return False
 
+    def _prime_qqscene(self, umo: str) -> None:
+        """QQ 官方适配器主动群消息强依赖其内存里的 _session_scene 缓存(仅在收到群消息时
+        填充);机器人重启后缓存清空,send_by_session 会因 scene 缺失而静默 skip
+        ("No cached msg_id")。这里主动补记 'group' 场景 —— 配合适配器硬编码的
+        _allow_group_proactive_send=True,主动发送会走 post_group_message 通道真正发出。"""
+        if not umo or ":" not in umo:
+            return
+        try:
+            from astrbot.core.platform.message_session import MessageSesion
+            sess = MessageSesion.from_str(umo)
+            if sess.message_type.value != "GroupMessage":
+                return
+            pm = getattr(self.context, "platform_manager", None)
+            insts = getattr(pm, "platform_insts", None) if pm else None
+            if not insts:
+                return
+            for p in insts:
+                try:
+                    if getattr(p.meta(), "id", None) != sess.platform_name:
+                        continue
+                    rs = getattr(p, "remember_session_scene", None)
+                    if rs is not None:
+                        rs(sess.session_id, "group")
+                except Exception:
+                    continue
+        except Exception:
+            return
+
     async def _send_to(self, umo: str, chain: list) -> bool:
         fn = getattr(self.context, "send_message", None)
         if fn is None or not chain:
             return False
+        if self._is_qq_official(umo):
+            # QQ 官方接口:先补记 scene 缓存,使其主动发送能真正走通 send_by_session
+            # (post_group_message, 不带 msg_id 的主动推送);仍失败则交给兜底积压。
+            self._prime_qqscene(umo)
         try:
-            # QQ 官方接口主动消息不可靠:识别到该平台不尝试主动发送,
-            # 直接返回 False → 调用方把卡片积压,等群消息(@bot)时补发。
-            if self._is_qq_official(umo):
-                logger.debug(f"ocverse: qq-official 平台不主动发送,卡片积压(umo={umo})")
-                return False
             ok = await fn(umo, MessageChain(chain=chain))
             if not ok:
                 logger.debug(f"ocverse: 主动发送未命中平台(umo={umo})")
@@ -581,16 +608,12 @@ class OcversePlugin(Star):
             if not gviews:
                 continue
             umo = self._umo_map.get(gid) or (self.db.kv_get(gid, "umo") or "")
-            # QQ 官方平台:主动发送不可用,一律直接积压(有上限),等群消息 @bot 补发
-            if umo and self._is_qq_official(umo):
-                self._queue_pending(gid, gviews)
-                continue
             chain = self._chain_views(gviews)
             if umo and await self._send_to(umo, chain):
                 for v in gviews:
                     self._mark_sent(v)  # 主动送达成功 → 事件可被抉择
                 continue
-            # 无法主动发送 → 积压,等群消息时补发(补发送达后同样标记,之后才可抉择)
+            # 无法主动发送(qq-official 补记 scene 后仍失败等)→ 积压,等群消息时补发
             self._queue_pending(gid, gviews)
 
     def _queue_pending(self, gid: str, gviews: list):

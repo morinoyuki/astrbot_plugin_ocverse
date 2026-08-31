@@ -154,7 +154,11 @@ pip install -r requirements.txt   # pillow / numpy / aiohttp
 | `pending_send_max` | 10 | 主动消息积压上限(条),超过丢弃最旧卡片防溢出 |
 | `pending_send_batch` | 3 | 每次群消息补发积压卡片的批次上限(张) |
 
-> **QQ 官方接口适配**:检测到 umo 对应平台为 `qq_official` 时,不尝试主动推送(该接口主动消息受限、大概率发不出),卡片先积压;每次有人 `@bot` 触发群消息时,用消息上下文一次性补发最多 `pending_send_batch` 张积压卡片(其余留待下次)。积压总量由 `pending_send_max` 封顶。OneBot 等支持主动推送的平台不受影响,依旧到点直接推送。
+> **QQ 官方接口适配**:qq_official 适配器主动群消息依赖内存里的 scene 缓存(仅收消息时填充),
+> 机器人重启后缓存清空会导致 send_by_session 静默丢弃。插件在主动发送前会补记该缓存("组聊"),
+> 让主动推送(晨报/事件/远征等)尽量真能发出;若平台侧主动消息受限/返回失败,卡片自动转积压,
+> 等有人 @bot 触发群消息时用消息上下文补发(单次最多 `pending_send_batch` 张)。
+> OneBot 等原生支持主动推送的平台不受影响,依旧到点直接推送。
 
 完整项见 `_conf_schema.json`。
 
